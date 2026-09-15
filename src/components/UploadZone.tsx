@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Upload, Sparkles, Image as ImageIcon, Plus } from 'lucide-react';
+import { Upload, Sparkles, Image as ImageIcon, Plus, Smile } from 'lucide-react';
 import {
   generateWhiteBgDemoGif,
   generateBlackBgDemoGif,
@@ -132,38 +132,45 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, disable
             : 'border-stone-300 hover:border-indigo-500 hover:bg-stone-50/80 bg-stone-50/40'
         } ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
       >
-        <div className="w-16 h-16 rounded-2xl bg-white shadow-md border border-stone-200 flex items-center justify-center text-indigo-600 group-hover:scale-105 group-hover:border-indigo-200 transition-transform mb-4">
+        <div className="w-16 h-16 rounded-2xl bg-white shadow-md border border-stone-200 flex items-center justify-center text-indigo-600 group-hover:scale-105 group-hover:border-indigo-200 transition-transform mb-3">
           <Upload className="w-8 h-8" />
         </div>
 
-        <h3 className="text-lg font-semibold text-stone-900 mb-1.5 text-center">
+        <div className="mb-2">
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-[#07c160] px-3 py-1 rounded-full border border-emerald-200 shadow-2xs">
+            <Smile className="w-3.5 h-3.5" />
+            支持一键生成微信表情包 (240×240 / 白色保护描边 / &lt;1MB)
+          </span>
+        </div>
+
+        <h3 className="text-lg font-bold text-stone-900 mb-1.5 text-center">
           点击选择或将 GIF 动图 / 普通图片拖放到此处
         </h3>
-        <p className="text-sm text-stone-500 text-center max-w-md mb-4">
-          支持批量上传 GIF 动图及 PNG、JPG、JPEG、WebP、BMP 格式图片，浏览器本地纯离线处理
+        <p className="text-sm text-stone-500 text-center max-w-lg mb-4">
+          支持批量上传 GIF 动图及 PNG、JPG、JPEG、WebP、BMP 格式图片，一键批量去除底色或制作微信表情包
         </p>
 
         <div className="flex items-center gap-2">
           <button
             id="select-files-btn"
             type="button"
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors"
+            className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors"
             onClick={(e) => {
               e.stopPropagation();
               fileInputRef.current?.click();
             }}
           >
             <Plus className="w-4 h-4" />
-            选择动图 / 图片文件 (可多选)
+            选择动图 / 图片文件 (支持多选)
           </button>
         </div>
 
         <div className="mt-4 flex flex-wrap justify-center items-center gap-2 text-xs text-stone-400">
           <span>支持 Ctrl+V 直接粘贴剪贴板图片</span>
           <span>•</span>
-          <span>动图自动导出为透明 GIF，静态图导出为高清透明 PNG</span>
+          <span>动图导出透明 GIF，静态图导出透明 PNG</span>
           <span>•</span>
-          <span>不限大小与数量</span>
+          <span className="text-[#07c160] font-medium">支持微信标准规范导出</span>
         </div>
       </div>
 

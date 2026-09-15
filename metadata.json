@@ -1,6 +1,6 @@
 {
   "name": "Batch GIF Background Remover",
-  "description": "Batch convert GIF and image backgrounds into transparent with auto-color detection, eyedropper, tolerance tuning, and ZIP export.",
+  "description": "微信表情包一站式切片与全套审核物料生成器：支持多宫格视频与静态大图（PNG/JPG/WEBP）一键精确切片为 240×240 微信标准表情，自动智能背景透明化与 2px 白描边，自动生成横幅、封面、图标、赞赏引导与致谢等全套微信官方审核物料并一键 ZIP 规范打包，内置批量背景透明化工具。",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

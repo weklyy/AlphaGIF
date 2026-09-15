@@ -1,6 +1,11 @@
 import { parseGIF, decompressFrames } from 'gifuct-js';
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
-import { RemovalOptions, ProcessedGifResult, FrameInfo } from '../types';
+import {
+  RemovalOptions,
+  ProcessedGifResult,
+  FrameInfo,
+  WeChatStickerOptions,
+} from '../types';
 
 export interface DecodedGif {
   width: number;
@@ -392,6 +397,192 @@ export function removeBackgroundFromFrame(
   return resultData;
 }
 
+// Apply white (or custom color) outline around transparent edges (WeChat Sticker Specification)
+export function applyWhiteOutline(
+  imageData: ImageData,
+  outlineWidth: number = 2,
+  outlineColorHex: string = '#ffffff'
+): ImageData {
+  const width = imageData.width;
+  const height = imageData.height;
+  const totalPixels = width * height;
+  const src = imageData.data;
+
+  const result = new ImageData(new Uint8ClampedArray(src), width, height);
+  const dst = result.data;
+
+  if (outlineWidth <= 0) return result;
+
+  const outlineRgb = hexToRgb(outlineColorHex);
+
+  // Mark foreground (opaque) pixels
+  const isForeground = new Uint8Array(totalPixels);
+  for (let i = 0; i < totalPixels; i++) {
+    if (src[i * 4 + 3] > 64) {
+      isForeground[i] = 1;
+    }
+  }
+
+  // Precompute circle neighbor offsets
+  const offsets: { dx: number; dy: number }[] = [];
+  const rSquared = outlineWidth * outlineWidth + 0.4;
+  for (let dy = -outlineWidth; dy <= outlineWidth; dy++) {
+    for (let dx = -outlineWidth; dx <= outlineWidth; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      if (dx * dx + dy * dy <= rSquared) {
+        offsets.push({ dx, dy });
+      }
+    }
+  }
+
+  // Identify pixels that are transparent (not foreground), but adjacent to foreground
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (isForeground[idx] === 1) continue; // Foreground pixel, keep original color
+
+      let nearForeground = false;
+      for (let k = 0; k < offsets.length; k++) {
+        const nx = x + offsets[k].dx;
+        const ny = y + offsets[k].dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+          if (isForeground[ny * width + nx] === 1) {
+            nearForeground = true;
+            break;
+          }
+        }
+      }
+
+      if (nearForeground) {
+        const p = idx * 4;
+        dst[p] = outlineRgb.r;
+        dst[p + 1] = outlineRgb.g;
+        dst[p + 2] = outlineRgb.b;
+        dst[p + 3] = 255; // Solid opaque stroke
+      }
+    }
+  }
+
+  return result;
+}
+
+// Format and render a transparent frame according to WeChat Sticker rules (240x240, padding, outline, caption)
+export function renderFrameWithWeChatOptions(
+  transparentImageData: ImageData,
+  wechat?: WeChatStickerOptions
+): ImageData {
+  if (!wechat || !wechat.enabled) {
+    return transparentImageData;
+  }
+
+  const origW = transparentImageData.width;
+  const origH = transparentImageData.height;
+
+  let targetW = origW;
+  let targetH = origH;
+  let drawW = origW;
+  let drawH = origH;
+  let drawX = 0;
+  let drawY = 0;
+
+  const hasCaption = !!wechat.captionText && wechat.captionText.trim().length > 0;
+  const captionHeightReserve = hasCaption ? 32 : 0;
+
+  if (wechat.standardSize === '240') {
+    targetW = 240;
+    targetH = 240;
+    // Leave safe padding for outline (2px-4px) and optional caption
+    const maxUsableW = 240 - 24; // 216
+    const maxUsableH = 240 - 24 - (hasCaption ? 28 : 0);
+    const scale = Math.min(maxUsableW / origW, maxUsableH / origH);
+    drawW = Math.max(1, Math.round(origW * scale));
+    drawH = Math.max(1, Math.round(origH * scale));
+    drawX = Math.round((240 - drawW) / 2);
+
+    if (hasCaption && wechat.captionPosition === 'top') {
+      drawY = Math.round((240 - captionHeightReserve - drawH) / 2) + captionHeightReserve;
+    } else if (hasCaption) {
+      drawY = Math.round((240 - captionHeightReserve - drawH) / 2);
+    } else {
+      drawY = Math.round((240 - drawH) / 2);
+    }
+  } else if (wechat.standardSize === 'max240') {
+    const maxDim = Math.max(origW, origH);
+    const scale = maxDim > 240 ? (240 - (hasCaption ? 28 : 12)) / maxDim : 1;
+    drawW = Math.max(1, Math.round(origW * scale));
+    drawH = Math.max(1, Math.round(origH * scale));
+    targetW = Math.max(drawW, hasCaption ? 160 : drawW);
+    targetH = drawH + (hasCaption ? captionHeightReserve : 0);
+    drawX = Math.round((targetW - drawW) / 2);
+    drawY = hasCaption && wechat.captionPosition === 'top' ? captionHeightReserve : 0;
+  }
+
+  // Draw scaled transparent image onto canvas
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return transparentImageData;
+
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = origW;
+  tempCanvas.height = origH;
+  const tempCtx = tempCanvas.getContext('2d');
+  if (tempCtx) {
+    tempCtx.putImageData(transparentImageData, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(tempCanvas, drawX, drawY, drawW, drawH);
+  }
+
+  let currentImageData = ctx.getImageData(0, 0, targetW, targetH);
+
+  // Apply WeChat standard white outline if enabled
+  if (wechat.addWhiteOutline) {
+    currentImageData = applyWhiteOutline(
+      currentImageData,
+      wechat.outlineWidth ?? 2,
+      wechat.outlineColor ?? '#ffffff'
+    );
+  }
+
+  // Apply caption text if present
+  if (hasCaption) {
+    ctx.putImageData(currentImageData, 0, 0);
+    const fontSize =
+      wechat.captionFontSize ||
+      (targetW >= 240 ? 22 : Math.max(14, Math.round(targetW / 10)));
+
+    ctx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+
+    const text = wechat.captionText!.trim();
+    const textX = targetW / 2;
+    let textY = targetH - 8;
+    if (wechat.captionPosition === 'top') {
+      textY = fontSize + 4;
+      ctx.textBaseline = 'alphabetic';
+    } else {
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    // Outer stroke (black outline by default)
+    ctx.lineWidth = Math.max(3, Math.round(fontSize / 4.5));
+    ctx.strokeStyle = wechat.captionStrokeColor || '#000000';
+    ctx.strokeText(text, textX, textY);
+
+    // Inner text fill
+    ctx.fillStyle = wechat.captionColor || '#ffffff';
+    ctx.fillText(text, textX, textY);
+
+    currentImageData = ctx.getImageData(0, 0, targetW, targetH);
+  }
+
+  return currentImageData;
+}
+
 // Encode processed frames into a GIF blob
 export async function encodeTransparentGif(
   frames: { imageData: ImageData; delay: number }[],
@@ -491,28 +682,50 @@ export async function processGifItem(
   options: RemovalOptions,
   onProgress?: (progress: number, message: string) => void
 ): Promise<ProcessedGifResult> {
+  const isWeChat = !!options.wechat?.enabled;
   onProgress?.(10, '正在解析 GIF 帧...');
   const arrayBuffer = await file.arrayBuffer();
   const decoded = await decodeGif(arrayBuffer);
 
-  onProgress?.(30, '正在处理背景透明化...');
-  const processedFrames = decoded.frames.map((frame) => ({
-    imageData: removeBackgroundFromFrame(frame.imageData, options),
-    delay: frame.delay,
-  }));
+  onProgress?.(
+    30,
+    isWeChat
+      ? '正在生成微信表情包 (背景透明化 + 240x240规范 + 白色描边)...'
+      : '正在处理背景透明化...'
+  );
 
-  onProgress?.(50, '正在重新编码透明 GIF...');
+  const processedFrames = decoded.frames.map((frame) => {
+    const transparentData = removeBackgroundFromFrame(frame.imageData, options);
+    const finalData = isWeChat
+      ? renderFrameWithWeChatOptions(transparentData, options.wechat)
+      : transparentData;
+    return {
+      imageData: finalData,
+      delay: frame.delay,
+    };
+  });
+
+  const finalWidth = processedFrames[0]?.imageData.width || decoded.width;
+  const finalHeight = processedFrames[0]?.imageData.height || decoded.height;
+
+  onProgress?.(
+    50,
+    isWeChat
+      ? '正在重新编码微信标准表情包 GIF (<1MB 体积优化)...'
+      : '正在重新编码透明 GIF...'
+  );
+
   const blob = await encodeTransparentGif(
     processedFrames,
-    decoded.width,
-    decoded.height,
+    finalWidth,
+    finalHeight,
     (pct) => {
       const mappedPct = Math.round(50 + (pct / 100) * 45);
       onProgress?.(mappedPct, `正在编码 GIF 帧 (${pct}%)...`);
     }
   );
 
-  onProgress?.(100, '处理完成');
+  onProgress?.(100, isWeChat ? '微信表情包生成完成' : '处理完成');
   const url = URL.createObjectURL(blob);
 
   return {
@@ -520,9 +733,10 @@ export async function processGifItem(
     url,
     size: blob.size,
     frameCount: decoded.frames.length,
-    width: decoded.width,
-    height: decoded.height,
+    width: finalWidth,
+    height: finalHeight,
     format: 'gif',
+    isWeChatSticker: isWeChat,
   };
 }
 
@@ -532,16 +746,33 @@ export async function processStaticImageItem(
   options: RemovalOptions,
   onProgress?: (progress: number, message: string) => void
 ): Promise<ProcessedGifResult> {
+  const isWeChat = !!options.wechat?.enabled;
   onProgress?.(15, '正在读取并解析图片...');
   const decoded = await decodeStaticImage(file);
 
-  onProgress?.(45, '正在分析并消除背景色...');
-  const processedImageData = removeBackgroundFromFrame(decoded.frames[0].imageData, options);
+  onProgress?.(
+    45,
+    isWeChat
+      ? '正在消除背景并应用微信表情包规范 (白色描边与自适应)...'
+      : '正在分析并消除背景色...'
+  );
 
-  onProgress?.(80, '正在生成高清无损透明 PNG...');
+  const rawTransparentData = removeBackgroundFromFrame(decoded.frames[0].imageData, options);
+  const processedImageData = isWeChat
+    ? renderFrameWithWeChatOptions(rawTransparentData, options.wechat)
+    : rawTransparentData;
+
+  const targetWidth = processedImageData.width;
+  const targetHeight = processedImageData.height;
+
+  onProgress?.(
+    80,
+    isWeChat ? '正在导出微信表情包透明 PNG...' : '正在生成高清无损透明 PNG...'
+  );
+
   const canvas = document.createElement('canvas');
-  canvas.width = decoded.width;
-  canvas.height = decoded.height;
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('无法创建 Canvas 2D 绘图上下文');
   ctx.putImageData(processedImageData, 0, 0);
@@ -553,7 +784,7 @@ export async function processStaticImageItem(
     }, 'image/png');
   });
 
-  onProgress?.(100, '处理完成');
+  onProgress?.(100, isWeChat ? '微信表情包生成完成' : '处理完成');
   const url = URL.createObjectURL(blob);
 
   return {
@@ -561,9 +792,10 @@ export async function processStaticImageItem(
     url,
     size: blob.size,
     frameCount: 1,
-    width: decoded.width,
-    height: decoded.height,
+    width: targetWidth,
+    height: targetHeight,
     format: 'png',
+    isWeChatSticker: isWeChat,
   };
 }
 

@@ -1100,7 +1100,7 @@ export default function App() {
               }`}
             >
               <Film className="w-4 h-4" />
-              <span>标签 1：视频多宫格切片 (动态表情包)</span>
+              <span>动态表情（视频多宫格切片）</span>
               {slicedStickers.length > 0 && (
                 <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
                   {slicedStickers.length}
@@ -1118,7 +1118,7 @@ export default function App() {
               }`}
             >
               <ImageIcon className="w-4 h-4" />
-              <span>标签 2：静态图多宫格切片 (静态表情包)</span>
+              <span>静态表情（静态图多宫格切片）</span>
               {imageSlicedStickers.length > 0 && (
                 <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
                   {imageSlicedStickers.length}
@@ -1136,7 +1136,7 @@ export default function App() {
               }`}
             >
               <Sliders className="w-4 h-4" />
-              <span>标签 3：批量背景透明化工具</span>
+              <span>背景透明化工具</span>
               {items.length > 0 && (
                 <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-indigo-100 text-indigo-800 font-mono">
                   {items.length}

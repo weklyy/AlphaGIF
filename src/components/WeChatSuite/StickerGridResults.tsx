@@ -82,7 +82,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl border border-indigo-200 transition-colors shadow-2xs"
           >
             <Sliders className="w-3.5 h-3.5 text-indigo-600" />
-            <span>全部导入「背景透明化工具」(Tab 2) 继续微调</span>
+            <span>全部导入「背景透明化工具」继续微调</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -236,7 +236,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   <button
                     type="button"
                     onClick={() => onImportSingleToTab2(sticker)}
-                    title="导入到 Tab 2 背景透明化工具进行高级微调"
+                    title="导入到背景透明化工具进行高级微调"
                     className="py-1 px-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-indigo-200/60"
                   >
                     <Sliders className="w-3 h-3" />

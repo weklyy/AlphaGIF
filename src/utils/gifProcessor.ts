@@ -176,6 +176,78 @@ export async function decodeGif(arrayBuffer: ArrayBuffer): Promise<DecodedGif> {
   };
 }
 
+// Check if a file is an animated GIF
+export function isGifFile(file: File): boolean {
+  return file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
+}
+
+// Decode regular static image (PNG, JPG, JPEG, WEBP, BMP, SVG, etc.)
+export async function decodeStaticImage(file: File): Promise<DecodedGif> {
+  let imgBitmap: ImageBitmap | HTMLImageElement;
+  let width = 0;
+  let height = 0;
+
+  if (typeof createImageBitmap === 'function') {
+    try {
+      imgBitmap = await createImageBitmap(file);
+      width = imgBitmap.width;
+      height = imgBitmap.height;
+    } catch {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('无法读取该图片文件'));
+        img.src = url;
+      });
+      URL.revokeObjectURL(url);
+      width = img.naturalWidth || img.width;
+      height = img.naturalHeight || img.height;
+      imgBitmap = img;
+    }
+  } else {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('无法读取该图片文件'));
+      img.src = url;
+    });
+    URL.revokeObjectURL(url);
+    width = img.naturalWidth || img.width;
+    height = img.naturalHeight || img.height;
+    imgBitmap = img;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('无法创建 Canvas 上下文');
+  ctx.drawImage(imgBitmap, 0, 0);
+  const imageData = ctx.getImageData(0, 0, width, height);
+
+  const frames: FrameInfo[] = [{ imageData, delay: 0 }];
+  const detectedBgColor = detectBackgroundColor(frames, width, height);
+
+  return {
+    width,
+    height,
+    frames,
+    detectedBgColor,
+  };
+}
+
+// Unified decoder for both GIF and static images
+export async function decodeMediaFile(file: File): Promise<DecodedGif> {
+  if (isGifFile(file)) {
+    const arrayBuffer = await file.arrayBuffer();
+    return decodeGif(arrayBuffer);
+  } else {
+    return decodeStaticImage(file);
+  }
+}
+
 // Process a single ImageData frame by removing background color
 export function removeBackgroundFromFrame(
   imageData: ImageData,
@@ -450,5 +522,61 @@ export async function processGifItem(
     frameCount: decoded.frames.length,
     width: decoded.width,
     height: decoded.height,
+    format: 'gif',
   };
 }
+
+// Complete processing pipeline for a static image file (PNG / JPG / WebP etc.)
+export async function processStaticImageItem(
+  file: File,
+  options: RemovalOptions,
+  onProgress?: (progress: number, message: string) => void
+): Promise<ProcessedGifResult> {
+  onProgress?.(15, '正在读取并解析图片...');
+  const decoded = await decodeStaticImage(file);
+
+  onProgress?.(45, '正在分析并消除背景色...');
+  const processedImageData = removeBackgroundFromFrame(decoded.frames[0].imageData, options);
+
+  onProgress?.(80, '正在生成高清无损透明 PNG...');
+  const canvas = document.createElement('canvas');
+  canvas.width = decoded.width;
+  canvas.height = decoded.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('无法创建 Canvas 2D 绘图上下文');
+  ctx.putImageData(processedImageData, 0, 0);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((b) => {
+      if (b) resolve(b);
+      else reject(new Error('导出透明 PNG 失败'));
+    }, 'image/png');
+  });
+
+  onProgress?.(100, '处理完成');
+  const url = URL.createObjectURL(blob);
+
+  return {
+    blob,
+    url,
+    size: blob.size,
+    frameCount: 1,
+    width: decoded.width,
+    height: decoded.height,
+    format: 'png',
+  };
+}
+
+// Unified processor for either GIF or static image
+export async function processMediaItem(
+  file: File,
+  options: RemovalOptions,
+  onProgress?: (progress: number, message: string) => void
+): Promise<ProcessedGifResult> {
+  if (isGifFile(file)) {
+    return processGifItem(file, options, onProgress);
+  } else {
+    return processStaticImageItem(file, options, onProgress);
+  }
+}
+

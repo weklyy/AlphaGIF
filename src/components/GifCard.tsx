@@ -14,10 +14,11 @@ import {
   ChevronUp,
   Split,
   Eye,
+  FileImage,
 } from 'lucide-react';
 import { GifItem, RemovalOptions, PreviewBgMode, FrameInfo } from '../types';
 import {
-  decodeGif,
+  decodeMediaFile,
   hexToRgb,
   rgbToHex,
   removeBackgroundFromFrame,
@@ -49,14 +50,12 @@ export const GifCard: React.FC<GifCardProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationTimerRef = useRef<number | null>(null);
 
-  // Decode GIF locally for the interactive player, scrubber, and eyedropper
+  // Decode media file locally for the interactive player, scrubber, and eyedropper
   useEffect(() => {
     let cancelled = false;
     async function loadFrames() {
       try {
-        const buffer = await item.file.arrayBuffer();
-        if (cancelled) return;
-        const decoded = await decodeGif(buffer);
+        const decoded = await decodeMediaFile(item.file);
         if (cancelled) return;
         setDecodedFrames(decoded.frames);
       } catch (err) {
@@ -219,7 +218,9 @@ export const GifCard: React.FC<GifCardProps> = ({
     const a = document.createElement('a');
     a.href = item.result.url;
     const baseName = item.name.replace(/\.[^/.]+$/, '');
-    a.download = `${baseName}_transparent.gif`;
+    const isGif = item.result?.format === 'gif' || (item.result?.format === undefined && item.mediaType === 'gif');
+    const ext = isGif ? 'gif' : 'png';
+    a.download = `${baseName}_T.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -234,6 +235,15 @@ export const GifCard: React.FC<GifCardProps> = ({
       <div className="p-4 border-b border-stone-100 flex items-center justify-between gap-3 bg-stone-50/50">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
+            <span
+              className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded border shrink-0 ${
+                item.mediaType === 'gif'
+                  ? 'bg-purple-50 text-purple-700 border-purple-200'
+                  : 'bg-blue-50 text-blue-700 border-blue-200'
+              }`}
+            >
+              {item.mediaType === 'gif' ? 'GIF 动图' : '静态图片'}
+            </span>
             <h4
               className="text-sm font-semibold text-stone-900 truncate"
               title={item.name}
@@ -259,7 +269,11 @@ export const GifCard: React.FC<GifCardProps> = ({
           <div className="flex items-center gap-3 text-xs text-stone-500 mt-1">
             <span>{item.width} × {item.height} px</span>
             <span>•</span>
-            <span>{item.frameCount || decodedFrames.length} 帧</span>
+            <span>
+              {item.mediaType === 'gif'
+                ? `${item.frameCount || decodedFrames.length} 帧`
+                : '单帧静态图'}
+            </span>
             <span>•</span>
             <span>原大小: {formatBytes(item.originalSize)}</span>
             {item.result && (
@@ -278,7 +292,7 @@ export const GifCard: React.FC<GifCardProps> = ({
           type="button"
           onClick={() => onDeleteItem(item.id)}
           className="p-1.5 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-          title="移除此 GIF"
+          title="移除此项目"
         >
           <Trash2 className="w-4 h-4" />
         </button>
@@ -383,8 +397,8 @@ export const GifCard: React.FC<GifCardProps> = ({
           )}
         </div>
 
-        {/* Frame Scrubber & Play/Pause */}
-        {decodedFrames.length > 1 && (
+        {/* Frame Scrubber & Play/Pause (for animated GIF) or Static Indicator */}
+        {decodedFrames.length > 1 ? (
           <div className="w-full mt-3 flex items-center gap-2 text-xs">
             <button
               type="button"
@@ -408,6 +422,14 @@ export const GifCard: React.FC<GifCardProps> = ({
               }}
               className="w-full accent-indigo-600 h-1.5 bg-stone-200 rounded cursor-pointer"
             />
+          </div>
+        ) : (
+          <div className="w-full mt-2.5 flex items-center justify-between text-[11px] text-stone-500 bg-stone-50 px-2.5 py-1.5 rounded-lg border border-stone-200/60">
+            <span className="flex items-center gap-1.5 font-medium text-stone-700">
+              <FileImage className="w-3.5 h-3.5 text-indigo-500" />
+              单帧静态图片
+            </span>
+            <span className="text-stone-400">将导出为高清透明 PNG</span>
           </div>
         )}
       </div>
@@ -595,7 +617,11 @@ export const GifCard: React.FC<GifCardProps> = ({
           ) : (
             <Sparkles className="w-3.5 h-3.5" />
           )}
-          {item.status === 'done' ? '重新导出' : '生成透明 GIF'}
+          {item.status === 'done'
+            ? '重新导出'
+            : item.mediaType === 'image'
+            ? '生成透明 PNG'
+            : '生成透明 GIF'}
         </button>
 
         <button
@@ -604,7 +630,7 @@ export const GifCard: React.FC<GifCardProps> = ({
           disabled={!item.result?.url}
           onClick={handleDownloadSingle}
           className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs rounded-lg shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-          title="下载此透明 GIF"
+          title={`下载此透明 ${item.mediaType === 'image' ? 'PNG' : 'GIF'}`}
         >
           <Download className="w-3.5 h-3.5" />
           下载

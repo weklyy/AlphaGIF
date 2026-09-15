@@ -216,7 +216,7 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
         </div>
 
         <span className="text-[11px] text-stone-400">
-          每个卡片内可单独针对某张 GIF 独立调节容差、颜色与微调
+          每个卡片内可单独针对某张图片/动图独立调节容差、颜色与微调
         </span>
       </div>
 
@@ -226,14 +226,14 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
           <div className="flex items-center justify-between">
             <span className="font-semibold text-stone-800 flex items-center gap-1.5">
               <Sliders className="w-3.5 h-3.5 text-indigo-600" />
-              统一设定参数（可一键同步给全部 GIF）
+              统一设定参数（可一键同步给全部图片与动图）
             </span>
             <button
               type="button"
               onClick={handleApplyToAll}
               className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md font-medium transition-colors shadow-xs"
             >
-              应用到全部 {totalCount} 个 GIF
+              应用到全部 {totalCount} 个项目
             </button>
           </div>
 

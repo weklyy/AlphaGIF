@@ -17,14 +17,18 @@ export interface ProcessedGifResult {
   frameCount: number;
   width: number;
   height: number;
+  format?: 'gif' | 'png';
 }
 
 export type ProcessStatus = 'idle' | 'processing' | 'done' | 'error';
+
+export type MediaType = 'gif' | 'image';
 
 export interface GifItem {
   id: string;
   name: string;
   file: File;
+  mediaType: MediaType;
   originalUrl: string;
   originalSize: number;
   width: number;

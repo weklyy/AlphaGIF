@@ -249,3 +249,80 @@ export async function generateGreenScreenDemoGif(): Promise<File> {
     'rocket_greenscreen.gif'
   );
 }
+
+// 4. Static photo/sticker demo (PNG image on solid white background)
+export async function generateDemoStaticImage(): Promise<File> {
+  const canvas = document.createElement('canvas');
+  const w = 180;
+  const h = 180;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+
+  // Pure white background
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+
+  // Coffee cup / icon badge in center
+  ctx.save();
+  ctx.translate(w / 2, h / 2 + 10);
+
+  // Cup saucer
+  ctx.beginPath();
+  ctx.ellipse(0, 48, 55, 12, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#475569';
+  ctx.stroke();
+
+  // Cup body
+  ctx.beginPath();
+  ctx.moveTo(-36, -10);
+  ctx.lineTo(36, -10);
+  ctx.quadraticCurveTo(34, 40, 0, 42);
+  ctx.quadraticCurveTo(-34, 40, -36, -10);
+  ctx.closePath();
+  ctx.fillStyle = '#6366f1';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#312e81';
+  ctx.stroke();
+
+  // Cup handle
+  ctx.beginPath();
+  ctx.arc(38, 12, 16, -Math.PI * 0.4, Math.PI * 0.4);
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = '#312e81';
+  ctx.stroke();
+
+  // Inner coffee & white foam heart (tests contiguous edge flood fill - inner white shouldn't vanish!)
+  ctx.beginPath();
+  ctx.ellipse(0, -10, 34, 10, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#78350f';
+  ctx.fill();
+
+  // White latte art heart
+  ctx.beginPath();
+  ctx.arc(-5, -12, 4, 0, Math.PI * 2);
+  ctx.arc(5, -12, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+
+  // Steam (white clouds above)
+  ctx.beginPath();
+  ctx.arc(-10, -32, 7, 0, Math.PI * 2);
+  ctx.arc(0, -38, 9, 0, Math.PI * 2);
+  ctx.arc(12, -32, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#cbd5e1';
+  ctx.fill();
+
+  ctx.restore();
+
+  const blob = await new Promise<Blob>((resolve) => {
+    canvas.toBlob((b) => resolve(b!), 'image/png');
+  });
+
+  return new File([blob], 'coffee_sticker.png', { type: 'image/png' });
+}
+

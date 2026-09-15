@@ -17,7 +17,11 @@ import {
   Zap,
 } from 'lucide-react';
 import { GifItem, RemovalOptions, PreviewBgMode } from './types';
-import { decodeGif, processGifItem } from './utils/gifProcessor';
+import {
+  decodeMediaFile,
+  processMediaItem,
+  isGifFile,
+} from './utils/gifProcessor';
 import { UploadZone } from './components/UploadZone';
 import { BatchControls } from './components/BatchControls';
 import { GifCard } from './components/GifCard';
@@ -42,17 +46,19 @@ export default function App() {
     for (const file of files) {
       const id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const url = URL.createObjectURL(file);
+      const isGif = isGifFile(file);
 
       // Default temporary item
       const item: GifItem = {
         id,
         name: file.name,
         file,
+        mediaType: isGif ? 'gif' : 'image',
         originalUrl: url,
         originalSize: file.size,
         width: 0,
         height: 0,
-        frameCount: 0,
+        frameCount: isGif ? 0 : 1,
         detectedBgColor: '#ffffff',
         options: {
           targetColor: '#ffffff',
@@ -72,8 +78,7 @@ export default function App() {
     // Inspect metadata for each item in background
     for (const item of newItems) {
       try {
-        const buffer = await item.file.arrayBuffer();
-        const decoded = await decodeGif(buffer);
+        const decoded = await decodeMediaFile(item.file);
         setItems((prev) =>
           prev.map((i) =>
             i.id === item.id
@@ -92,19 +97,19 @@ export default function App() {
           )
         );
       } catch (err) {
-        console.error('Failed to parse GIF metadata for', item.name, err);
+        console.error('Failed to parse media metadata for', item.name, err);
       }
     }
   }, []);
 
-  // Update options for a specific GIF
+  // Update options for a specific item
   const handleUpdateOptions = useCallback((id: string, options: RemovalOptions) => {
     setItems((prev) =>
       prev.map((item) => (item.id === id ? { ...item, options } : item))
     );
   }, []);
 
-  // Process a single GIF item
+  // Process a single item
   const handleProcessItem = useCallback(async (id: string) => {
     const currentItem = items.find((i) => i.id === id);
     if (!currentItem) return;
@@ -124,7 +129,7 @@ export default function App() {
     );
 
     try {
-      const result = await processGifItem(
+      const result = await processMediaItem(
         currentItem.file,
         currentItem.options,
         (progress, message) => {
@@ -150,7 +155,7 @@ export default function App() {
         )
       );
     } catch (err: any) {
-      console.error('Failed to process GIF:', err);
+      console.error('Failed to process media:', err);
       setItems((prev) =>
         prev.map((i) =>
           i.id === id
@@ -172,7 +177,6 @@ export default function App() {
 
     const pendingOrAll = items;
     for (const item of pendingOrAll) {
-      // Process each item
       setItems((prev) =>
         prev.map((i) =>
           i.id === item.id
@@ -187,7 +191,7 @@ export default function App() {
       );
 
       try {
-        const result = await processGifItem(
+        const result = await processMediaItem(
           item.file,
           item.options,
           (progress, message) => {
@@ -231,10 +235,10 @@ export default function App() {
     }
 
     setIsProcessingAny(false);
-    showNotification('全部 GIF 批量转换已完成！');
+    showNotification('批量透明化转换已全部完成！');
   };
 
-  // Download all completed GIFs as a single ZIP archive
+  // Download all completed items as a single ZIP archive
   const handleDownloadAllZip = async () => {
     const completedItems = items.filter((i) => i.status === 'done' && i.result?.blob);
     if (completedItems.length === 0) return;
@@ -245,7 +249,9 @@ export default function App() {
     for (let index = 0; index < completedItems.length; index++) {
       const item = completedItems[index];
       const baseName = item.name.replace(/\.[^/.]+$/, '');
-      const fileName = `${baseName}_transparent.gif`;
+      const isGif = item.result?.format === 'gif' || (item.result?.format === undefined && item.mediaType === 'gif');
+      const ext = isGif ? 'gif' : 'png';
+      const fileName = `${baseName}_T.${ext}`;
       if (item.result?.blob) {
         zip.file(fileName, item.result.blob);
       }
@@ -255,7 +261,7 @@ export default function App() {
     const downloadUrl = URL.createObjectURL(zipBlob);
     const a = document.createElement('a');
     a.href = downloadUrl;
-    a.download = `transparent_gifs_${Date.now()}.zip`;
+    a.download = `images_T_${Date.now()}.zip`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -291,7 +297,7 @@ export default function App() {
         options: { ...options },
       }))
     );
-    showNotification('已成功将参数同步应用至全部 GIF');
+    showNotification('已成功将参数同步应用至全部图片/动图');
   };
 
   return (
@@ -313,10 +319,10 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-base font-bold text-stone-900 leading-tight">
-                批量 GIF 背景透明化工具
+                批量 GIF & 图片背景透明化工具
               </h1>
               <p className="text-xs text-stone-500">
-                Batch GIF Background Remover • 纯本地离线处理 • 智能识色扣除
+                Batch GIF & Image Background Remover • 纯本地离线处理 • 智能抠除背景
               </p>
             </div>
           </div>
@@ -324,7 +330,7 @@ export default function App() {
           <div className="flex items-center gap-4 text-xs text-stone-500">
             <div className="hidden sm:flex items-center gap-1.5 text-stone-600 font-medium">
               <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>本地极速处理，动图不上传任何服务器</span>
+              <span>本地极速处理，图片不上传任何服务器</span>
             </div>
             {items.length > 0 && (
               <span className="bg-stone-100 text-stone-700 font-semibold px-2.5 py-1 rounded-full border border-stone-200">
@@ -358,7 +364,7 @@ export default function App() {
               onPreviewBgChange={setPreviewBg}
             />
 
-            {/* Grid of GIF Cards */}
+            {/* Grid of Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {items.map((item) => (
                 <GifCard
@@ -382,10 +388,10 @@ export default function App() {
                 <Sparkles className="w-4 h-4" />
               </div>
               <h4 className="text-sm font-semibold text-stone-900 mb-1">
-                智能边缘与四周背景识别
+                全格式支持与智能背景识别
               </h4>
               <p className="text-xs text-stone-500 leading-relaxed">
-                自动采样动图四个边角与边界像素，智能推测底色（如纯白、纯黑或绿幕），无需手动逐个填写色值。
+                完美支持 GIF 动图以及 PNG、JPG、JPEG、WebP、BMP 普通静态图片。自动采样四个边角与边界像素，智能推测底色。
               </p>
             </div>
 
@@ -397,7 +403,7 @@ export default function App() {
                 边缘连通泛洪消除算法
               </h4>
               <p className="text-xs text-stone-500 leading-relaxed">
-                仅从动图外边缘向内消除背景，完美保护角色主体内部的高光、白色眼珠、白色服饰，避免空洞破损。
+                仅从画面外边缘向内消除背景，完美保护角色主体内部的高光、白色眼珠、白色服饰，避免空洞破损。
               </p>
             </div>
 
@@ -409,7 +415,7 @@ export default function App() {
                 批量导出与打包下载 ZIP
               </h4>
               <p className="text-xs text-stone-500 leading-relaxed">
-                可一次性上传几十个 GIF 动图，统一调参或单独微调，处理完成后一键打包生成 ZIP 压缩包下载到本地。
+                动图导出透明 GIF，静态图片导出高清透明 PNG。可一次性批量转换并一键打包为 ZIP 压缩包下载到本地。
               </p>
             </div>
           </div>
@@ -419,7 +425,7 @@ export default function App() {
       {/* Footer */}
       <footer className="mt-auto py-6 border-t border-stone-200 bg-white text-center text-xs text-stone-400">
         <p>
-          Batch GIF Background Remover • 批量 GIF 背景透明化转换器 • 遵循标准 GIF89a 规范与透明通道编码
+          Batch GIF & Image Background Remover • 批量 GIF & 图片背景透明化工具 • 本地高性能纯离线处理
         </p>
       </footer>
     </div>

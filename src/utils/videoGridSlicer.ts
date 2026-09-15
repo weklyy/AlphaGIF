@@ -1,6 +1,7 @@
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { GridConfig, SlicedStickerItem } from '../types';
 import { removeBackgroundFromFrame, applyWhiteOutline } from './gifProcessor';
+import { calculateCellBounds } from './gridGeometry';
 
 // Generate a demo 16-grid animated video file (4x4)
 export async function generateDemo16GridVideo(): Promise<{ file: File; duration: number }> {
@@ -250,7 +251,26 @@ export async function sliceVideoIntoStickers(
   config: GridConfig,
   onProgress?: (progress: number, currentCell: number, totalCells: number, statusText: string) => void
 ): Promise<SlicedStickerItem[]> {
-  const { cols, rows, cropArea, paddingInset, startTime, endTime, speed, fps, autoTransparent, bgColor, tolerance, addWhiteOutline, outlineWidth } = config;
+  const {
+    cols,
+    rows,
+    cropArea,
+    paddingInset,
+    startTime,
+    endTime,
+    speed,
+    fps,
+    autoTransparent,
+    bgColor,
+    tolerance,
+    addWhiteOutline,
+    outlineWidth,
+    colSplits,
+    rowSplits,
+    cellOverrides,
+    layoutMode,
+    independentBoxes,
+  } = config;
 
   const totalCells = cols * rows;
   const vidW = videoSource.videoWidth || 960;
@@ -325,16 +345,31 @@ export async function sliceVideoIntoStickers(
     for (let c = 0; c < totalCells; c++) {
       const { col, row } = cellFrames[c];
 
-      // Calculate crop rectangle with padding inset to avoid neighboring bleed
-      const rawSx = gridX + col * cellW + paddingInset;
-      const rawSy = gridY + row * cellH + paddingInset;
-      const rawSw = Math.max(5, cellW - paddingInset * 2);
-      const rawSh = Math.max(5, cellH - paddingInset * 2);
+      // Calculate crop rectangle with internal splits, padding inset, and per-cell overrides
+      const cellBounds = calculateCellBounds({
+        cropX: gridX,
+        cropY: gridY,
+        cropW: gridW,
+        cropH: gridH,
+        cols,
+        rows,
+        col,
+        row,
+        cellIndex: c,
+        layoutMode,
+        independentBox: independentBoxes?.[c],
+        colSplits,
+        rowSplits,
+        cellOverride: cellOverrides?.[c],
+        paddingInset: paddingInset || 0,
+        sourceWidth: vidW,
+        sourceHeight: vidH,
+      });
 
-      const sx = Math.max(0, Math.min(vidW - 1, rawSx));
-      const sy = Math.max(0, Math.min(vidH - 1, rawSy));
-      const sw = Math.max(1, Math.min(vidW - sx, rawSw));
-      const sh = Math.max(1, Math.min(vidH - sy, rawSh));
+      const sx = cellBounds.sx;
+      const sy = cellBounds.sy;
+      const sw = cellBounds.sw;
+      const sh = cellBounds.sh;
 
       sampleCtx.clearRect(0, 0, 240, 240);
       // Center and scale inside 240x240 box

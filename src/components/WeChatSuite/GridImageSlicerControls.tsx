@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   Scissors,
   CheckCircle2,
@@ -21,13 +21,26 @@ import {
   ChevronLeft,
   ChevronRight,
   Check,
+  Wand2,
+  Target,
+  Crosshair,
+  RefreshCcw,
+  Move,
 } from 'lucide-react';
-import { ImageGridConfig, GridPreset, GridCropArea } from '../../types';
+import { ImageGridConfig, GridPreset, GridCropArea, CellOverride } from '../../types';
 import {
   removeBackgroundFromFrame,
   applyWhiteOutline,
   rgbToHex,
 } from '../../utils/gifProcessor';
+import {
+  getDefaultSplits,
+  normalizeSplits,
+  getColWidthsPercent,
+  getRowHeightsPercent,
+  calculateCellBounds,
+  autoDetectGridSplits,
+} from '../../utils/gridGeometry';
 
 interface GridImageSlicerControlsProps {
   imageFile: File;
@@ -78,8 +91,24 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     isHealthy: 'good',
   });
 
+  const cropBoxRef = useRef<HTMLDivElement>(null);
+  const [activeDraggingSplit, setActiveDraggingSplit] = useState<{
+    type: 'col' | 'row';
+    index: number;
+  } | null>(null);
+  const [autoAlignToast, setAutoAlignToast] = useState<{
+    message: string;
+    type: 'success' | 'info';
+  } | null>(null);
+
   // Active cropArea with fallback
   const cropArea: GridCropArea = config.cropArea || { x: 0, y: 0, width: 100, height: 100 };
+
+  // Normalized splits & column/row percentages
+  const validColSplits = normalizeSplits(config.colSplits, config.cols);
+  const validRowSplits = normalizeSplits(config.rowSplits, config.rows);
+  const colPercents = getColWidthsPercent(config.colSplits, config.cols);
+  const rowPercents = getRowHeightsPercent(config.rowSplits, config.rows);
 
   // Calculate current margins (%)
   const marginTop = Math.round(cropArea.y * 10) / 10;
@@ -96,18 +125,201 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
   };
 
   const setPreset = (preset: GridPreset) => {
+    let cols = 4;
+    let rows = 4;
     if (preset === '16') {
-      onConfigChange({ ...config, preset: '16', cols: 4, rows: 4 });
+      cols = 4; rows = 4;
     } else if (preset === '15') {
-      onConfigChange({ ...config, preset: '15', cols: 5, rows: 3 });
+      cols = 5; rows = 3;
     } else if (preset === '9') {
-      onConfigChange({ ...config, preset: '9', cols: 3, rows: 3 });
+      cols = 3; rows = 3;
     } else if (preset === '20') {
-      onConfigChange({ ...config, preset: '20', cols: 5, rows: 4 });
+      cols = 5; rows = 4;
     } else {
-      onConfigChange({ ...config, preset: 'custom' });
+      cols = config.cols; rows = config.rows;
     }
+
+    onConfigChange({
+      ...config,
+      preset,
+      cols,
+      rows,
+      colSplits: getDefaultSplits(cols),
+      rowSplits: getDefaultSplits(rows),
+      cellOverrides: {},
+    });
   };
+
+  // Dragging internal divider lines (Tier 2)
+  const handleSplitPointerDown = (e: React.PointerEvent, type: 'col' | 'row', index: number) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    const cropEl = cropBoxRef.current;
+    if (!cropEl) return;
+    const cropRect = cropEl.getBoundingClientRect();
+
+    setActiveDraggingSplit({ type, index });
+
+    const startCoord = type === 'col' ? e.clientX : e.clientY;
+    const splits = type === 'col' ? [...validColSplits] : [...validRowSplits];
+    const initialRatio = splits[index];
+
+    const onPointerMove = (moveEv: PointerEvent) => {
+      if (type === 'col') {
+        const deltaPx = moveEv.clientX - startCoord;
+        const deltaRatio = deltaPx / cropRect.width;
+        let newRatio = initialRatio + deltaRatio;
+
+        const minPrev = index === 0 ? 0.02 : splits[index - 1] + 0.02;
+        const maxNext = index === splits.length - 1 ? 0.98 : splits[index + 1] - 0.02;
+        newRatio = Math.max(minPrev, Math.min(maxNext, newRatio));
+
+        const updated = [...splits];
+        updated[index] = Math.round(newRatio * 1000) / 1000;
+        onConfigChange({
+          ...config,
+          colSplits: updated,
+        });
+      } else {
+        const deltaPx = moveEv.clientY - startCoord;
+        const deltaRatio = deltaPx / cropRect.height;
+        let newRatio = initialRatio + deltaRatio;
+
+        const minPrev = index === 0 ? 0.02 : splits[index - 1] + 0.02;
+        const maxNext = index === splits.length - 1 ? 0.98 : splits[index + 1] - 0.02;
+        newRatio = Math.max(minPrev, Math.min(maxNext, newRatio));
+
+        const updated = [...splits];
+        updated[index] = Math.round(newRatio * 1000) / 1000;
+        onConfigChange({
+          ...config,
+          rowSplits: updated,
+        });
+      }
+    };
+
+    const onPointerUp = () => {
+      setActiveDraggingSplit(null);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  };
+
+  // Smart Auto-align / Snap to gutters (Tier 1)
+  const handleAutoAlignSplits = () => {
+    if (!imgRef.current) return;
+    const img = imgRef.current;
+    const nw = img.naturalWidth || 1024;
+    const nh = img.naturalHeight || 1024;
+
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = nw;
+    offCanvas.height = nh;
+    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+    if (!offCtx) return;
+
+    offCtx.drawImage(img, 0, 0, nw, nh);
+    const detected = autoDetectGridSplits(offCtx, nw, nh, cropArea, config.cols, config.rows);
+
+    onConfigChange({
+      ...config,
+      colSplits: detected.colSplits,
+      rowSplits: detected.rowSplits,
+    });
+    setAutoAlignToast({
+      message: '✨ 已智能对齐内部各格分割线至内容缝隙！',
+      type: 'success',
+    });
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  const handleResetSplits = () => {
+    onConfigChange({
+      ...config,
+      colSplits: getDefaultSplits(config.cols),
+      rowSplits: getDefaultSplits(config.rows),
+    });
+    setAutoAlignToast({
+      message: '已恢复均匀等距分割线',
+      type: 'info',
+    });
+    setTimeout(() => setAutoAlignToast(null), 2500);
+  };
+
+  // Single-Cell Micro Offset & Dimension Fine-Tuning (Tier 3)
+  const currentCellOverride = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+
+  const handleUpdateOverride = (field: keyof CellOverride, value: number) => {
+    const prev = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+    const updated = { ...prev, [field]: value };
+    const isZero = (updated.dx || 0) === 0 && (updated.dy || 0) === 0 && (updated.dw || 0) === 0 && (updated.dh || 0) === 0;
+
+    const newOverrides = { ...(config.cellOverrides || {}) };
+    if (isZero) {
+      delete newOverrides[inspectCellIndex];
+    } else {
+      newOverrides[inspectCellIndex] = updated;
+    }
+
+    onConfigChange({
+      ...config,
+      cellOverrides: newOverrides,
+    });
+  };
+
+  const handleResetCurrentOverride = () => {
+    if (!config.cellOverrides?.[inspectCellIndex]) return;
+    const newOverrides = { ...(config.cellOverrides || {}) };
+    delete newOverrides[inspectCellIndex];
+    onConfigChange({
+      ...config,
+      cellOverrides: newOverrides,
+    });
+  };
+
+  const handleResetAllOverrides = () => {
+    onConfigChange({
+      ...config,
+      cellOverrides: {},
+    });
+  };
+
+  // Keyboard shortcut listener for micro-tuning active cell
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+      const step = e.shiftKey ? 5 : 1;
+      let handled = false;
+      const current = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+
+      if (e.key === 'ArrowLeft') {
+        handleUpdateOverride('dx', Math.max(-50, (current.dx || 0) - step));
+        handled = true;
+      } else if (e.key === 'ArrowRight') {
+        handleUpdateOverride('dx', Math.min(50, (current.dx || 0) + step));
+        handled = true;
+      } else if (e.key === 'ArrowUp') {
+        handleUpdateOverride('dy', Math.max(-50, (current.dy || 0) - step));
+        handled = true;
+      } else if (e.key === 'ArrowDown') {
+        handleUpdateOverride('dy', Math.min(50, (current.dy || 0) + step));
+        handled = true;
+      }
+
+      if (handled) {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inspectCellIndex, config]);
 
   // Helper to update cropArea directly
   const updateCrop = (newCrop: Partial<GridCropArea>) => {
@@ -272,19 +484,32 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     const cropW = Math.max(10, (cropArea.width / 100) * nw);
     const cropH = Math.max(10, (cropArea.height / 100) * nh);
 
-    const cellW = cropW / config.cols;
-    const cellH = cropH / config.rows;
-
     const total = config.cols * config.rows;
     const safeIdx = Math.max(0, Math.min(total - 1, inspectCellIndex));
     const col = safeIdx % config.cols;
     const row = Math.floor(safeIdx / config.cols);
 
-    const inset = Math.max(0, config.paddingInset || 0);
-    const srcX = cropX + col * cellW + inset;
-    const srcY = cropY + row * cellH + inset;
-    const srcW = Math.max(2, cellW - inset * 2);
-    const srcH = Math.max(2, cellH - inset * 2);
+    const cellBounds = calculateCellBounds({
+      cropX,
+      cropY,
+      cropW,
+      cropH,
+      cols: config.cols,
+      rows: config.rows,
+      col,
+      row,
+      colSplits: config.colSplits,
+      rowSplits: config.rowSplits,
+      cellOverride: config.cellOverrides?.[safeIdx],
+      paddingInset: config.paddingInset || 0,
+      sourceWidth: nw,
+      sourceHeight: nh,
+    });
+
+    const srcX = cellBounds.sx;
+    const srcY = cellBounds.sy;
+    const srcW = cellBounds.sw;
+    const srcH = cellBounds.sh;
 
     canvas.width = 240;
     canvas.height = 240;
@@ -366,6 +591,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     config.tolerance,
     config.addWhiteOutline,
     config.outlineWidth,
+    config.colSplits,
+    config.rowSplits,
+    config.cellOverrides,
     inspectCellIndex,
   ]);
 
@@ -590,6 +818,53 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
             </div>
           </div>
 
+          {/* 3-Tier Grid Alignment & Adjustment Action Bar */}
+          <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200/90 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-bold text-stone-700 flex items-center gap-1.5">
+                <Sliders className="w-3.5 h-3.5 text-emerald-600" />
+                <span>分格对齐方式:</span>
+              </span>
+              <button
+                type="button"
+                onClick={handleAutoAlignSplits}
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                title="自动扫描图中各小图边缘及缝隙，自动吸附对齐内部网格线"
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                <span>智能吸附边缘缝隙</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleResetSplits}
+                className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                title="恢复所有内部线为均匀等距"
+              >
+                <RefreshCcw className="w-3 h-3 text-stone-500" />
+                <span>重置均分</span>
+              </button>
+            </div>
+
+            <div className="text-[11px] text-stone-500 flex items-center gap-1.5">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+              <span>拖拽图内绿色中线可调宽窄，选中单格可在右侧像素级微调</span>
+            </div>
+          </div>
+
+          {/* Toast Notification for Auto-Align */}
+          {autoAlignToast && (
+            <div
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition-all ${
+                autoAlignToast.type === 'success'
+                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-300'
+                  : 'bg-stone-100 text-stone-800 border border-stone-300'
+              }`}
+            >
+              <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>{autoAlignToast.message}</span>
+            </div>
+          )}
+
           {/* Interactive Image Container */}
           <div
             ref={imgContainerRef}
@@ -653,6 +928,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
 
             {/* Draggable & Resizable Active Crop Box */}
             <div
+              ref={cropBoxRef}
               className="absolute border-2 border-emerald-400 bg-emerald-500/10 shadow-lg cursor-move z-20 touch-none select-none group"
               style={{
                 left: `${cropArea.x}%`,
@@ -684,52 +960,120 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 )}
               </div>
 
-              {/* Internal Grid Matrix (Cols x Rows) */}
+              {/* Internal Grid Matrix (Cols x Rows with dynamic split widths) */}
               <div
                 className="w-full h-full grid pointer-events-none relative z-10"
                 style={{
-                  gridTemplateColumns: `repeat(${config.cols}, 1fr)`,
-                  gridTemplateRows: `repeat(${config.rows}, 1fr)`,
+                  gridTemplateColumns: colPercents.map((p) => `${p}%`).join(' '),
+                  gridTemplateRows: rowPercents.map((p) => `${p}%`).join(' '),
                 }}
               >
                 {Array.from({ length: totalCells }).map((_, idx) => {
                   const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
                   const isSelected = idx === safeIdx;
+                  const override = config.cellOverrides?.[idx];
+                  const hasOverride =
+                    override &&
+                    ((override.dx || 0) !== 0 ||
+                      (override.dy || 0) !== 0 ||
+                      (override.dw || 0) !== 0 ||
+                      (override.dh || 0) !== 0);
+
                   return (
                     <div
                       key={idx}
                       className={`border transition-all pointer-events-none relative p-1 flex items-start justify-between ${
                         isSelected
-                          ? 'border-amber-400 bg-amber-400/15 ring-2 ring-amber-400/80 z-20'
-                          : 'border-emerald-400/50'
+                          ? 'border-amber-400 bg-amber-400/20 ring-2 ring-amber-400/90 z-20'
+                          : 'border-emerald-400/40'
                       }`}
                     >
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setInspectCellIndex(idx);
-                        }}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded leading-none backdrop-blur-2xs shadow-2xs transition-colors pointer-events-auto cursor-pointer ${
-                          isSelected
-                            ? 'bg-amber-500 text-stone-950 ring-1 ring-amber-300'
-                            : 'bg-black/75 text-emerald-300 hover:bg-black/90 hover:text-amber-300'
-                        }`}
-                        title={`点击选择第 ${(idx + 1).toString().padStart(2, '0')} 格质检`}
-                      >
-                        {(idx + 1).toString().padStart(2, '0')}
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setInspectCellIndex(idx);
+                          }}
+                          onPointerDown={(e) => e.stopPropagation()}
+                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded leading-none backdrop-blur-2xs shadow-2xs transition-colors pointer-events-auto cursor-pointer ${
+                            isSelected
+                              ? 'bg-amber-500 text-stone-950 ring-1 ring-amber-300'
+                              : 'bg-black/75 text-emerald-300 hover:bg-black/90 hover:text-amber-300'
+                          }`}
+                          title={`点击选择第 ${(idx + 1).toString().padStart(2, '0')} 格质检与微调`}
+                        >
+                          {(idx + 1).toString().padStart(2, '0')}
+                        </button>
+                        {hasOverride && (
+                          <span
+                            className="text-[8px] font-mono px-1 py-0.2 rounded bg-amber-500 text-stone-950 font-black pointer-events-none shadow-xs"
+                            title={`此格微调: X:${override.dx || 0} Y:${override.dy || 0} W:${override.dw || 0} H:${override.dh || 0}`}
+                          >
+                            微调
+                          </span>
+                        )}
+                      </div>
 
                       {isSelected && (
                         <span className="text-[9px] font-bold bg-amber-400 text-stone-950 px-1 rounded shadow-xs pointer-events-none">
-                          质检格
+                          选中微调
                         </span>
                       )}
                     </div>
                   );
                 })}
               </div>
+
+              {/* Tier 2: Draggable Vertical Internal Dividers */}
+              {validColSplits.map((split, k) => (
+                <div
+                  key={`col-split-${k}`}
+                  className="absolute top-0 bottom-0 z-30 group/split pointer-events-auto touch-none cursor-col-resize flex items-center justify-center -translate-x-1/2 select-none"
+                  style={{
+                    left: `${split * 100}%`,
+                    width: '18px',
+                  }}
+                  onPointerDown={(e) => handleSplitPointerDown(e, 'col', k)}
+                  title={`拖动调节第 ${k + 1} 列与第 ${k + 2} 列内部间距 (位置: ${Math.round(split * 100)}%)`}
+                >
+                  <div
+                    className={`w-[2px] h-full transition-colors ${
+                      activeDraggingSplit?.type === 'col' && activeDraggingSplit?.index === k
+                        ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)]'
+                        : 'bg-emerald-400/80 group-hover/split:bg-amber-400'
+                    }`}
+                  />
+                  <div className="absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white border-2 border-emerald-600 shadow-md group-hover/split:border-amber-500 group-hover/split:scale-110 transition-transform flex items-center justify-center">
+                    <span className="w-1 h-2 border-l border-r border-stone-400" />
+                  </div>
+                </div>
+              ))}
+
+              {/* Tier 2: Draggable Horizontal Internal Dividers */}
+              {validRowSplits.map((split, j) => (
+                <div
+                  key={`row-split-${j}`}
+                  className="absolute left-0 right-0 z-30 group/split pointer-events-auto touch-none cursor-row-resize flex items-center justify-center -translate-y-1/2 select-none"
+                  style={{
+                    top: `${split * 100}%`,
+                    height: '18px',
+                  }}
+                  onPointerDown={(e) => handleSplitPointerDown(e, 'row', j)}
+                  title={`拖动调节第 ${j + 1} 行与第 ${j + 2} 行内部间距 (位置: ${Math.round(split * 100)}%)`}
+                >
+                  <div
+                    className={`h-[2px] w-full transition-colors ${
+                      activeDraggingSplit?.type === 'row' && activeDraggingSplit?.index === j
+                        ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)]'
+                        : 'bg-emerald-400/80 group-hover/split:bg-amber-400'
+                    }`}
+                  />
+                  <div className="absolute left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-white border-2 border-emerald-600 shadow-md group-hover/split:border-amber-500 group-hover/split:scale-110 transition-transform flex items-center justify-center">
+                    <span className="h-1 w-2 border-t border-b border-stone-400" />
+                  </div>
+                </div>
+              ))}
 
               {/* 4 Draggable Boundary Edge Bars for effortless margin adjustments */}
               <div
@@ -879,13 +1223,16 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                   min="1"
                   max="8"
                   value={config.cols}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newCols = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
                     onConfigChange({
                       ...config,
                       preset: 'custom',
-                      cols: Math.max(1, Math.min(8, parseInt(e.target.value) || 1)),
-                    })
-                  }
+                      cols: newCols,
+                      colSplits: getDefaultSplits(newCols),
+                      cellOverrides: {},
+                    });
+                  }}
                   className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-mono"
                 />
               </div>
@@ -896,13 +1243,16 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                   min="1"
                   max="8"
                   value={config.rows}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newRows = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
                     onConfigChange({
                       ...config,
                       preset: 'custom',
-                      rows: Math.max(1, Math.min(8, parseInt(e.target.value) || 1)),
-                    })
-                  }
+                      rows: newRows,
+                      rowSplits: getDefaultSplits(newRows),
+                      cellOverrides: {},
+                    });
+                  }}
                   className="w-full px-2.5 py-1.5 rounded-lg border border-stone-300 bg-white text-xs font-mono"
                 />
               </div>
@@ -1010,6 +1360,180 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 }
                 className="w-full accent-[#07c160] cursor-pointer"
               />
+            </div>
+          </div>
+
+          {/* Section 2.5: Tier 3 Single-Cell Micro-Adjustment & Offset */}
+          <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-bold text-stone-900 text-xs">
+                <Target className="w-3.5 h-3.5 text-amber-600" />
+                <span>
+                  单格像素级微调 (第 {(Math.max(0, Math.min(totalCells - 1, inspectCellIndex)) + 1).toString().padStart(2, '0')} 格)
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {((currentCellOverride.dx || 0) !== 0 ||
+                  (currentCellOverride.dy || 0) !== 0 ||
+                  (currentCellOverride.dw || 0) !== 0 ||
+                  (currentCellOverride.dh || 0) !== 0) && (
+                  <button
+                    type="button"
+                    onClick={handleResetCurrentOverride}
+                    className="text-[11px] text-amber-800 hover:text-amber-950 font-medium underline cursor-pointer"
+                  >
+                    重置此格
+                  </button>
+                )}
+                {Object.keys(config.cellOverrides || {}).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleResetAllOverrides}
+                    className="text-[11px] text-stone-500 hover:text-stone-700 underline cursor-pointer"
+                  >
+                    清空全部微调
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="text-[11px] text-stone-500 bg-white p-2 rounded-lg border border-stone-200/80 flex flex-wrap items-center justify-between gap-1">
+              <span>
+                支持快捷键微调：键盘 <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">←</kbd> <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">→</kbd> <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">↑</kbd> <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">↓</kbd>（按住 Shift 步进 5px）
+              </span>
+              <span className="font-mono text-amber-700 font-bold">
+                X:{currentCellOverride.dx || 0}px Y:{currentCellOverride.dy || 0}px
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {/* X Offset */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">水平偏移 (X)</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dx || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-40"
+                  max="40"
+                  step="1"
+                  value={currentCellOverride.dx || 0}
+                  onChange={(e) => handleUpdateOverride('dx', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-5, -1, 0, 1, 5].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dx', 0);
+                        else handleUpdateOverride('dx', Math.max(-40, Math.min(40, (currentCellOverride.dx || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Y Offset */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">垂直偏移 (Y)</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dy || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-40"
+                  max="40"
+                  step="1"
+                  value={currentCellOverride.dy || 0}
+                  onChange={(e) => handleUpdateOverride('dy', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-5, -1, 0, 1, 5].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dy', 0);
+                        else handleUpdateOverride('dy', Math.max(-40, Math.min(40, (currentCellOverride.dy || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Width Expand/Shrink */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">宽度微扩/微缩</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dw || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-30"
+                  max="30"
+                  step="1"
+                  value={currentCellOverride.dw || 0}
+                  onChange={(e) => handleUpdateOverride('dw', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-4, -1, 0, 1, 4].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dw', 0);
+                        else handleUpdateOverride('dw', Math.max(-30, Math.min(30, (currentCellOverride.dw || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Height Expand/Shrink */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">高度微扩/微缩</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dh || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-30"
+                  max="30"
+                  step="1"
+                  value={currentCellOverride.dh || 0}
+                  onChange={(e) => handleUpdateOverride('dh', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-4, -1, 0, 1, 4].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dh', 0);
+                        else handleUpdateOverride('dh', Math.max(-30, Math.min(30, (currentCellOverride.dh || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 

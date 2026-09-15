@@ -62,18 +62,32 @@ export type PreviewBgMode = 'checker' | 'checker-dark' | 'white' | 'dark' | 'neo
 
 export type GridPreset = '16' | '15' | '9' | '20' | 'custom';
 
+export type SlicerLayoutMode = 'grid' | 'independent';
+
 export interface GridCropArea {
-  x: number; // 0 to 100 (% of video width)
-  y: number; // 0 to 100 (% of video height)
-  width: number; // 5 to 100 (% of video width)
-  height: number; // 5 to 100 (% of video height)
+  x: number; // 0 to 100 (% of video/image width)
+  y: number; // 0 to 100 (% of video/image height)
+  width: number; // 5 to 100 (% of video/image width)
+  height: number; // 5 to 100 (% of video/image height)
+}
+
+export interface CellOverride {
+  dx?: number; // X offset in natural pixels (positive = right, negative = left)
+  dy?: number; // Y offset in natural pixels (positive = down, negative = up)
+  dw?: number; // Width delta in natural pixels
+  dh?: number; // Height delta in natural pixels
 }
 
 export interface GridConfig {
   preset: GridPreset;
+  layoutMode?: SlicerLayoutMode; // 'grid' (linked N-grid) | 'independent' (N separate individual boxes)
   cols: number;
   rows: number;
   cropArea: GridCropArea; // Manual adjustable region for grid cropping
+  independentBoxes?: Record<number, GridCropArea>; // per-cell independent { x, y, width, height } in 0..100% of media
+  colSplits?: number[]; // [0..1] normalized positions of internal vertical dividers (length cols - 1)
+  rowSplits?: number[]; // [0..1] normalized positions of internal horizontal dividers (length rows - 1)
+  cellOverrides?: Record<number, CellOverride>; // per-cell fine-tune offsets keyed by cell index (0..totalCells-1)
   paddingInset: number; // 0 to 12 px margin inside each cell to avoid bleed
   startTime: number; // trim start in seconds
   endTime: number; // trim end in seconds
@@ -88,9 +102,14 @@ export interface GridConfig {
 
 export interface ImageGridConfig {
   preset: GridPreset;
+  layoutMode?: SlicerLayoutMode; // 'grid' | 'independent'
   cols: number;
   rows: number;
   cropArea: GridCropArea; // Manual adjustable region for grid cropping
+  independentBoxes?: Record<number, GridCropArea>; // per-cell independent { x, y, width, height } in 0..100% of media
+  colSplits?: number[]; // [0..1] normalized positions of internal vertical dividers (length cols - 1)
+  rowSplits?: number[]; // [0..1] normalized positions of internal horizontal dividers (length rows - 1)
+  cellOverrides?: Record<number, CellOverride>; // per-cell fine-tune offsets keyed by cell index (0..totalCells-1)
   paddingInset: number; // 0 to 12 px margin inside each cell to avoid bleed
   autoTransparent: boolean; // remove background color
   bgColor: string; // target background color (default '#ffffff')

@@ -27,13 +27,28 @@ import {
   ChevronLeft,
   ChevronRight,
   SplitSquareVertical,
+  Wand2,
+  Target,
+  RefreshCcw,
+  Minimize2,
+  LayoutGrid,
+  Grid,
 } from 'lucide-react';
-import { GridConfig, GridPreset, GridCropArea } from '../../types';
+import { GridConfig, GridPreset, GridCropArea, CellOverride, SlicerLayoutMode } from '../../types';
 import {
   removeBackgroundFromFrame,
   applyWhiteOutline,
   rgbToHex,
 } from '../../utils/gifProcessor';
+import {
+  getDefaultSplits,
+  normalizeSplits,
+  getColWidthsPercent,
+  getRowHeightsPercent,
+  calculateCellBounds,
+  autoDetectGridSplits,
+  getIndependentBoxesFromGrid,
+} from '../../utils/gridGeometry';
 
 interface GridSlicerControlsProps {
   videoUrl: string;
@@ -88,11 +103,473 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     health: 'good',
   });
 
+  const cropBoxRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  const [activeDraggingSplit, setActiveDraggingSplit] = useState<{
+    type: 'col' | 'row';
+    index: number;
+  } | null>(null);
+  const [autoAlignToast, setAutoAlignToast] = useState<{
+    message: string;
+    type: 'success' | 'info';
+  } | null>(null);
+
   // Active cropArea with fallback
   const cropArea: GridCropArea = config.cropArea || { x: 0, y: 0, width: 100, height: 100 };
   const currentSpeed = config.speed || 1.0;
   const rawClipDuration = Math.max(0.1, config.endTime - config.startTime);
   const effectiveStickerDuration = rawClipDuration / currentSpeed;
+
+  const totalCells = config.cols * config.rows;
+  const layoutMode: SlicerLayoutMode = config.layoutMode || 'grid';
+
+  // Normalized splits & column/row percentages
+  const validColSplits = normalizeSplits(config.colSplits, config.cols);
+  const validRowSplits = normalizeSplits(config.rowSplits, config.rows);
+  const colPercents = getColWidthsPercent(config.colSplits, config.cols);
+  const rowPercents = getRowHeightsPercent(config.rowSplits, config.rows);
+
+  // Compute current independent boxes with fallback from grid
+  const currentIndependentBoxes = config.independentBoxes || getIndependentBoxesFromGrid(
+    cropArea,
+    config.cols,
+    config.rows,
+    config.colSplits,
+    config.rowSplits,
+    config.cellOverrides,
+    videoDimensions.width,
+    videoDimensions.height
+  );
+
+  // Switch between connected 'grid' mode and 'independent' boxes mode
+  const handleSwitchLayoutMode = (newMode: SlicerLayoutMode) => {
+    if (newMode === 'independent') {
+      const boxes = config.independentBoxes && Object.keys(config.independentBoxes).length > 0
+        ? config.independentBoxes
+        : getIndependentBoxesFromGrid(
+            cropArea,
+            config.cols,
+            config.rows,
+            config.colSplits,
+            config.rowSplits,
+            config.cellOverrides,
+            videoDimensions.width,
+            videoDimensions.height
+          );
+      onConfigChange({
+        ...config,
+        layoutMode: 'independent',
+        independentBoxes: boxes,
+      });
+      setAutoAlignToast({
+        message: `已切换为独立小方块模式：共 ${totalCells} 个独立选框，均可单独拖拽与拉伸调整大小！`,
+        type: 'success',
+      });
+      setTimeout(() => setAutoAlignToast(null), 3500);
+    } else {
+      onConfigChange({
+        ...config,
+        layoutMode: 'grid',
+      });
+      setAutoAlignToast({
+        message: '已切换为连通整网格模式',
+        type: 'info',
+      });
+      setTimeout(() => setAutoAlignToast(null), 2500);
+    }
+  };
+
+  // Re-initialize independent boxes from current grid alignment
+  const handleResetIndependentBoxesFromGrid = () => {
+    const boxes = getIndependentBoxesFromGrid(
+      cropArea,
+      config.cols,
+      config.rows,
+      config.colSplits,
+      config.rowSplits,
+      config.cellOverrides,
+      videoDimensions.width,
+      videoDimensions.height
+    );
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: boxes,
+    });
+    setAutoAlignToast({
+      message: '已根据当前网格排布重新对齐所有独立小方块',
+      type: 'success',
+    });
+    setTimeout(() => setAutoAlignToast(null), 2500);
+  };
+
+  // Unify dimensions of all independent boxes to match currently selected box
+  const handleUnifyBoxSizes = () => {
+    const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+    const base = currentIndependentBoxes[safeIdx] || {
+      x: 0,
+      y: 0,
+      width: 100 / config.cols,
+      height: 100 / config.rows,
+    };
+    const updated: Record<number, GridCropArea> = {};
+    for (let i = 0; i < totalCells; i++) {
+      const prev = currentIndependentBoxes[i] || {
+        x: (i % config.cols) * base.width,
+        y: Math.floor(i / config.cols) * base.height,
+        width: base.width,
+        height: base.height,
+      };
+      updated[i] = {
+        ...prev,
+        width: Math.max(2, Math.min(100, Math.round(base.width * 100) / 100)),
+        height: Math.max(2, Math.min(100, Math.round(base.height * 100) / 100)),
+      };
+    }
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: updated,
+    });
+    setAutoAlignToast({
+      message: `已将所有小方块的尺寸统一对齐为第 ${(safeIdx + 1).toString().padStart(2, '0')} 格的尺寸 (${base.width.toFixed(1)}% × ${base.height.toFixed(1)}%)`,
+      type: 'success',
+    });
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  // Pointer drag & resize for independent boxes
+  const handleIndependentBoxPointerDown = (
+    e: React.PointerEvent,
+    idx: number,
+    mode: 'move' | 'nw' | 'ne' | 'se' | 'sw' | 'n' | 's' | 'w' | 'e'
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setInspectCellIndex(idx);
+
+    const container = videoContainerRef.current;
+    if (!container) return;
+    const containerRect = container.getBoundingClientRect();
+
+    const boxes = currentIndependentBoxes;
+    const initialBox = boxes[idx] || {
+      x: (idx % config.cols) * (100 / config.cols),
+      y: Math.floor(idx / config.cols) * (100 / config.rows),
+      width: 100 / config.cols,
+      height: 100 / config.rows,
+    };
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    const onPointerMove = (moveEv: PointerEvent) => {
+      const deltaXPct = ((moveEv.clientX - startX) / containerRect.width) * 100;
+      const deltaYPct = ((moveEv.clientY - startY) / containerRect.height) * 100;
+
+      let newBox = { ...initialBox };
+
+      if (mode === 'move') {
+        newBox.x = Math.max(0, Math.min(100 - initialBox.width, initialBox.x + deltaXPct));
+        newBox.y = Math.max(0, Math.min(100 - initialBox.height, initialBox.y + deltaYPct));
+      } else {
+        if (mode.includes('w')) {
+          const right = initialBox.x + initialBox.width;
+          const proposedX = Math.max(0, Math.min(right - 2, initialBox.x + deltaXPct));
+          newBox.x = proposedX;
+          newBox.width = right - proposedX;
+        }
+        if (mode.includes('e')) {
+          const proposedW = Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct));
+          newBox.width = proposedW;
+        }
+        if (mode.includes('n')) {
+          const bottom = initialBox.y + initialBox.height;
+          const proposedY = Math.max(0, Math.min(bottom - 2, initialBox.y + deltaYPct));
+          newBox.y = proposedY;
+          newBox.height = bottom - proposedY;
+        }
+        if (mode.includes('s')) {
+          const proposedH = Math.max(2, Math.min(100 - initialBox.y, initialBox.height + deltaYPct));
+          newBox.height = proposedH;
+        }
+      }
+
+      newBox.x = Math.round(newBox.x * 100) / 100;
+      newBox.y = Math.round(newBox.y * 100) / 100;
+      newBox.width = Math.round(newBox.width * 100) / 100;
+      newBox.height = Math.round(newBox.height * 100) / 100;
+
+      const updated = { ...boxes, [idx]: newBox };
+      onConfigChange({
+        ...config,
+        layoutMode: 'independent',
+        independentBoxes: updated,
+      });
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  };
+
+  // Numerical update for active independent box
+  const handleUpdateActiveBox = (partial: Partial<GridCropArea>) => {
+    const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+    const boxes = currentIndependentBoxes;
+    const current = boxes[safeIdx] || {
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 20,
+    };
+    const updatedBox: GridCropArea = {
+      x: Math.max(0, Math.min(99, partial.x !== undefined ? partial.x : current.x)),
+      y: Math.max(0, Math.min(99, partial.y !== undefined ? partial.y : current.y)),
+      width: Math.max(2, Math.min(100, partial.width !== undefined ? partial.width : current.width)),
+      height: Math.max(2, Math.min(100, partial.height !== undefined ? partial.height : current.height)),
+    };
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: {
+        ...boxes,
+        [safeIdx]: updatedBox,
+      },
+    });
+  };
+
+  const handleStepActiveBox = (key: keyof GridCropArea, deltaPct: number) => {
+    const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+    const current = currentIndependentBoxes[safeIdx] || {
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 20,
+    };
+    handleUpdateActiveBox({
+      [key]: Math.round((current[key] + deltaPct) * 100) / 100,
+    });
+  };
+
+  // Dragging internal divider lines (Tier 2)
+  const handleSplitPointerDown = (e: React.PointerEvent, type: 'col' | 'row', index: number) => {
+    e.stopPropagation();
+    e.preventDefault();
+
+    const cropEl = cropBoxRef.current;
+    if (!cropEl) return;
+    const cropRect = cropEl.getBoundingClientRect();
+
+    setActiveDraggingSplit({ type, index });
+
+    const startCoord = type === 'col' ? e.clientX : e.clientY;
+    const splits = type === 'col' ? [...validColSplits] : [...validRowSplits];
+    const initialRatio = splits[index];
+
+    const onPointerMove = (moveEv: PointerEvent) => {
+      if (type === 'col') {
+        const deltaPx = moveEv.clientX - startCoord;
+        const deltaRatio = deltaPx / cropRect.width;
+        let newRatio = initialRatio + deltaRatio;
+
+        const minPrev = index === 0 ? 0.02 : splits[index - 1] + 0.02;
+        const maxNext = index === splits.length - 1 ? 0.98 : splits[index + 1] - 0.02;
+        newRatio = Math.max(minPrev, Math.min(maxNext, newRatio));
+
+        const updated = [...splits];
+        updated[index] = Math.round(newRatio * 1000) / 1000;
+        onConfigChange({
+          ...config,
+          colSplits: updated,
+        });
+      } else {
+        const deltaPx = moveEv.clientY - startCoord;
+        const deltaRatio = deltaPx / cropRect.height;
+        let newRatio = initialRatio + deltaRatio;
+
+        const minPrev = index === 0 ? 0.02 : splits[index - 1] + 0.02;
+        const maxNext = index === splits.length - 1 ? 0.98 : splits[index + 1] - 0.02;
+        newRatio = Math.max(minPrev, Math.min(maxNext, newRatio));
+
+        const updated = [...splits];
+        updated[index] = Math.round(newRatio * 1000) / 1000;
+        onConfigChange({
+          ...config,
+          rowSplits: updated,
+        });
+      }
+    };
+
+    const onPointerUp = () => {
+      setActiveDraggingSplit(null);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  };
+
+  // Smart Auto-align / Snap to gutters (Tier 1)
+  const handleAutoAlignSplits = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    const vw = video.videoWidth || 960;
+    const vh = video.videoHeight || 960;
+
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = vw;
+    offCanvas.height = vh;
+    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+    if (!offCtx) return;
+
+    offCtx.drawImage(video, 0, 0, vw, vh);
+    const detected = autoDetectGridSplits(offCtx, vw, vh, cropArea, config.cols, config.rows);
+
+    onConfigChange({
+      ...config,
+      colSplits: detected.colSplits,
+      rowSplits: detected.rowSplits,
+    });
+    setAutoAlignToast({
+      message: '✨ 已智能对齐视频当前帧各格分割线至内容缝隙！',
+      type: 'success',
+    });
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  const handleResetSplits = () => {
+    onConfigChange({
+      ...config,
+      colSplits: getDefaultSplits(config.cols),
+      rowSplits: getDefaultSplits(config.rows),
+    });
+    setAutoAlignToast({
+      message: '已恢复均匀等距分割线',
+      type: 'info',
+    });
+    setTimeout(() => setAutoAlignToast(null), 2500);
+  };
+
+  // Single-Cell Micro Offset & Dimension Fine-Tuning (Tier 3)
+  const currentCellOverride = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+
+  const handleUpdateOverride = (field: keyof CellOverride, value: number) => {
+    const prev = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+    const updated = { ...prev, [field]: value };
+    const isZero = (updated.dx || 0) === 0 && (updated.dy || 0) === 0 && (updated.dw || 0) === 0 && (updated.dh || 0) === 0;
+
+    const newOverrides = { ...(config.cellOverrides || {}) };
+    if (isZero) {
+      delete newOverrides[inspectCellIndex];
+    } else {
+      newOverrides[inspectCellIndex] = updated;
+    }
+
+    onConfigChange({
+      ...config,
+      cellOverrides: newOverrides,
+    });
+  };
+
+  const handleResetCurrentOverride = () => {
+    if (!config.cellOverrides?.[inspectCellIndex]) return;
+    const newOverrides = { ...(config.cellOverrides || {}) };
+    delete newOverrides[inspectCellIndex];
+    onConfigChange({
+      ...config,
+      cellOverrides: newOverrides,
+    });
+  };
+
+  const handleResetAllOverrides = () => {
+    onConfigChange({
+      ...config,
+      cellOverrides: {},
+    });
+  };
+
+  // Keyboard shortcut listener for ESC (fullscreen) and micro-tuning active cell / independent box
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
+        return;
+      }
+
+      if (e.key === 'Escape' && isFullscreen) {
+        setIsFullscreen(false);
+        e.preventDefault();
+        return;
+      }
+
+      let handled = false;
+
+      if (config.layoutMode === 'independent') {
+        const delta = e.shiftKey ? 2 : 0.5;
+        if (e.altKey) {
+          // Resize width/height
+          if (e.key === 'ArrowLeft') {
+            handleStepActiveBox('width', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowRight') {
+            handleStepActiveBox('width', delta);
+            handled = true;
+          } else if (e.key === 'ArrowUp') {
+            handleStepActiveBox('height', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowDown') {
+            handleStepActiveBox('height', delta);
+            handled = true;
+          }
+        } else {
+          // Move x/y
+          if (e.key === 'ArrowLeft') {
+            handleStepActiveBox('x', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowRight') {
+            handleStepActiveBox('x', delta);
+            handled = true;
+          } else if (e.key === 'ArrowUp') {
+            handleStepActiveBox('y', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowDown') {
+            handleStepActiveBox('y', delta);
+            handled = true;
+          }
+        }
+      } else {
+        const step = e.shiftKey ? 5 : 1;
+        const current = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+
+        if (e.key === 'ArrowLeft') {
+          handleUpdateOverride('dx', Math.max(-50, (current.dx || 0) - step));
+          handled = true;
+        } else if (e.key === 'ArrowRight') {
+          handleUpdateOverride('dx', Math.min(50, (current.dx || 0) + step));
+          handled = true;
+        } else if (e.key === 'ArrowUp') {
+          handleUpdateOverride('dy', Math.max(-50, (current.dy || 0) - step));
+          handled = true;
+        } else if (e.key === 'ArrowDown') {
+          handleUpdateOverride('dy', Math.min(50, (current.dy || 0) + step));
+          handled = true;
+        }
+      }
+
+      if (handled) {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [inspectCellIndex, config, isFullscreen]);
 
   // Calculate current margins (%)
   const marginTop = Math.round(cropArea.y * 10) / 10;
@@ -215,17 +692,34 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     // 2. Render Single Selected Cell Inspector (240x240 standard WeChat dimension)
     const cellCols = config.cols || 1;
     const cellRows = config.rows || 1;
-    const cellW = cropW / cellCols;
-    const cellH = cropH / cellRows;
     const safeIdx = Math.max(0, Math.min(cellCols * cellRows - 1, inspectCellIndex));
     const cellCol = safeIdx % cellCols;
     const cellRow = Math.floor(safeIdx / cellCols);
 
-    const inset = config.paddingInset || 0;
-    const singleCellX = cropX + cellCol * cellW + inset;
-    const singleCellY = cropY + cellRow * cellH + inset;
-    const singleCellW = Math.max(4, cellW - inset * 2);
-    const singleCellH = Math.max(4, cellH - inset * 2);
+    const cellBounds = calculateCellBounds({
+      cropX,
+      cropY,
+      cropW,
+      cropH,
+      cols: cellCols,
+      rows: cellRows,
+      col: cellCol,
+      row: cellRow,
+      cellIndex: safeIdx,
+      layoutMode: config.layoutMode,
+      independentBox: config.independentBoxes?.[safeIdx],
+      colSplits: config.colSplits,
+      rowSplits: config.rowSplits,
+      cellOverride: config.cellOverrides?.[safeIdx],
+      paddingInset: config.paddingInset || 0,
+      sourceWidth: vw,
+      sourceHeight: vh,
+    });
+
+    const singleCellX = cellBounds.sx;
+    const singleCellY = cellBounds.sy;
+    const singleCellW = cellBounds.sw;
+    const singleCellH = cellBounds.sh;
 
     // Render original frame slice into inspectOriginalCanvasRef
     if (inspectOriginalCanvasRef.current) {
@@ -301,6 +795,11 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     config.outlineWidth,
     config.cols,
     config.rows,
+    config.colSplits,
+    config.rowSplits,
+    config.cellOverrides,
+    config.layoutMode,
+    config.independentBoxes,
     config.paddingInset,
     showLiveMatting,
     inspectCellIndex,
@@ -391,17 +890,29 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
   };
 
   const setPreset = (preset: GridPreset) => {
+    let cols = 4;
+    let rows = 4;
     if (preset === '16') {
-      onConfigChange({ ...config, preset: '16', cols: 4, rows: 4 });
+      cols = 4; rows = 4;
     } else if (preset === '15') {
-      onConfigChange({ ...config, preset: '15', cols: 5, rows: 3 });
+      cols = 5; rows = 3;
     } else if (preset === '9') {
-      onConfigChange({ ...config, preset: '9', cols: 3, rows: 3 });
+      cols = 3; rows = 3;
     } else if (preset === '20') {
-      onConfigChange({ ...config, preset: '20', cols: 5, rows: 4 });
+      cols = 5; rows = 4;
     } else {
-      onConfigChange({ ...config, preset: 'custom' });
+      cols = config.cols; rows = config.rows;
     }
+
+    onConfigChange({
+      ...config,
+      preset,
+      cols,
+      rows,
+      colSplits: getDefaultSplits(cols),
+      rowSplits: getDefaultSplits(rows),
+      cellOverrides: {},
+    });
   };
 
   // Helper to update cropArea directly
@@ -545,7 +1056,6 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     window.addEventListener('pointercancel', handlePointerUp);
   };
 
-  const totalCells = config.cols * config.rows;
   const isCustomCropActive = cropArea.x !== 0 || cropArea.y !== 0 || cropArea.width !== 100 || cropArea.height !== 100;
 
   // Real-time calculated pixel dimensions
@@ -681,19 +1191,272 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
       {/* Main interactive section: Video preview with grid overlay + Controls sidebar */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left: Video Player with Live Grid Overlay (7 cols) */}
-        <div className="lg:col-span-7 space-y-3">
+        {/* Left: Video Player with Live Grid Overlay (7 cols) or Fullscreen Modal */}
+        <div
+          className={
+            isFullscreen
+              ? 'fixed inset-0 z-50 bg-stone-950/98 flex flex-col p-4 backdrop-blur-md overflow-hidden select-none text-white'
+              : 'lg:col-span-7 space-y-3'
+          }
+        >
+          {/* Action Bar / Fullscreen Header */}
+          {isFullscreen ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/10 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <Maximize2 className="w-5 h-5 text-emerald-400" />
+                  <span className="font-bold text-base text-white">全屏放大精细预览与调节</span>
+                </div>
+
+                {/* Mode Switcher inside Fullscreen */}
+                <div className="inline-flex rounded-lg bg-stone-900 p-0.5 border border-white/15">
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchLayoutMode('grid')}
+                    className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      layoutMode === 'grid'
+                        ? 'bg-emerald-600 text-white shadow-xs'
+                        : 'text-stone-400 hover:text-white'
+                    }`}
+                  >
+                    <Grid className="w-3.5 h-3.5" />
+                    <span>整网格模式</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchLayoutMode('independent')}
+                    className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      layoutMode === 'independent'
+                        ? 'bg-amber-500 text-stone-950 font-bold shadow-xs'
+                        : 'text-stone-400 hover:text-white'
+                    }`}
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span>独立小方块模式</span>
+                  </button>
+                </div>
+
+                {/* Contextual actions */}
+                {layoutMode === 'grid' ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleAutoAlignSplits}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-emerald-400 font-medium border border-emerald-500/30 transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Wand2 className="w-3.5 h-3.5" />
+                      <span>智能吸附边缘缝隙</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetSplits}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300 font-medium border border-white/15 transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCcw className="w-3 h-3" />
+                      <span>重置均分</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleUnifyBoxSizes}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-amber-300 font-medium border border-amber-500/30 transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>统一方块尺寸</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetIndependentBoxesFromGrid}
+                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300 font-medium border border-white/15 transition-colors flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCcw className="w-3 h-3" />
+                      <span>从网格重新对齐</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3">
+                {/* Zoom factor */}
+                <div className="flex items-center gap-1 bg-stone-900 px-2.5 py-1 rounded-lg border border-white/15 text-xs">
+                  <ZoomIn className="w-3.5 h-3.5 text-stone-400 mr-1" />
+                  <span className="text-stone-400 mr-1">放大:</span>
+                  {[1, 1.25, 1.5, 2].map((z) => (
+                    <button
+                      key={z}
+                      type="button"
+                      onClick={() => setZoomLevel(z)}
+                      className={`px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer ${
+                        zoomLevel === z
+                          ? 'bg-emerald-600 text-white font-bold'
+                          : 'text-stone-400 hover:text-white'
+                      }`}
+                    >
+                      {Math.round(z * 100)}%
+                    </button>
+                  ))}
+                </div>
+
+                {/* Exit Fullscreen */}
+                <button
+                  type="button"
+                  onClick={() => setIsFullscreen(false)}
+                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-md transition-colors"
+                >
+                  <Minimize2 className="w-4 h-4" />
+                  <span>退出全屏 (ESC)</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                {/* Mode switcher */}
+                <div className="inline-flex rounded-lg bg-stone-100 p-0.5 border border-stone-200 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchLayoutMode('grid')}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors flex items-center gap-1 cursor-pointer ${
+                      layoutMode === 'grid'
+                        ? 'bg-white text-emerald-800 shadow-xs'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                    title="整网格模式：包含统一外框与可调节内部行列分割线"
+                  >
+                    <Grid className="w-3.5 h-3.5" />
+                    <span>整网格模式</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchLayoutMode('independent')}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors flex items-center gap-1 cursor-pointer ${
+                      layoutMode === 'independent'
+                        ? 'bg-amber-500 text-stone-950 font-bold shadow-xs'
+                        : 'text-stone-600 hover:text-stone-900'
+                    }`}
+                    title="独立小方块模式：将网格分散为N个独立自由方块，每个小方块可单独拖拽移动和拉伸调整大小"
+                  >
+                    <LayoutGrid className="w-3.5 h-3.5" />
+                    <span>独立小方块模式</span>
+                  </button>
+                </div>
+
+                {layoutMode === 'grid' ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleAutoAlignSplits}
+                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="自动扫描当前视频帧中各小图边缘及缝隙，自动吸附对齐内部网格线"
+                    >
+                      <Wand2 className="w-3.5 h-3.5" />
+                      <span>智能吸附边缘缝隙</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetSplits}
+                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="恢复所有内部线为均匀等距"
+                    >
+                      <RefreshCcw className="w-3 h-3 text-stone-500" />
+                      <span>重置均分</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleUnifyBoxSizes}
+                      className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="将所有小方块的宽高统一对齐为当前选中小方块的尺寸"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>统一方块尺寸</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetIndependentBoxesFromGrid}
+                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="根据当前整体网格重新排列对齐所有独立小方块"
+                    >
+                      <RefreshCcw className="w-3 h-3 text-stone-500" />
+                      <span>从网格重新对齐</span>
+                    </button>
+                  </>
+                )}
+              </div>
+
+              {/* Fullscreen Button */}
+              <button
+                type="button"
+                onClick={() => setIsFullscreen(true)}
+                className="px-3 py-1.5 rounded-lg bg-stone-900 hover:bg-stone-800 text-white font-medium shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer ml-auto"
+                title="全屏放大查看与编辑 (按ESC退出)"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>全屏放大查看</span>
+              </button>
+            </div>
+          )}
+
+          {/* Toast Notification for Auto-Align */}
+          {autoAlignToast && (
+            <div
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition-all ${
+                autoAlignToast.type === 'success'
+                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-300'
+                  : 'bg-stone-100 text-stone-800 border border-stone-300'
+              }`}
+            >
+              <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>{autoAlignToast.message}</span>
+            </div>
+          )}
+
+          {/* Viewport container wrapping video + overlays */}
           <div
-            ref={videoContainerRef}
-            onClick={handleContainerClick}
-            className={`relative w-full bg-stone-950 rounded-xl overflow-hidden shadow-inner flex items-center justify-center select-none ${
-              isPickingColor ? 'cursor-crosshair ring-2 ring-amber-400' : ''
-            }`}
-            style={{
-              aspectRatio: videoDimensions.width && videoDimensions.height ? `${videoDimensions.width} / ${videoDimensions.height}` : '16 / 9',
-              maxHeight: '520px',
-            }}
+            className={
+              isFullscreen
+                ? 'flex-1 min-h-0 w-full flex items-center justify-center overflow-auto relative p-2'
+                : 'w-full'
+            }
           >
+            <div
+              ref={videoContainerRef}
+              onClick={handleContainerClick}
+              className={`relative bg-stone-950 rounded-xl overflow-hidden shadow-inner flex items-center justify-center select-none transition-transform duration-100 origin-center ${
+                isPickingColor ? 'cursor-crosshair ring-2 ring-amber-400' : ''
+              } ${isFullscreen ? 'shadow-2xl border border-white/20' : 'w-full'}`}
+              style={{
+                aspectRatio:
+                  videoDimensions.width && videoDimensions.height
+                    ? `${videoDimensions.width} / ${videoDimensions.height}`
+                    : '16 / 9',
+                maxHeight: isFullscreen ? 'calc(100vh - 170px)' : '520px',
+                maxWidth: '100%',
+                width: isFullscreen ? 'auto' : '100%',
+                height: isFullscreen ? 'auto' : undefined,
+                transform: isFullscreen && zoomLevel !== 1 ? `scale(${zoomLevel})` : undefined,
+              }}
+            >
+              {/* Floating Fullscreen Toggle Button in corner */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsFullscreen(!isFullscreen);
+                }}
+                className="absolute top-2.5 right-2.5 z-40 p-1.5 rounded-lg bg-black/75 hover:bg-black text-white shadow-md border border-white/25 transition-all cursor-pointer group"
+                title={isFullscreen ? '退出全屏 (ESC)' : '全屏放大显示'}
+              >
+                {isFullscreen ? (
+                  <Minimize2 className="w-4 h-4 text-amber-400" />
+                ) : (
+                  <Maximize2 className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                )}
+              </button>
             {/* Pipette Color Picker Floating Tip */}
             {isPickingColor && (
               <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-amber-500 text-stone-950 px-3 py-1 rounded-full text-xs font-bold shadow-lg flex items-center gap-1.5 pointer-events-none animate-bounce">
@@ -720,8 +1483,8 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               className="w-full h-full object-fill block pointer-events-none"
             />
 
-            {/* Dimmed backdrop outside active crop area */}
-            {isCustomCropActive && (
+            {/* Dimmed backdrop outside active crop area (Grid mode only) */}
+            {layoutMode === 'grid' && isCustomCropActive && (
               <>
                 <div
                   className="absolute bg-black/60 pointer-events-none transition-all duration-75"
@@ -752,9 +1515,126 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               </>
             )}
 
-            {/* Overlaid Interactive Grid Bounding Box */}
-            {showGridOverlay && (
+            {/* MODE 1: Independent Boxes Overlay */}
+            {showGridOverlay && layoutMode === 'independent' && (
+              <div className="absolute inset-0 pointer-events-none z-20">
+                {Array.from({ length: totalCells }).map((_, idx) => {
+                  const box = currentIndependentBoxes[idx] || {
+                    x: (idx % config.cols) * (100 / config.cols),
+                    y: Math.floor(idx / config.cols) * (100 / config.rows),
+                    width: 100 / config.cols,
+                    height: 100 / config.rows,
+                  };
+                  const isSelected = idx === Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+
+                  return (
+                    <div
+                      key={`ind-box-${idx}`}
+                      className={`absolute pointer-events-auto touch-none select-none transition-shadow ${
+                        isSelected
+                          ? 'border-2 border-amber-400 bg-amber-400/20 shadow-[0_0_18px_rgba(251,191,36,0.85)] z-30 ring-2 ring-amber-400/60 cursor-move'
+                          : 'border-2 border-emerald-400/80 bg-emerald-500/10 hover:border-amber-300 hover:bg-emerald-500/20 z-20 cursor-move'
+                      }`}
+                      style={{
+                        left: `${box.x}%`,
+                        top: `${box.y}%`,
+                        width: `${box.width}%`,
+                        height: `${box.height}%`,
+                      }}
+                      onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'move')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setInspectCellIndex(idx);
+                      }}
+                    >
+                      {/* Box index label badge */}
+                      <div className="absolute top-1 left-1 flex items-center gap-1 pointer-events-none">
+                        <span
+                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded leading-none shadow-xs ${
+                            isSelected
+                              ? 'bg-amber-500 text-stone-950 ring-1 ring-amber-300'
+                              : 'bg-black/75 text-emerald-300'
+                          }`}
+                        >
+                          {(idx + 1).toString().padStart(2, '0')}
+                        </span>
+                        {isSelected && (
+                          <span className="text-[9px] font-bold bg-amber-400 text-stone-950 px-1 rounded shadow-xs">
+                            当前选中
+                          </span>
+                        )}
+                        {config.cellOverrides?.[idx] && (
+                          <span className="text-[9px] font-bold bg-emerald-500 text-white px-1 rounded shadow-xs">
+                            微调
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Size dimension readout in corner */}
+                      <div className="absolute bottom-1 right-1 pointer-events-none">
+                        <span className="text-[9px] font-mono font-medium px-1 rounded bg-black/60 text-white/80">
+                          {box.width.toFixed(1)}%×{box.height.toFixed(1)}%
+                        </span>
+                      </div>
+
+                      {/* 8 Resize Handles on selected box */}
+                      {isSelected && (
+                        <>
+                          {/* 4 Corners */}
+                          <div
+                            className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'nw')}
+                            title="拖动调整左上角"
+                          />
+                          <div
+                            className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'ne')}
+                            title="拖动调整右上角"
+                          />
+                          <div
+                            className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'se')}
+                            title="拖动调整右下角"
+                          />
+                          <div
+                            className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'sw')}
+                            title="拖动调整左下角"
+                          />
+
+                          {/* 4 Edges */}
+                          <div
+                            className="absolute -top-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'n')}
+                            title="拖动调整上边"
+                          />
+                          <div
+                            className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 's')}
+                            title="拖动调整下边"
+                          />
+                          <div
+                            className="absolute top-1/2 -left-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'w')}
+                            title="拖动调整左边"
+                          />
+                          <div
+                            className="absolute top-1/2 -right-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'e')}
+                            title="拖动调整右边"
+                          />
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* MODE 2: Unified Interactive Grid Bounding Box */}
+            {showGridOverlay && layoutMode === 'grid' && (
               <div
+                ref={cropBoxRef}
                 className="absolute border-2 border-emerald-400 bg-emerald-500/10 shadow-[0_0_15px_rgba(16,185,129,0.5)] cursor-move z-20 touch-none select-none group"
                 style={{
                   left: `${cropArea.x}%`,
@@ -790,8 +1670,8 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 <div
                   className="w-full h-full grid pointer-events-none relative z-10"
                   style={{
-                    gridTemplateColumns: `repeat(${config.cols}, minmax(0, 1fr))`,
-                    gridTemplateRows: `repeat(${config.rows}, minmax(0, 1fr))`,
+                    gridTemplateColumns: colPercents.map((p) => `${p}%`).join(' '),
+                    gridTemplateRows: rowPercents.map((p) => `${p}%`).join(' '),
                   }}
                 >
                   {Array.from({ length: totalCells }).map((_, idx) => {
@@ -837,15 +1717,72 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                           {(idx + 1).toString().padStart(2, '0')}
                         </button>
 
-                        {isSelected && (
-                          <span className="text-[9px] font-bold bg-amber-400 text-stone-950 px-1 rounded shadow-xs pointer-events-none">
-                            质检格
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1">
+                          {isSelected && (
+                            <span className="text-[9px] font-bold bg-amber-400 text-stone-950 px-1 rounded shadow-xs pointer-events-none">
+                              质检格
+                            </span>
+                          )}
+                          {config.cellOverrides?.[idx] && (
+                            <span className="text-[9px] font-bold bg-emerald-500 text-white px-1 rounded shadow-xs pointer-events-none">
+                              微调
+                            </span>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
                 </div>
+
+                {/* Tier 2: Draggable Vertical Internal Dividers */}
+                {validColSplits.map((split, i) => (
+                  <div
+                    key={`col-split-${i}`}
+                    className="absolute top-0 bottom-0 z-30 group/split pointer-events-auto touch-none cursor-col-resize flex items-center justify-center -translate-x-1/2 select-none"
+                    style={{
+                      left: `${split * 100}%`,
+                      width: '18px',
+                    }}
+                    onPointerDown={(e) => handleSplitPointerDown(e, 'col', i)}
+                    title={`拖动调节第 ${i + 1} 列与第 ${i + 2} 列内部间距 (位置: ${Math.round(split * 100)}%)`}
+                  >
+                    <div
+                      className={`w-[2px] h-full transition-colors ${
+                        activeDraggingSplit?.type === 'col' && activeDraggingSplit?.index === i
+                          ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)]'
+                          : 'bg-emerald-400/80 group-hover/split:bg-amber-400'
+                      }`}
+                    />
+                    <div className="absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white border-2 border-emerald-600 shadow-md group-hover/split:border-amber-500 group-hover/split:scale-110 transition-transform flex items-center justify-center">
+                      <span className="w-1 h-2 border-l border-r border-stone-400" />
+                    </div>
+                  </div>
+                ))}
+
+                {/* Tier 2: Draggable Horizontal Internal Dividers */}
+                {validRowSplits.map((split, j) => (
+                  <div
+                    key={`row-split-${j}`}
+                    className="absolute left-0 right-0 z-30 group/split pointer-events-auto touch-none cursor-row-resize flex items-center justify-center -translate-y-1/2 select-none"
+                    style={{
+                      top: `${split * 100}%`,
+                      height: '18px',
+                    }}
+                    onPointerDown={(e) => handleSplitPointerDown(e, 'row', j)}
+                    title={`拖动调节第 ${j + 1} 行与第 ${j + 2} 行内部间距 (位置: ${Math.round(split * 100)}%)`}
+                  >
+                    <div
+                      className={`h-[2px] w-full transition-colors ${
+                        activeDraggingSplit?.type === 'row' && activeDraggingSplit?.index === j
+                          ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.9)]'
+                          : 'bg-emerald-400/80 group-hover/split:bg-amber-400'
+                      }`}
+                    />
+                    <div className="absolute left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-white border-2 border-emerald-600 shadow-md group-hover/split:border-amber-500 group-hover/split:scale-110 transition-transform flex items-center justify-center">
+                      <span className="h-1 w-2 border-t border-b border-stone-400" />
+                    </div>
+                  </div>
+                ))}
 
                 {/* Center Hover Move Indicator */}
                 <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity bg-black/80 backdrop-blur-xs text-white text-[11px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1.5 shadow-md border border-white/20">
@@ -941,8 +1878,96 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               )}
             </div>
           </div>
+          </div>
+
+          {/* Fullscreen Bottom Bar */}
+          {isFullscreen && (
+            <div className="pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 bg-stone-900/90 px-4 py-2.5 rounded-xl">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={togglePlay}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                  <span>{isPlaying ? '暂停' : '播放'}</span>
+                </button>
+
+                <div className="text-stone-300 font-mono text-xs flex items-center gap-2">
+                  <span>进度: {currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
+                  <span className="text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30">
+                    表情时长: {effectiveStickerDuration.toFixed(2)}s
+                  </span>
+                </div>
+              </div>
+
+              {/* Target cell & fine tune pills */}
+              <div className="flex items-center gap-2">
+                <span className="text-stone-400">当前选中小格:</span>
+                <span className="px-2 py-0.5 rounded bg-amber-500 text-stone-950 font-bold font-mono">
+                  第 {(Math.max(0, Math.min(totalCells - 1, inspectCellIndex)) + 1).toString().padStart(2, '0')} 格
+                </span>
+
+                {layoutMode === 'independent' && (
+                  <div className="flex items-center gap-1 ml-2">
+                    <span className="text-stone-400 mr-1">微调移动:</span>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('x', -1)}
+                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      title="向左移动 1%"
+                    >
+                      ← X
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('x', 1)}
+                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      title="向右移动 1%"
+                    >
+                      X →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('y', -1)}
+                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      title="向上移动 1%"
+                    >
+                      ↑ Y
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('y', 1)}
+                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      title="向下移动 1%"
+                    >
+                      Y ↓
+                    </button>
+                    <span className="text-stone-400 mx-1">尺寸:</span>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('width', 1)}
+                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-amber-400 rounded font-mono border border-amber-500/30 cursor-pointer"
+                      title="加宽 1%"
+                    >
+                      W+
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('height', 1)}
+                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-amber-400 rounded font-mono border border-amber-500/30 cursor-pointer"
+                      title="加高 1%"
+                    >
+                      H+
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Timeline & Trim Range Slider + Playback Speed Acceleration */}
+          {!isFullscreen && (
           <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-medium border-b border-stone-200/80 pb-2">
               <span className="flex items-center gap-1.5 text-stone-900 font-bold">
@@ -1106,6 +2131,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               </div>
             </div>
           </div>
+          )}
         </div>
 
         {/* Right: Grid Slicer Settings & Precision Bounds Controls (5 cols) */}
@@ -1179,13 +2205,16 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                   min="1"
                   max="8"
                   value={config.cols}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newCols = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
                     onConfigChange({
                       ...config,
                       preset: 'custom',
-                      cols: Math.max(1, Math.min(8, parseInt(e.target.value) || 1)),
-                    })
-                  }
+                      cols: newCols,
+                      colSplits: getDefaultSplits(newCols),
+                      cellOverrides: {},
+                    });
+                  }}
                   className="w-12 px-2 py-1 bg-white border border-stone-200 rounded text-center font-bold"
                 />
               </div>
@@ -1197,13 +2226,16 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                   min="1"
                   max="8"
                   value={config.rows}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newRows = Math.max(1, Math.min(8, parseInt(e.target.value) || 1));
                     onConfigChange({
                       ...config,
                       preset: 'custom',
-                      rows: Math.max(1, Math.min(8, parseInt(e.target.value) || 1)),
-                    })
-                  }
+                      rows: newRows,
+                      rowSplits: getDefaultSplits(newRows),
+                      cellOverrides: {},
+                    });
+                  }}
                   className="w-12 px-2 py-1 bg-white border border-stone-200 rounded text-center font-bold"
                 />
               </div>
@@ -1216,6 +2248,231 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
           {/* ========================================================= */}
           {/* NEW: Manual Grid Size & ROI Adjustments (手动调节宫格大小与选区) */}
           {/* ========================================================= */}
+          {layoutMode === 'independent' ? (
+            <div className="p-3.5 bg-amber-50/50 rounded-xl border-2 border-amber-400/80 space-y-3 shadow-xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-amber-950">
+                  <LayoutGrid className="w-4 h-4 text-amber-600" />
+                  <span>独立小方块尺寸与位置调节</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchLayoutMode('grid')}
+                  className="text-[11px] text-stone-600 hover:text-stone-900 underline flex items-center gap-1 cursor-pointer"
+                >
+                  <Grid className="w-3 h-3" />
+                  <span>切回整网格</span>
+                </button>
+              </div>
+
+              {/* Cell selection pills */}
+              <div>
+                <div className="flex items-center justify-between text-[11px] text-stone-600 mb-1.5">
+                  <span>调节目标小方块:</span>
+                  <span className="font-mono text-amber-800 font-semibold">
+                    选中: 第 {(Math.max(0, Math.min(totalCells - 1, inspectCellIndex)) + 1).toString().padStart(2, '0')} 格
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 overflow-x-auto pb-1.5 pt-0.5 no-scrollbar">
+                  {Array.from({ length: totalCells }).map((_, idx) => {
+                    const isSel = idx === Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+                    return (
+                      <button
+                        key={`cell-select-${idx}`}
+                        type="button"
+                        onClick={() => setInspectCellIndex(idx)}
+                        className={`px-2 py-1 text-[11px] font-mono font-bold rounded-md shrink-0 transition-all cursor-pointer ${
+                          isSel
+                            ? 'bg-amber-500 text-stone-950 ring-2 ring-amber-300 shadow-xs'
+                            : 'bg-white text-stone-700 hover:bg-amber-100 border border-stone-200'
+                        }`}
+                      >
+                        {(idx + 1).toString().padStart(2, '0')}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Sliders for current independent box: X, Y, Width, Height */}
+              {(() => {
+                const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+                const box = currentIndependentBoxes[safeIdx] || {
+                  x: 0,
+                  y: 0,
+                  width: 25,
+                  height: 25,
+                };
+
+                return (
+                  <div className="space-y-3 bg-white p-3 rounded-lg border border-amber-200/80">
+                    {/* X coordinate */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-medium text-stone-700">水平位置 X:</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('x', -1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            -1%
+                          </button>
+                          <span className="font-mono text-amber-900 font-bold min-w-[40px] text-right">
+                            {box.x.toFixed(1)}%
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('x', 1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            +1%
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(0, 100 - box.width)}
+                        step="0.5"
+                        value={box.x}
+                        onChange={(e) => handleUpdateActiveBox({ x: parseFloat(e.target.value) || 0 })}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Y coordinate */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-medium text-stone-700">垂直位置 Y:</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('y', -1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            -1%
+                          </button>
+                          <span className="font-mono text-amber-900 font-bold min-w-[40px] text-right">
+                            {box.y.toFixed(1)}%
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('y', 1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            +1%
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(0, 100 - box.height)}
+                        step="0.5"
+                        value={box.y}
+                        onChange={(e) => handleUpdateActiveBox({ y: parseFloat(e.target.value) || 0 })}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Width */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-medium text-stone-700">方块宽度 W:</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('width', -1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            -1%
+                          </button>
+                          <span className="font-mono text-amber-900 font-bold min-w-[40px] text-right">
+                            {box.width.toFixed(1)}%
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('width', 1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            +1%
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="2"
+                        max={Math.max(2, 100 - box.x)}
+                        step="0.5"
+                        value={box.width}
+                        onChange={(e) => handleUpdateActiveBox({ width: parseFloat(e.target.value) || 2 })}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+
+                    {/* Height */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-medium text-stone-700">方块高度 H:</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('height', -1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            -1%
+                          </button>
+                          <span className="font-mono text-amber-900 font-bold min-w-[40px] text-right">
+                            {box.height.toFixed(1)}%
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleStepActiveBox('height', 1)}
+                            className="px-1.5 py-0.2 text-[10px] bg-stone-100 hover:bg-stone-200 rounded border border-stone-300 font-mono cursor-pointer"
+                          >
+                            +1%
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="range"
+                        min="2"
+                        max={Math.max(2, 100 - box.y)}
+                        step="0.5"
+                        value={box.height}
+                        onChange={(e) => handleUpdateActiveBox({ height: parseFloat(e.target.value) || 2 })}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Batch Operations */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleUnifyBoxSizes}
+                  className="px-2.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  title="把所有小方块的宽高统一设置为当前选中小方块的尺寸"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>统一所有方块尺寸</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetIndependentBoxesFromGrid}
+                  className="px-2.5 py-2 rounded-lg bg-white hover:bg-stone-100 text-stone-700 font-medium text-xs border border-stone-300 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  title="按当前整网格分布重新排列对齐所有小方块"
+                >
+                  <RefreshCcw className="w-3.5 h-3.5" />
+                  <span>从网格重新对齐</span>
+                </button>
+              </div>
+            </div>
+          ) : (
           <div className="p-3.5 bg-stone-50 rounded-xl border-2 border-emerald-500/30 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs font-bold text-stone-900">
@@ -1481,6 +2738,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               <span className="text-emerald-700 font-semibold">单格: {cellPixelW} × {cellPixelH} px</span>
             </div>
           </div>
+          )}
 
           {/* Padding Inset slider */}
           <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 space-y-1.5">
@@ -1506,6 +2764,180 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               }
               className="w-full accent-[#07c160] cursor-pointer"
             />
+          </div>
+
+          {/* Section 2.5: Tier 3 Single-Cell Micro-Adjustment & Offset */}
+          <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 font-bold text-stone-900 text-xs">
+                <Target className="w-3.5 h-3.5 text-amber-600" />
+                <span>
+                  单格像素级微调 (第 {(Math.max(0, Math.min(totalCells - 1, inspectCellIndex)) + 1).toString().padStart(2, '0')} 格)
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {((currentCellOverride.dx || 0) !== 0 ||
+                  (currentCellOverride.dy || 0) !== 0 ||
+                  (currentCellOverride.dw || 0) !== 0 ||
+                  (currentCellOverride.dh || 0) !== 0) && (
+                  <button
+                    type="button"
+                    onClick={handleResetCurrentOverride}
+                    className="text-[11px] text-amber-800 hover:text-amber-950 font-medium underline cursor-pointer"
+                  >
+                    重置此格
+                  </button>
+                )}
+                {Object.keys(config.cellOverrides || {}).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleResetAllOverrides}
+                    className="text-[11px] text-stone-500 hover:text-stone-700 underline cursor-pointer"
+                  >
+                    清空全部微调
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="text-[11px] text-stone-500 bg-white p-2 rounded-lg border border-stone-200/80 flex flex-wrap items-center justify-between gap-1">
+              <span>
+                支持快捷键微调：键盘 <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">←</kbd> <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">→</kbd> <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">↑</kbd> <kbd className="font-mono bg-stone-100 px-1 py-0.5 border rounded text-[10px]">↓</kbd>（按住 Shift 步进 5px）
+              </span>
+              <span className="font-mono text-amber-700 font-bold">
+                X:{currentCellOverride.dx || 0}px Y:{currentCellOverride.dy || 0}px
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {/* X Offset */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">水平偏移 (X)</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dx || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-40"
+                  max="40"
+                  step="1"
+                  value={currentCellOverride.dx || 0}
+                  onChange={(e) => handleUpdateOverride('dx', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-5, -1, 0, 1, 5].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dx', 0);
+                        else handleUpdateOverride('dx', Math.max(-40, Math.min(40, (currentCellOverride.dx || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Y Offset */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">垂直偏移 (Y)</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dy || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-40"
+                  max="40"
+                  step="1"
+                  value={currentCellOverride.dy || 0}
+                  onChange={(e) => handleUpdateOverride('dy', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-5, -1, 0, 1, 5].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dy', 0);
+                        else handleUpdateOverride('dy', Math.max(-40, Math.min(40, (currentCellOverride.dy || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Width Expand/Shrink */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">宽度微扩/微缩</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dw || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-30"
+                  max="30"
+                  step="1"
+                  value={currentCellOverride.dw || 0}
+                  onChange={(e) => handleUpdateOverride('dw', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-4, -1, 0, 1, 4].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dw', 0);
+                        else handleUpdateOverride('dw', Math.max(-30, Math.min(30, (currentCellOverride.dw || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Height Expand/Shrink */}
+              <div className="bg-white p-2 rounded-lg border border-stone-200/80 space-y-1">
+                <div className="flex justify-between items-center text-[11px]">
+                  <span className="text-stone-600 font-medium">高度微扩/微缩</span>
+                  <span className="font-mono font-bold text-stone-800">{currentCellOverride.dh || 0} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="-30"
+                  max="30"
+                  step="1"
+                  value={currentCellOverride.dh || 0}
+                  onChange={(e) => handleUpdateOverride('dh', parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                />
+                <div className="flex justify-between gap-1 pt-0.5">
+                  {[-4, -1, 0, 1, 4].map((delta) => (
+                    <button
+                      key={delta}
+                      type="button"
+                      onClick={() => {
+                        if (delta === 0) handleUpdateOverride('dh', 0);
+                        else handleUpdateOverride('dh', Math.max(-30, Math.min(30, (currentCellOverride.dh || 0) + delta)));
+                      }}
+                      className="flex-1 py-0.5 rounded bg-stone-50 hover:bg-stone-100 border border-stone-200 font-mono text-[10px] text-stone-700 cursor-pointer"
+                    >
+                      {delta === 0 ? '0' : delta > 0 ? `+${delta}` : delta}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* FPS & WeChat Standard Options */}

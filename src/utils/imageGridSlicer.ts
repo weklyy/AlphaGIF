@@ -1,6 +1,7 @@
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { ImageGridConfig, SlicedStickerItem } from '../types';
 import { removeBackgroundFromFrame, applyWhiteOutline } from './gifProcessor';
+import { calculateCellBounds } from './gridGeometry';
 
 /**
  * Generate a high-resolution 16-grid (4x4) static emoji spritesheet demo image
@@ -164,6 +165,11 @@ export async function sliceImageIntoStickers(
     addWhiteOutline,
     outlineWidth,
     outputFormat = 'png',
+    colSplits,
+    rowSplits,
+    cellOverrides,
+    layoutMode,
+    independentBoxes,
   } = config;
 
   let imgElement: HTMLImageElement;
@@ -222,12 +228,31 @@ export async function sliceImageIntoStickers(
       // Clear canvas with transparency
       cellCtx.clearRect(0, 0, 240, 240);
 
-      // Source cell bounding rect with padding inset
-      const inset = Math.max(0, paddingInset || 0);
-      const srcX = cropX + col * cellW + inset;
-      const srcY = cropY + row * cellH + inset;
-      const srcW = Math.max(2, cellW - inset * 2);
-      const srcH = Math.max(2, cellH - inset * 2);
+      // Source cell bounding rect with splits, padding inset, and per-cell overrides
+      const cellBounds = calculateCellBounds({
+        cropX,
+        cropY,
+        cropW,
+        cropH,
+        cols,
+        rows,
+        col,
+        row,
+        cellIndex: index,
+        layoutMode,
+        independentBox: independentBoxes?.[index],
+        colSplits,
+        rowSplits,
+        cellOverride: cellOverrides?.[index],
+        paddingInset: paddingInset || 0,
+        sourceWidth: imgW,
+        sourceHeight: imgH,
+      });
+
+      const srcX = cellBounds.sx;
+      const srcY = cellBounds.sy;
+      const srcW = cellBounds.sw;
+      const srcH = cellBounds.sh;
 
       // Scale and center the sliced cell into standard 240x240 canvas maintaining aspect ratio
       const scale = Math.min(240 / srcW, 240 / srcH);

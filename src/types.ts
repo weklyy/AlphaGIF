@@ -11,12 +11,25 @@ export interface WeChatStickerOptions {
   captionFontSize?: number; // 14 - 32px (default 22)
 }
 
+export type CompressionPreset = 'wechat-auto' | 'wechat-1mb' | 'wechat-500kb' | 'light-300kb' | 'custom';
+
+export interface CompressionOptions {
+  enabled: boolean; // 是否启用压缩 (默认开启)
+  preset: CompressionPreset; // 预设模式
+  targetSizeKb: number; // 目标体积限制 (KB)，如 1000 (微信动图上限 1MB) 或 500 (微信静态表情 500KB)
+  maxColors: number; // 调色板颜色数 (32, 64, 128, 256)
+  scaleRatio: number; // 画面缩放比例 (0.5 ~ 1.0)
+  frameStep: number; // 动图抽帧步长：1=全帧，2=隔帧采样(延时相应翻倍保证播放速度不变，体积立减~50%)
+  autoCompressUnderLimit: boolean; // 超出目标大小时自动多轮智能压缩至符合微信平台限制
+}
+
 export interface RemovalOptions {
   targetColor: string; // Hex string e.g. "#ffffff"
   tolerance: number; // 0 to 100
   contiguous: boolean; // Only remove from edges (flood fill)
   defringe: number; // 0 to 3 pixels erosion/defringe
   wechat?: WeChatStickerOptions; // WeChat Sticker formatting options
+  compression?: CompressionOptions; // 微信平台体积压缩参数
 }
 
 export interface FrameInfo {
@@ -33,6 +46,10 @@ export interface ProcessedGifResult {
   height: number;
   format?: 'gif' | 'png';
   isWeChatSticker?: boolean;
+  originalSize?: number;
+  compressionRatio?: number; // 压缩减小百分比 (e.g. 68% saved)
+  passedWeChatLimit?: boolean; // 是否符合微信平台上传限制 (动图<=1000KB, 静态图<=500KB)
+  compressionSummary?: string; // 压缩详情说明
 }
 
 export type ProcessStatus = 'idle' | 'processing' | 'done' | 'error';

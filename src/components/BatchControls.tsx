@@ -13,8 +13,20 @@ import {
   MessageSquare,
   Type,
   ShieldAlert,
+  Zap,
+  AlertTriangle,
+  Scale,
+  Gauge,
 } from 'lucide-react';
-import { GifItem, RemovalOptions, PreviewBgMode, WeChatStickerOptions } from '../types';
+import {
+  GifItem,
+  RemovalOptions,
+  PreviewBgMode,
+  WeChatStickerOptions,
+  CompressionOptions,
+  CompressionPreset,
+} from '../types';
+import { COMPRESSION_PRESETS } from '../utils/gifProcessor';
 
 interface BatchControlsProps {
   items: GifItem[];
@@ -25,6 +37,8 @@ interface BatchControlsProps {
   onApplyGlobalOptions: (options: RemovalOptions) => void;
   previewBg: PreviewBgMode;
   onPreviewBgChange: (mode: PreviewBgMode) => void;
+  onCompressAll?: () => void;
+  onCompressOversized?: () => void;
 }
 
 export const BatchControls: React.FC<BatchControlsProps> = ({
@@ -36,9 +50,11 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   onApplyGlobalOptions,
   previewBg,
   onPreviewBgChange,
+  onCompressAll,
+  onCompressOversized,
 }) => {
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'wechat' | 'general'>('wechat');
+  const [settingsTab, setSettingsTab] = useState<'wechat' | 'compression' | 'general'>('wechat');
 
   const [globalOptions, setGlobalOptions] = useState<RemovalOptions>({
     targetColor: '#ffffff',
@@ -57,6 +73,15 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
       captionStrokeColor: '#000000',
       captionFontSize: 22,
     },
+    compression: {
+      enabled: true,
+      preset: 'wechat-auto',
+      targetSizeKb: 1000,
+      maxColors: 256,
+      scaleRatio: 1.0,
+      frameStep: 1,
+      autoCompressUnderLimit: true,
+    },
   });
 
   const totalCount = items.length;
@@ -66,6 +91,14 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   ).length;
   const processingCount = items.filter((i) => i.status === 'processing').length;
   const pendingCount = items.filter((i) => i.status === 'idle').length;
+
+  // Check how many completed items violate WeChat upload limits (>1MB for GIF, >500KB for PNG)
+  const oversizedItems = items.filter((i) => {
+    if (i.status !== 'done' || !i.result) return false;
+    const isGif = i.result.format === 'gif' || i.mediaType === 'gif';
+    const limit = isGif ? 1024 * 1024 : 512 * 1024;
+    return i.result.size > limit;
+  });
 
   const handleApplyToAll = () => {
     onApplyGlobalOptions(globalOptions);
@@ -101,6 +134,44 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
         [key]: value,
       },
     }));
+  };
+
+  const updateCompressionOption = <K extends keyof CompressionOptions>(
+    key: K,
+    value: CompressionOptions[K]
+  ) => {
+    setGlobalOptions((prev) => ({
+      ...prev,
+      compression: {
+        enabled: true,
+        preset: 'wechat-auto',
+        targetSizeKb: 1000,
+        maxColors: 256,
+        scaleRatio: 1.0,
+        frameStep: 1,
+        autoCompressUnderLimit: true,
+        ...prev.compression,
+        [key]: value,
+      },
+    }));
+  };
+
+  const handleSelectPreset = (preset: CompressionPreset) => {
+    const found = COMPRESSION_PRESETS.find((p) => p.id === preset);
+    if (found) {
+      setGlobalOptions((prev) => ({
+        ...prev,
+        compression: {
+          enabled: true,
+          preset,
+          targetSizeKb: found.targetSizeKb,
+          maxColors: found.maxColors,
+          scaleRatio: found.scaleRatio,
+          frameStep: found.frameStep,
+          autoCompressUnderLimit: found.autoCompressUnderLimit,
+        },
+      }));
+    }
   };
 
   return (
@@ -153,7 +224,7 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             }`}
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-[#07c160]" />
-            <span>微信表情 & 抠图参数设置</span>
+            <span>微信规范 & 压缩参数设置</span>
           </button>
 
           {/* WeChat Sticker Batch Generation Button (HIGH VISIBILITY) */}
@@ -163,7 +234,7 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             disabled={isProcessingAny || totalCount === 0}
             onClick={() => onProcessAll(true)}
             className="px-4 py-1.5 bg-[#07c160] hover:bg-[#06ad56] text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.01]"
-            title="一键将队列中全部图片/动图按微信规范（240x240/白色描边/<1MB）生成微信表情包"
+            title="一键将队列中全部图片/动图按微信规范（240x240/白色描边/智能压缩<1MB）生成微信表情包"
           >
             {isProcessingAny ? (
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -171,6 +242,25 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
               <Smile className="w-3.5 h-3.5" />
             )}
             批量生成微信表情包
+          </button>
+
+          {/* Batch Compress to WeChat Limit */}
+          <button
+            id="batch-compress-all-btn"
+            type="button"
+            disabled={isProcessingAny || totalCount === 0}
+            onClick={() => {
+              if (onCompressAll) {
+                onCompressAll();
+              } else {
+                onProcessAll(true);
+              }
+            }}
+            className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+            title="应用智能压缩设置，针对超大文件自动降采样或缩放，确保体积完全符合微信平台上传限制"
+          >
+            <Zap className="w-3.5 h-3.5 fill-current" />
+            智能达标压缩
           </button>
 
           {/* Standard Process All Button */}
@@ -212,6 +302,38 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Oversized Alert Banner for WeChat Limits */}
+      {oversizedItems.length > 0 && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs shadow-2xs animate-in fade-in">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <div>
+              <span className="font-bold text-amber-950">
+                微信上传超标预警：
+              </span>
+              <span>
+                检测到 <strong className="text-amber-800 font-bold">{oversizedItems.length}</strong> 个生成文件体积超出微信平台上限（动图&gt;1MB / 静态图&gt;500KB），上传微信时会被提示“表情过大无法添加”。
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={isProcessingAny}
+            onClick={() => {
+              if (onCompressOversized) {
+                onCompressOversized();
+              } else if (onCompressAll) {
+                onCompressAll();
+              }
+            }}
+            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white rounded-lg font-bold shadow-xs flex items-center gap-1.5 shrink-0 transition-all cursor-pointer disabled:opacity-50"
+          >
+            <Zap className="w-3.5 h-3.5" />
+            一键压缩超标文件 ({oversizedItems.length})
+          </button>
+        </div>
+      )}
 
       {/* Background preview mode switch (Includes WeChat Chat & Dark Mode simulation!) */}
       <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-stone-100 text-xs text-stone-500">
@@ -306,8 +428,8 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
       {showGlobalSettings && (
         <div className="p-4 rounded-xl bg-stone-50 border border-emerald-200 text-xs space-y-4 animate-in fade-in duration-150">
           {/* Tabs inside panel */}
-          <div className="flex items-center justify-between border-b border-stone-200 pb-2">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setSettingsTab('wechat')}
@@ -319,6 +441,18 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
               >
                 <Smile className="w-3.5 h-3.5" />
                 微信表情包规范设置
+              </button>
+              <button
+                type="button"
+                onClick={() => setSettingsTab('compression')}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                  settingsTab === 'compression'
+                    ? 'bg-amber-600 text-white shadow-2xs'
+                    : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5" />
+                微信上传体积压缩
               </button>
               <button
                 type="button"
@@ -478,6 +612,230 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
                     </button>
                   ))}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* WeChat Compression & Optimization Tab */}
+          {settingsTab === 'compression' && (
+            <div className="space-y-4 animate-in fade-in duration-100">
+              {/* Compression Switch & WeChat Policy Note */}
+              <div className="bg-amber-500/10 border border-amber-300/80 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={globalOptions.compression?.enabled ?? true}
+                    onChange={(e) => updateCompressionOption('enabled', e.target.checked)}
+                    className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-stone-900 block">
+                      启用微信平台智能体积压缩 (默认开启)
+                    </span>
+                    <span className="text-[11px] text-stone-600">
+                      微信开放平台硬性规定：动态表情不得超过 1024KB (1MB)，静态表情不得超过 500KB
+                    </span>
+                  </div>
+                </label>
+
+                <div className="flex items-center gap-1.5 self-end md:self-center">
+                  <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[11px] font-semibold border border-amber-300">
+                    当前目标: ≤ {globalOptions.compression?.targetSizeKb ?? 1000} KB
+                  </span>
+                </div>
+              </div>
+
+              {/* Preset Selection Grid */}
+              <div className="space-y-1.5">
+                <span className="font-semibold text-stone-800 flex items-center gap-1">
+                  <Gauge className="w-3.5 h-3.5 text-amber-600" />
+                  选择压缩档位与预设:
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                  {COMPRESSION_PRESETS.map((preset) => {
+                    const isSelected = globalOptions.compression?.preset === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => handleSelectPreset(preset.id)}
+                        className={`p-2.5 rounded-xl border text-left transition-all relative ${
+                          isSelected
+                            ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-400 shadow-2xs'
+                            : 'bg-white border-stone-200 hover:border-stone-300 hover:bg-stone-50'
+                        }`}
+                      >
+                        {isSelected && (
+                          <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-amber-500" />
+                        )}
+                        <div className="text-xs font-bold text-stone-900 mb-1">
+                          {preset.name}
+                        </div>
+                        <div className="text-[10px] text-stone-500 line-clamp-2 leading-tight mb-2">
+                          {preset.desc}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-mono font-medium text-stone-600">
+                          <span className="px-1.5 py-0.5 rounded bg-stone-100 border border-stone-200">
+                            ≤{preset.targetSizeKb}KB
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-stone-100 border border-stone-200">
+                            {preset.maxColors}色
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Advanced Fine-Tuning Parameters */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 bg-white p-3.5 rounded-xl border border-stone-200">
+                {/* 1. Target Size Slider */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-stone-700 font-medium">目标体积上限:</span>
+                    <span className="font-mono font-bold text-amber-700">
+                      {globalOptions.compression?.targetSizeKb ?? 1000} KB
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="150"
+                    max="1200"
+                    step="50"
+                    value={globalOptions.compression?.targetSizeKb ?? 1000}
+                    onChange={(e) => {
+                      updateCompressionOption('targetSizeKb', parseInt(e.target.value, 10));
+                      updateCompressionOption('preset', 'custom');
+                    }}
+                    className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[10px] text-stone-400">
+                    <span>300KB (极速)</span>
+                    <span>500KB (静态微信)</span>
+                    <span>1MB (动图微信)</span>
+                  </div>
+                </div>
+
+                {/* 2. Palette Color Limit */}
+                <div className="space-y-1">
+                  <span className="text-stone-700 font-medium block text-xs">
+                    调色板色彩上限:
+                  </span>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[32, 64, 128, 256].map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => {
+                          updateCompressionOption('maxColors', num);
+                          updateCompressionOption('preset', 'custom');
+                        }}
+                        className={`py-1 rounded text-[11px] font-semibold border transition-all ${
+                          (globalOptions.compression?.maxColors ?? 256) === num
+                            ? 'bg-amber-600 text-white border-amber-600'
+                            : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+                        }`}
+                      >
+                        {num}色
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-[10px] text-stone-400 block">
+                    色彩越少，体积缩减越显著
+                  </span>
+                </div>
+
+                {/* 3. Scale Ratio */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-stone-700 font-medium">等比画质缩放:</span>
+                    <span className="font-mono font-bold text-stone-800">
+                      {Math.round((globalOptions.compression?.scaleRatio ?? 1.0) * 100)}%
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[
+                      { label: '100%', val: 1.0 },
+                      { label: '85%', val: 0.85 },
+                      { label: '75%', val: 0.75 },
+                      { label: '60%', val: 0.6 },
+                    ].map((s) => (
+                      <button
+                        key={s.label}
+                        type="button"
+                        onClick={() => {
+                          updateCompressionOption('scaleRatio', s.val);
+                          updateCompressionOption('preset', 'custom');
+                        }}
+                        className={`py-1 rounded text-[11px] font-semibold border transition-all ${
+                          (globalOptions.compression?.scaleRatio ?? 1.0) === s.val
+                            ? 'bg-amber-600 text-white border-amber-600'
+                            : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+                        }`}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="text-[10px] text-stone-400 block">
+                    超出限制时缩放可大幅减少体积
+                  </span>
+                </div>
+
+                {/* 4. Frame Sampling & Fallback Check */}
+                <div className="space-y-2">
+                  <div>
+                    <span className="text-stone-700 font-medium block text-xs mb-1">
+                      动图隔帧采样 (GIF专用):
+                    </span>
+                    <div className="grid grid-cols-2 gap-1">
+                      {[
+                        { label: '全帧完整', val: 1 },
+                        { label: '抽1隔1 (减半)', val: 2 },
+                      ].map((f) => (
+                        <button
+                          key={f.val}
+                          type="button"
+                          onClick={() => {
+                            updateCompressionOption('frameStep', f.val);
+                            updateCompressionOption('preset', 'custom');
+                          }}
+                          className={`py-1 rounded text-[11px] font-semibold border transition-all ${
+                            (globalOptions.compression?.frameStep ?? 1) === f.val
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+                          }`}
+                        >
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-1.5 cursor-pointer pt-0.5">
+                    <input
+                      type="checkbox"
+                      checked={globalOptions.compression?.autoCompressUnderLimit ?? true}
+                      onChange={(e) =>
+                        updateCompressionOption('autoCompressUnderLimit', e.target.checked)
+                      }
+                      className="rounded text-amber-600 focus:ring-amber-500 w-3.5 h-3.5"
+                    />
+                    <span className="text-[11px] text-stone-600 font-medium">
+                      多轮自适应达标保障 (自动二次降色)
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Compliance Guidance Info */}
+              <div className="p-3 bg-stone-100/70 border border-stone-200 rounded-xl text-[11px] text-stone-600 leading-relaxed">
+                <span className="font-bold text-stone-800">💡 微信表情上传避坑指南：</span>
+                微信开放平台审核对表情大小有极严格校验，
+                动态表情需保证 <strong>&le; 1024KB (1MB)</strong>，静态表情需 <strong>&le; 500KB</strong>。
+                若原图过大或帧数过多导致超标，开启【微信平台智能适配】后，系统会自动为您多轮微调色彩量化矩阵，
+                在保持人眼无法察觉的高画质透明轮廓的同时，确保 100% 顺利上传微信。
               </div>
             </div>
           )}

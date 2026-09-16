@@ -1067,7 +1067,180 @@ export default function App() {
         options: { ...options },
       }))
     );
-    showNotification('已成功将微信表情 & 抠图参数同步应用至全部项目');
+    showNotification('已成功将微信表情 & 压缩参数同步应用至全部项目');
+  };
+
+  // Batch compression for all items
+  const handleCompressAll = async () => {
+    if (items.length === 0 || isProcessingAny) return;
+    setIsProcessingAny(true);
+    showNotification('开始批量智能达标压缩处理...');
+
+    for (const item of items) {
+      const targetOptions: RemovalOptions = {
+        ...item.options,
+        compression: {
+          enabled: true,
+          preset: 'wechat-auto',
+          targetSizeKb: item.mediaType === 'gif' ? 1000 : 500,
+          maxColors: 256,
+          scaleRatio: 1.0,
+          frameStep: 1,
+          autoCompressUnderLimit: true,
+          ...item.options.compression,
+        },
+      };
+
+      setItems((prev) =>
+        prev.map((i) =>
+          i.id === item.id
+            ? {
+                ...i,
+                options: targetOptions,
+                status: 'processing',
+                progress: 10,
+                statusMessage: '正在进行微信体积优化压缩...',
+              }
+            : i
+        )
+      );
+
+      try {
+        const result = await processMediaItem(
+          item.file,
+          targetOptions,
+          (progress, message) => {
+            setItems((prev) =>
+              prev.map((i) =>
+                i.id === item.id ? { ...i, progress, statusMessage: message } : i
+              )
+            );
+          },
+          item.cachedBuffer,
+          item.cachedFrames
+        );
+
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  status: 'done',
+                  progress: 100,
+                  statusMessage: '完成',
+                  result,
+                }
+              : i
+          )
+        );
+      } catch (err: any) {
+        console.error('Failed to compress item in batch:', item.name, err);
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  status: 'error',
+                  errorMessage: err.message || '压缩处理失败',
+                }
+              : i
+          )
+        );
+      }
+    }
+
+    setIsProcessingAny(false);
+    showNotification('🎉 批量智能压缩已全部完成！全部文件已按微信平台限制优化。');
+  };
+
+  // Batch compress only oversized items
+  const handleCompressOversized = async () => {
+    const oversized = items.filter(
+      (i) =>
+        i.status === 'done' &&
+        i.result &&
+        (i.result.size > 1024 * 1024 || (i.result.format === 'png' && i.result.size > 512 * 1024))
+    );
+
+    if (oversized.length === 0 || isProcessingAny) return;
+    setIsProcessingAny(true);
+    showNotification(`开始压缩 ${oversized.length} 个超标文件...`);
+
+    for (const item of oversized) {
+      const targetOptions: RemovalOptions = {
+        ...item.options,
+        compression: {
+          enabled: true,
+          preset: 'wechat-auto',
+          targetSizeKb: item.mediaType === 'gif' ? 1000 : 500,
+          maxColors: 128,
+          scaleRatio: 1.0,
+          frameStep: 1,
+          autoCompressUnderLimit: true,
+          ...item.options.compression,
+        },
+      };
+
+      setItems((prev) =>
+        prev.map((i) =>
+          i.id === item.id
+            ? {
+                ...i,
+                options: targetOptions,
+                status: 'processing',
+                progress: 10,
+                statusMessage: '正在压缩至微信规范...',
+              }
+            : i
+        )
+      );
+
+      try {
+        const result = await processMediaItem(
+          item.file,
+          targetOptions,
+          (progress, message) => {
+            setItems((prev) =>
+              prev.map((i) =>
+                i.id === item.id ? { ...i, progress, statusMessage: message } : i
+              )
+            );
+          },
+          item.cachedBuffer,
+          item.cachedFrames
+        );
+
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  status: 'done',
+                  progress: 100,
+                  statusMessage: '完成',
+                  result,
+                }
+              : i
+          )
+        );
+      } catch (err: any) {
+        console.error('Failed to compress oversized item:', item.name, err);
+        setItems((prev) =>
+          prev.map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  status: 'error',
+                  errorMessage: err.message || '压缩失败',
+                }
+              : i
+          )
+        );
+      }
+    }
+
+    setIsProcessingAny(false);
+    showNotification('🎉 超标表情已全部压缩完毕，已符合微信平台上传规范！');
   };
 
   return (
@@ -1439,6 +1612,8 @@ export default function App() {
                   items={items}
                   isProcessingAny={isProcessingAny}
                   onProcessAll={handleProcessAll}
+                  onCompressAll={handleCompressAll}
+                  onCompressOversized={handleCompressOversized}
                   onDownloadAllZip={handleDownloadAllZip}
                   onClearAll={handleClearAll}
                   onApplyGlobalOptions={handleApplyGlobalOptions}

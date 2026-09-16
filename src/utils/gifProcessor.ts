@@ -5,7 +5,81 @@ import {
   ProcessedGifResult,
   FrameInfo,
   WeChatStickerOptions,
+  CompressionOptions,
+  CompressionPreset,
 } from '../types';
+
+export const DEFAULT_COMPRESSION_OPTIONS: CompressionOptions = {
+  enabled: true,
+  preset: 'wechat-auto',
+  targetSizeKb: 1000,
+  maxColors: 256,
+  scaleRatio: 1.0,
+  frameStep: 1,
+  autoCompressUnderLimit: true,
+};
+
+export const COMPRESSION_PRESETS: {
+  id: CompressionPreset;
+  name: string;
+  desc: string;
+  targetSizeKb: number;
+  maxColors: number;
+  scaleRatio: number;
+  frameStep: number;
+  autoCompressUnderLimit: boolean;
+}[] = [
+  {
+    id: 'wechat-auto',
+    name: '微信平台智能适配 (推荐)',
+    desc: '动图自动压缩至 ≤1MB，静态图 ≤500KB，无损感画质',
+    targetSizeKb: 1000,
+    maxColors: 256,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: true,
+  },
+  {
+    id: 'wechat-500kb',
+    name: '微信严苛高保真 (≤500KB)',
+    desc: '适合微信静态表情规范及动图极速秒发',
+    targetSizeKb: 500,
+    maxColors: 128,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: true,
+  },
+  {
+    id: 'wechat-1mb',
+    name: '微信官方动图上限 (≤1MB)',
+    desc: '微信开放平台动图标准严格要求单个表情 ≤1MB',
+    targetSizeKb: 1000,
+    maxColors: 256,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: true,
+  },
+  {
+    id: 'light-300kb',
+    name: '极速轻量省流 (≤300KB)',
+    desc: '深度精简调色板与抽帧，体积超小，任何弱网秒加载',
+    targetSizeKb: 300,
+    maxColors: 64,
+    scaleRatio: 0.9,
+    frameStep: 2,
+    autoCompressUnderLimit: true,
+  },
+  {
+    id: 'custom',
+    name: '自定义压缩参数',
+    desc: '自由微调目标大小、调色板色彩数、缩放比与抽帧',
+    targetSizeKb: 500,
+    maxColors: 128,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: true,
+  },
+];
 
 export interface DecodedGif {
   width: number;
@@ -907,20 +981,84 @@ export function renderFrameWithWeChatOptions(
   return currentImageData;
 }
 
-// Encode processed frames into a GIF blob
-export async function encodeTransparentGif(
+// Rescale ImageData using high-quality offscreen canvas
+export function scaleImageData(imageData: ImageData, targetW: number, targetH: number): ImageData {
+  if (imageData.width === targetW && imageData.height === targetH) {
+    return imageData;
+  }
+  const c1 = document.createElement('canvas');
+  c1.width = imageData.width;
+  c1.height = imageData.height;
+  const ctx1 = c1.getContext('2d', { willReadFrequently: true });
+  if (!ctx1) return imageData;
+  ctx1.putImageData(imageData, 0, 0);
+
+  const c2 = document.createElement('canvas');
+  c2.width = targetW;
+  c2.height = targetH;
+  const ctx2 = c2.getContext('2d', { willReadFrequently: true });
+  if (!ctx2) return imageData;
+  ctx2.imageSmoothingEnabled = true;
+  ctx2.imageSmoothingQuality = 'high';
+  ctx2.drawImage(c1, 0, 0, targetW, targetH);
+  return ctx2.getImageData(0, 0, targetW, targetH);
+}
+
+export interface GifEncodingParams {
+  maxColors?: number; // 32, 64, 128, 255
+  scaleRatio?: number; // 0.5 to 1.0
+  frameStep?: number; // 1, 2, 3
+}
+
+// Encode processed frames into a GIF blob with custom compression parameters
+export async function encodeTransparentGifWithParams(
   frames: { imageData: ImageData; delay: number }[],
   width: number,
   height: number,
+  params?: GifEncodingParams,
   onProgress?: (progress: number) => void
-): Promise<Blob> {
+): Promise<{ blob: Blob; width: number; height: number; frameCount: number }> {
+  const maxColors = Math.max(16, Math.min(255, params?.maxColors ?? 255));
+  const scaleRatio = Math.max(0.3, Math.min(1.0, params?.scaleRatio ?? 1.0));
+  const frameStep = Math.max(1, Math.min(4, params?.frameStep ?? 1));
+
+  // 1. Frame Sampling / Stepping (accumulate delay to preserve exact playback speed and overall duration)
+  let sampledFrames: { imageData: ImageData; delay: number }[] = [];
+  if (frameStep > 1 && frames.length > 3) {
+    for (let i = 0; i < frames.length; i += frameStep) {
+      let totalDelay = 0;
+      for (let s = 0; s < frameStep && i + s < frames.length; s++) {
+        totalDelay += frames[i + s].delay;
+      }
+      sampledFrames.push({
+        imageData: frames[i].imageData,
+        delay: totalDelay,
+      });
+    }
+  } else {
+    sampledFrames = frames;
+  }
+
+  // 2. Scaling dimensions if scaleRatio < 1.0
+  const outW = Math.max(16, Math.round(width * scaleRatio));
+  const outH = Math.max(16, Math.round(height * scaleRatio));
+  const needsRescaling = outW !== width || outH !== height;
+
+  const scaledFrames = needsRescaling
+    ? sampledFrames.map((f) => ({
+        imageData: scaleImageData(f.imageData, outW, outH),
+        delay: f.delay,
+      }))
+    : sampledFrames;
+
+  // 3. GIF Encoding via gifenc
   const gif = GIFEncoder();
-  const totalFrames = frames.length;
+  const totalFrames = scaledFrames.length;
 
   for (let f = 0; f < totalFrames; f++) {
-    const frame = frames[f];
+    const frame = scaledFrames[f];
     const data = frame.imageData.data;
-    const totalPixels = width * height;
+    const totalPixels = outW * outH;
 
     // Count opaque pixels
     let opaqueCount = 0;
@@ -934,7 +1072,7 @@ export async function encodeTransparentGif(
       // Entire frame is transparent
       const palette = [[0, 0, 0]];
       const index = new Uint8Array(totalPixels);
-      gif.writeFrame(index, width, height, {
+      gif.writeFrame(index, outW, outH, {
         palette,
         delay: frame.delay,
         transparent: true,
@@ -956,14 +1094,13 @@ export async function encodeTransparentGif(
         }
       }
 
-      // Quantize down to at most 255 colors (saving index 0 for transparent)
-      const opaquePalette = quantize(opaquePixels, 255, { format: 'rgb565' });
+      // Quantize down to at most maxColors (index 0 is reserved for transparent dummy)
+      const opaquePalette = quantize(opaquePixels, maxColors, { format: 'rgb565' });
 
       // Build full palette: index 0 is transparent dummy color
       const fullPalette = [[0, 0, 0], ...opaquePalette];
 
-      // Map the entire frame using applyPalette with opaquePalette
-      // Then offset indices by +1 for opaque pixels, and 0 for transparent pixels
+      // Map entire frame
       const rawIndices = applyPalette(data, opaquePalette, 'rgb565');
       const finalIndices = new Uint8Array(totalPixels);
 
@@ -975,7 +1112,7 @@ export async function encodeTransparentGif(
         }
       }
 
-      gif.writeFrame(finalIndices, width, height, {
+      gif.writeFrame(finalIndices, outW, outH, {
         palette: fullPalette,
         delay: frame.delay,
         transparent: true,
@@ -989,7 +1126,6 @@ export async function encodeTransparentGif(
       onProgress(Math.round(((f + 1) / totalFrames) * 100));
     }
 
-    // Yield to browser event loop so UI stays super responsive
     if (f % 2 === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -997,7 +1133,244 @@ export async function encodeTransparentGif(
 
   gif.finish();
   const bytes = gif.bytes();
-  return new Blob([bytes], { type: 'image/gif' });
+  const blob = new Blob([bytes], { type: 'image/gif' });
+
+  return {
+    blob,
+    width: outW,
+    height: outH,
+    frameCount: totalFrames,
+  };
+}
+
+// Encode processed frames into a GIF blob (backward compatible)
+export async function encodeTransparentGif(
+  frames: { imageData: ImageData; delay: number }[],
+  width: number,
+  height: number,
+  onProgress?: (progress: number) => void
+): Promise<Blob> {
+  const res = await encodeTransparentGifWithParams(
+    frames,
+    width,
+    height,
+    { maxColors: 255 },
+    onProgress
+  );
+  return res.blob;
+}
+
+// Intelligent multi-pass GIF compression to strictly fit WeChat upload limits (<1MB)
+export async function compressAndEncodeGif(
+  frames: { imageData: ImageData; delay: number }[],
+  width: number,
+  height: number,
+  originalSize: number,
+  compression: CompressionOptions,
+  onProgress?: (progress: number, note?: string) => void
+): Promise<{ blob: Blob; width: number; height: number; frameCount: number }> {
+  const targetBytes = (compression.targetSizeKb || 1000) * 1024;
+
+  // Pass 1: Initial encoding using user's settings
+  const baseParams: GifEncodingParams = {
+    maxColors: compression.maxColors || 256,
+    scaleRatio: compression.scaleRatio || 1.0,
+    frameStep: compression.frameStep || 1,
+  };
+
+  onProgress?.(50, '正在初次编码动图...');
+  let currentRes = await encodeTransparentGifWithParams(
+    frames,
+    width,
+    height,
+    baseParams,
+    (pct) => onProgress?.(50 + Math.round((pct / 100) * 20), `正在编码 GIF 帧 (${pct}%)...`)
+  );
+
+  // If already complies with target size or auto-compression is off, return immediately
+  if (!compression.autoCompressUnderLimit || currentRes.blob.size <= targetBytes) {
+    return currentRes;
+  }
+
+  // Multi-pass iterative compression strategies
+  const passes: { name: string; params: GifEncodingParams }[] = [];
+
+  // Strategy 1: Reduce palette to 128 colors if it was high
+  if ((baseParams.maxColors ?? 256) > 128) {
+    passes.push({
+      name: '精简调色板 (128 色)',
+      params: { ...baseParams, maxColors: 128 },
+    });
+  }
+
+  // Strategy 2: Frame stepping (2) if frames.length > 6
+  if (frames.length > 6 && (baseParams.frameStep ?? 1) < 2) {
+    passes.push({
+      name: '智能隔帧采样 (延时同步翻倍，播放速度不变)',
+      params: { ...baseParams, maxColors: 128, frameStep: 2 },
+    });
+  }
+
+  // Strategy 3: Reduce palette to 64 colors
+  passes.push({
+    name: '精简调色板 (64 色)',
+    params: {
+      ...baseParams,
+      maxColors: 64,
+      frameStep: frames.length > 6 ? 2 : 1,
+    },
+  });
+
+  // Strategy 4: Scale down slightly to 80% if still exceeding
+  passes.push({
+    name: '等比缩放画面至 80%',
+    params: {
+      maxColors: 64,
+      frameStep: frames.length > 6 ? 2 : 1,
+      scaleRatio: Math.max(0.65, (baseParams.scaleRatio || 1.0) * 0.8),
+    },
+  });
+
+  // Strategy 5: Aggressive compression for very large GIFs
+  if (frames.length > 12) {
+    passes.push({
+      name: '极限动图省流压缩 (32色 / 抽帧 / 75%尺寸)',
+      params: {
+        maxColors: 32,
+        frameStep: 3,
+        scaleRatio: Math.max(0.6, (baseParams.scaleRatio || 1.0) * 0.75),
+      },
+    });
+  }
+
+  let bestRes = currentRes;
+  for (let i = 0; i < passes.length; i++) {
+    const pass = passes[i];
+    const passPct = 70 + Math.round(((i + 1) / (passes.length + 1)) * 28);
+    onProgress?.(
+      passPct,
+      `当前体积 ${(bestRes.blob.size / 1024).toFixed(0)}KB 超出限制 (${(targetBytes / 1024).toFixed(0)}KB)，正在${pass.name}...`
+    );
+
+    const attempt = await encodeTransparentGifWithParams(
+      frames,
+      width,
+      height,
+      pass.params
+    );
+
+    if (attempt.blob.size < bestRes.blob.size) {
+      bestRes = attempt;
+    }
+
+    if (bestRes.blob.size <= targetBytes) {
+      break;
+    }
+  }
+
+  return bestRes;
+}
+
+// Compress static PNG to comply with WeChat platform standards (<= 500KB)
+export async function compressStaticImage(
+  imageData: ImageData,
+  originalSize: number,
+  compression: CompressionOptions,
+  onStatus?: (msg: string) => void
+): Promise<{ blob: Blob; width: number; height: number }> {
+  let targetW = imageData.width;
+  let targetH = imageData.height;
+
+  // Apply user scaleRatio if present
+  if (compression.scaleRatio && compression.scaleRatio < 1.0) {
+    targetW = Math.max(16, Math.round(targetW * compression.scaleRatio));
+    targetH = Math.max(16, Math.round(targetH * compression.scaleRatio));
+  }
+
+  // If dimensions are unnecessarily huge (> 1200), downscale gracefully
+  if (targetW > 1200 || targetH > 1200) {
+    const scale = 1200 / Math.max(targetW, targetH);
+    targetW = Math.round(targetW * scale);
+    targetH = Math.round(targetH * scale);
+  }
+
+  const targetBytes = (compression.targetSizeKb || 500) * 1024;
+  let currentImageData =
+    targetW !== imageData.width || targetH !== imageData.height
+      ? scaleImageData(imageData, targetW, targetH)
+      : imageData;
+
+  // Pass 1: Standard PNG export
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('无法创建 Canvas 2D 上下文');
+  ctx.putImageData(currentImageData, 0, 0);
+
+  let blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((b) => {
+      if (b) resolve(b);
+      else reject(new Error('导出 PNG 失败'));
+    }, 'image/png');
+  });
+
+  // If already within WeChat limit, return
+  if (!compression.autoCompressUnderLimit || blob.size <= targetBytes) {
+    return { blob, width: targetW, height: targetH };
+  }
+
+  // Pass 2: Color binning to dramatically increase DEFLATE compression ratio
+  onStatus?.(`当前体积 ${(blob.size / 1024).toFixed(0)}KB 超过微信限制，正在进行色彩优化压缩...`);
+  const binData = new ImageData(new Uint8ClampedArray(currentImageData.data), targetW, targetH);
+  const data = binData.data;
+  const total = targetW * targetH * 4;
+  for (let i = 0; i < total; i += 4) {
+    if (data[i + 3] > 16) {
+      data[i] = Math.round(data[i] / 8) * 8;
+      data[i + 1] = Math.round(data[i + 1] / 8) * 8;
+      data[i + 2] = Math.round(data[i + 2] / 8) * 8;
+    }
+  }
+  ctx.clearRect(0, 0, targetW, targetH);
+  ctx.putImageData(binData, 0, 0);
+  const blob2 = await new Promise<Blob>((resolve) =>
+    canvas.toBlob((b) => resolve(b!), 'image/png')
+  );
+  if (blob2.size < blob.size) {
+    blob = blob2;
+  }
+  if (blob.size <= targetBytes) {
+    return { blob, width: targetW, height: targetH };
+  }
+
+  // Pass 3: Gradual downscaling if still over targetBytes
+  onStatus?.(`正在进行尺寸自适应微调以确保符合微信 ≤${compression.targetSizeKb}KB 限制...`);
+  let scale = 0.85;
+  while (scale >= 0.5 && blob.size > targetBytes) {
+    const sW = Math.max(16, Math.round(targetW * scale));
+    const sH = Math.max(16, Math.round(targetH * scale));
+    const scaledCanvas = document.createElement('canvas');
+    scaledCanvas.width = sW;
+    scaledCanvas.height = sH;
+    const sCtx = scaledCanvas.getContext('2d', { willReadFrequently: true });
+    if (sCtx) {
+      sCtx.imageSmoothingEnabled = true;
+      sCtx.imageSmoothingQuality = 'high';
+      sCtx.drawImage(canvas, 0, 0, sW, sH);
+      const b = await new Promise<Blob>((resolve) =>
+        scaledCanvas.toBlob((res) => resolve(res!), 'image/png')
+      );
+      if (b && b.size < blob.size) {
+        blob = b;
+        targetW = sW;
+        targetH = sH;
+      }
+    }
+    scale -= 0.15;
+  }
+
+  return { blob, width: targetW, height: targetH };
 }
 
 // Complete processing pipeline for a single GIF file
@@ -1008,6 +1381,16 @@ export async function processGifItem(
   cachedBuffer?: ArrayBuffer
 ): Promise<ProcessedGifResult> {
   const isWeChat = !!options.wechat?.enabled;
+  const compression = options.compression ?? {
+    enabled: true,
+    preset: 'wechat-auto',
+    targetSizeKb: 1000,
+    maxColors: 256,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: true,
+  };
+
   onProgress?.(10, '正在解析 GIF 帧...');
   const arrayBuffer = await getSafeArrayBuffer(file, cachedBuffer);
   const decoded = await decodeGif(arrayBuffer);
@@ -1030,38 +1413,67 @@ export async function processGifItem(
     };
   });
 
-  const finalWidth = processedFrames[0]?.imageData.width || decoded.width;
-  const finalHeight = processedFrames[0]?.imageData.height || decoded.height;
+  const baseWidth = processedFrames[0]?.imageData.width || decoded.width;
+  const baseHeight = processedFrames[0]?.imageData.height || decoded.height;
 
   onProgress?.(
     50,
-    isWeChat
-      ? '正在重新编码微信标准表情包 GIF (<1MB 体积优化)...'
+    compression.enabled
+      ? `正在智能压缩并编码动图 (目标 ≤${compression.targetSizeKb || 1000}KB)...`
       : '正在重新编码透明 GIF...'
   );
 
-  const blob = await encodeTransparentGif(
-    processedFrames,
-    finalWidth,
-    finalHeight,
-    (pct) => {
-      const mappedPct = Math.round(50 + (pct / 100) * 45);
-      onProgress?.(mappedPct, `正在编码 GIF 帧 (${pct}%)...`);
-    }
-  );
+  const encoded = compression.enabled
+    ? await compressAndEncodeGif(
+        processedFrames,
+        baseWidth,
+        baseHeight,
+        file.size,
+        compression,
+        (pct, note) => {
+          onProgress?.(pct, note || `正在编码 GIF 帧 (${pct}%)...`);
+        }
+      )
+    : {
+        blob: await encodeTransparentGif(
+          processedFrames,
+          baseWidth,
+          baseHeight,
+          (pct) => {
+            const mappedPct = Math.round(50 + (pct / 100) * 45);
+            onProgress?.(mappedPct, `正在编码 GIF 帧 (${pct}%)...`);
+          }
+        ),
+        width: baseWidth,
+        height: baseHeight,
+        frameCount: processedFrames.length,
+      };
 
-  onProgress?.(100, isWeChat ? '微信表情包生成完成' : '处理完成');
-  const url = URL.createObjectURL(blob);
+  const finalBlob = encoded.blob;
+  const passedWeChat = finalBlob.size <= 1024 * 1024;
+  const ratio =
+    file.size > 0 ? Math.max(0, Math.round((1 - finalBlob.size / file.size) * 100)) : 0;
+  const summary =
+    file.size > 0
+      ? `原图 ${(file.size / 1024).toFixed(0)}KB ➔ 压缩后 ${(finalBlob.size / 1024).toFixed(0)}KB (-${ratio}%) ${passedWeChat ? '✅ 符合微信平台限制' : '⚠️ 仍超出微信限制'}`
+      : `文件大小 ${(finalBlob.size / 1024).toFixed(0)}KB`;
+
+  onProgress?.(100, isWeChat ? '微信表情包生成完成 (已压缩)' : '处理完成 (已压缩)');
+  const url = URL.createObjectURL(finalBlob);
 
   return {
-    blob,
+    blob: finalBlob,
     url,
-    size: blob.size,
-    frameCount: decoded.frames.length,
-    width: finalWidth,
-    height: finalHeight,
+    size: finalBlob.size,
+    frameCount: encoded.frameCount,
+    width: encoded.width,
+    height: encoded.height,
     format: 'gif',
     isWeChatSticker: isWeChat,
+    originalSize: file.size,
+    compressionRatio: ratio,
+    passedWeChatLimit: passedWeChat,
+    compressionSummary: summary,
   };
 }
 
@@ -1074,6 +1486,16 @@ export async function processStaticImageItem(
   cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
   const isWeChat = !!options.wechat?.enabled;
+  const compression = options.compression ?? {
+    enabled: true,
+    preset: 'wechat-auto',
+    targetSizeKb: 500,
+    maxColors: 256,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: true,
+  };
+
   onProgress?.(15, '正在读取并解析图片...');
 
   let sourceImageData: ImageData;
@@ -1096,40 +1518,63 @@ export async function processStaticImageItem(
     ? renderFrameWithWeChatOptions(rawTransparentData, options.wechat)
     : rawTransparentData;
 
-  const targetWidth = processedImageData.width;
-  const targetHeight = processedImageData.height;
-
   onProgress?.(
-    80,
-    isWeChat ? '正在导出微信表情包透明 PNG...' : '正在生成高清无损透明 PNG...'
+    75,
+    compression.enabled
+      ? `正在生成并压缩透明 PNG (微信静态表情规范 ≤${compression.targetSizeKb || 500}KB)...`
+      : isWeChat
+        ? '正在导出微信表情包透明 PNG...'
+        : '正在生成高清无损透明 PNG...'
   );
 
-  const canvas = document.createElement('canvas');
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('无法创建 Canvas 2D 绘图上下文');
-  ctx.putImageData(processedImageData, 0, 0);
+  const compressed = compression.enabled
+    ? await compressStaticImage(
+        processedImageData,
+        file.size,
+        compression,
+        (msg) => onProgress?.(85, msg)
+      )
+    : await (async () => {
+        const c = document.createElement('canvas');
+        c.width = processedImageData.width;
+        c.height = processedImageData.height;
+        const ctx = c.getContext('2d');
+        if (!ctx) throw new Error('无法创建 Canvas 2D 上下文');
+        ctx.putImageData(processedImageData, 0, 0);
+        const b = await new Promise<Blob>((resolve, reject) => {
+          c.toBlob((res) => {
+            if (res) resolve(res);
+            else reject(new Error('导出 PNG 失败'));
+          }, 'image/png');
+        });
+        return { blob: b, width: processedImageData.width, height: processedImageData.height };
+      })();
 
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((b) => {
-      if (b) resolve(b);
-      else reject(new Error('导出透明 PNG 失败'));
-    }, 'image/png');
-  });
+  const finalBlob = compressed.blob;
+  const passedWeChat = finalBlob.size <= 512 * 1024;
+  const ratio =
+    file.size > 0 ? Math.max(0, Math.round((1 - finalBlob.size / file.size) * 100)) : 0;
+  const summary =
+    file.size > 0
+      ? `原图 ${(file.size / 1024).toFixed(0)}KB ➔ 压缩后 ${(finalBlob.size / 1024).toFixed(0)}KB (-${ratio}%) ${passedWeChat ? '✅ 符合微信平台限制' : '⚠️ 仍超出微信限制'}`
+      : `文件大小 ${(finalBlob.size / 1024).toFixed(0)}KB`;
 
-  onProgress?.(100, isWeChat ? '微信表情包生成完成' : '处理完成');
-  const url = URL.createObjectURL(blob);
+  onProgress?.(100, isWeChat ? '微信表情包生成完成 (已压缩)' : '处理完成 (已压缩)');
+  const url = URL.createObjectURL(finalBlob);
 
   return {
-    blob,
+    blob: finalBlob,
     url,
-    size: blob.size,
+    size: finalBlob.size,
     frameCount: 1,
-    width: targetWidth,
-    height: targetHeight,
+    width: compressed.width,
+    height: compressed.height,
     format: 'png',
     isWeChatSticker: isWeChat,
+    originalSize: file.size,
+    compressionRatio: ratio,
+    passedWeChatLimit: passedWeChat,
+    compressionSummary: summary,
   };
 }
 

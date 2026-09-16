@@ -9,6 +9,7 @@ import {
   Sliders,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Sparkles,
   ChevronDown,
   ChevronUp,
@@ -18,6 +19,9 @@ import {
   Smile,
   Type,
   Layers,
+  Zap,
+  Gauge,
+  Scale,
 } from 'lucide-react';
 import {
   GifItem,
@@ -25,6 +29,8 @@ import {
   PreviewBgMode,
   FrameInfo,
   WeChatStickerOptions,
+  CompressionOptions,
+  CompressionPreset,
 } from '../types';
 import {
   decodeMediaFile,
@@ -32,6 +38,7 @@ import {
   rgbToHex,
   removeBackgroundFromFrame,
   renderFrameWithWeChatOptions,
+  COMPRESSION_PRESETS,
 } from '../utils/gifProcessor';
 
 interface GifCardProps {
@@ -59,6 +66,14 @@ export const GifCard: React.FC<GifCardProps> = ({
   const [showWeChatOptions, setShowWeChatOptions] = useState(
     item.options.wechat?.enabled ?? true
   );
+  const [showCompressionOptions, setShowCompressionOptions] = useState(false);
+
+  const isOversized =
+    item.status === 'done' &&
+    !!item.result &&
+    (item.result.format === 'gif'
+      ? item.result.size > 1024 * 1024
+      : item.result.size > 512 * 1024);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationTimerRef = useRef<number | null>(null);
@@ -251,6 +266,44 @@ export const GifCard: React.FC<GifCardProps> = ({
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const updateCompressionSetting = <K extends keyof CompressionOptions>(
+    key: K,
+    value: CompressionOptions[K]
+  ) => {
+    onUpdateOptions(item.id, {
+      ...item.options,
+      compression: {
+        enabled: true,
+        preset: 'wechat-auto',
+        targetSizeKb: 1000,
+        maxColors: 256,
+        scaleRatio: 1.0,
+        frameStep: 1,
+        autoCompressUnderLimit: true,
+        ...item.options.compression,
+        [key]: value,
+      },
+    });
+  };
+
+  const handleSelectPreset = (preset: CompressionPreset) => {
+    const found = COMPRESSION_PRESETS.find((p) => p.id === preset);
+    if (found) {
+      onUpdateOptions(item.id, {
+        ...item.options,
+        compression: {
+          enabled: true,
+          preset,
+          targetSizeKb: found.targetSizeKb,
+          maxColors: found.maxColors,
+          scaleRatio: found.scaleRatio,
+          frameStep: found.frameStep,
+          autoCompressUnderLimit: found.autoCompressUnderLimit,
+        },
+      });
+    }
   };
 
   const getBgClass = () => {
@@ -473,21 +526,51 @@ export const GifCard: React.FC<GifCardProps> = ({
         </div>
 
         {/* Media Dimension & File Size Info */}
-        <div className="flex items-center justify-between w-full max-w-[240px] text-[11px] text-stone-500 mt-2 px-1">
-          <span>
-            {decodedFrames[0]?.imageData
-              ? `${item.options.wechat?.enabled && item.options.wechat?.standardSize === '240' ? '240×240 (微信标准)' : `${decodedFrames[0].imageData.width}×${decodedFrames[0].imageData.height}`}`
-              : '加载中...'}
-          </span>
-          <span>
-            {item.result?.size ? (
-              <span className="font-medium text-emerald-700">
-                {formatFileSize(item.result.size)}
+        <div className="flex flex-col gap-1 w-full max-w-[240px] text-[11px] text-stone-500 mt-2 px-1">
+          <div className="flex items-center justify-between">
+            <span>
+              {decodedFrames[0]?.imageData
+                ? `${item.options.wechat?.enabled && item.options.wechat?.standardSize === '240' ? '240×240 (微信标准)' : `${decodedFrames[0].imageData.width}×${decodedFrames[0].imageData.height}`}`
+                : '加载中...'}
+            </span>
+            <span>
+              {item.result?.size ? (
+                <span className="font-semibold text-stone-900">
+                  {formatFileSize(item.result.size)}
+                </span>
+              ) : (
+                formatFileSize(item.file.size)
+              )}
+            </span>
+          </div>
+
+          {/* Size Delta & WeChat Limit Status */}
+          {item.result && (
+            <div className="flex items-center justify-between pt-1 border-t border-stone-100">
+              <span className="text-[10px] text-stone-400">
+                原图: {formatFileSize(item.file.size)}
+                {item.result.size < item.file.size && (
+                  <span className="text-emerald-600 font-medium ml-1">
+                    (-{Math.round((1 - item.result.size / item.file.size) * 100)}%)
+                  </span>
+                )}
               </span>
-            ) : (
-              formatFileSize(item.file.size)
-            )}
-          </span>
+              {isOversized ? (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-300 font-semibold"
+                  title="微信平台限制: 动图≤1024KB(1MB)，静态图≤500KB"
+                >
+                  <AlertTriangle className="w-3 h-3 text-amber-600" />
+                  超出微信限制
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 font-semibold">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                  符合微信规范
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Animation Scrubber & Playback Controls (GIF Only) */}
@@ -655,6 +738,185 @@ export const GifCard: React.FC<GifCardProps> = ({
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* WECHAT COMPRESSION & SIZE TUNING PANEL */}
+      <div className="p-3.5 border-t border-amber-100 bg-amber-50/25 space-y-2.5">
+        <div className="flex items-center justify-between">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={item.options.compression?.enabled ?? true}
+              onChange={(e) => {
+                const enabled = e.target.checked;
+                updateCompressionSetting('enabled', enabled);
+                if (enabled) setShowCompressionOptions(true);
+              }}
+              className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4"
+            />
+            <span className="text-xs font-bold text-stone-800 flex items-center gap-1">
+              <Zap className="w-3.5 h-3.5 text-amber-600" />
+              微信上传体积压缩
+            </span>
+          </label>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-mono font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded">
+              目标: ≤{item.options.compression?.targetSizeKb ?? 1000}KB
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowCompressionOptions(!showCompressionOptions)}
+              className="text-[11px] text-amber-700 font-semibold hover:underline flex items-center gap-0.5"
+            >
+              {showCompressionOptions ? '收起配置' : '微调参数'}
+              {showCompressionOptions ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Compression Presets Row */}
+        <div className="grid grid-cols-4 gap-1 pt-0.5">
+          {[
+            { id: 'wechat-auto', label: '智能适配' },
+            { id: 'wechat-500kb', label: '≤500KB' },
+            { id: 'light-300kb', label: '≤300KB' },
+            { id: 'custom', label: '自定义' },
+          ].map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              onClick={() => {
+                handleSelectPreset(preset.id as CompressionPreset);
+                if (preset.id === 'custom') setShowCompressionOptions(true);
+              }}
+              className={`py-1 rounded text-[10px] font-semibold border transition-all ${
+                (item.options.compression?.preset ?? 'wechat-auto') === preset.id
+                  ? 'bg-amber-600 text-white border-amber-600 shadow-2xs'
+                  : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+              }`}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Detailed Compression Options */}
+        {showCompressionOptions && (
+          <div className="space-y-2 pt-2 border-t border-amber-100 text-xs animate-in fade-in duration-100">
+            {/* Target Size Slider */}
+            <div className="bg-white p-2 rounded-lg border border-amber-200/80 space-y-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-medium text-stone-700">限制上限:</span>
+                <span className="font-mono font-bold text-amber-700">
+                  {item.options.compression?.targetSizeKb ?? 1000} KB
+                </span>
+              </div>
+              <input
+                type="range"
+                min="150"
+                max="1200"
+                step="50"
+                value={item.options.compression?.targetSizeKb ?? 1000}
+                onChange={(e) => {
+                  updateCompressionSetting('targetSizeKb', parseInt(e.target.value, 10));
+                  updateCompressionSetting('preset', 'custom');
+                }}
+                className="w-full accent-amber-600 h-1.5 bg-stone-200 rounded cursor-pointer"
+              />
+            </div>
+
+            {/* Colors & Scale Row */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-white p-2 rounded-lg border border-amber-200/80">
+                <span className="text-[10px] font-medium text-stone-600 block mb-1">
+                  调色板色彩数
+                </span>
+                <div className="grid grid-cols-3 gap-1">
+                  {[64, 128, 256].map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => {
+                        updateCompressionSetting('maxColors', c);
+                        updateCompressionSetting('preset', 'custom');
+                      }}
+                      className={`py-0.5 rounded text-[10px] font-semibold border ${
+                        (item.options.compression?.maxColors ?? 256) === c
+                          ? 'bg-amber-600 text-white border-amber-600'
+                          : 'bg-white text-stone-600 border-stone-200'
+                      }`}
+                    >
+                      {c}色
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white p-2 rounded-lg border border-amber-200/80">
+                <span className="text-[10px] font-medium text-stone-600 block mb-1">
+                  等比缩放
+                </span>
+                <div className="grid grid-cols-3 gap-1">
+                  {[
+                    { label: '100%', val: 1.0 },
+                    { label: '85%', val: 0.85 },
+                    { label: '70%', val: 0.7 },
+                  ].map((s) => (
+                    <button
+                      key={s.label}
+                      type="button"
+                      onClick={() => {
+                        updateCompressionSetting('scaleRatio', s.val);
+                        updateCompressionSetting('preset', 'custom');
+                      }}
+                      className={`py-0.5 rounded text-[10px] font-semibold border ${
+                        (item.options.compression?.scaleRatio ?? 1.0) === s.val
+                          ? 'bg-amber-600 text-white border-amber-600'
+                          : 'bg-white text-stone-600 border-stone-200'
+                      }`}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Frame step if GIF */}
+            {item.mediaType === 'gif' && (
+              <div className="bg-white p-2 rounded-lg border border-amber-200/80 flex items-center justify-between text-[11px]">
+                <span className="font-medium text-stone-600">隔帧抽样:</span>
+                <div className="flex items-center gap-1">
+                  {[
+                    { label: '保留全帧', val: 1 },
+                    { label: '抽1隔1 (体积-40%)', val: 2 },
+                  ].map((f) => (
+                    <button
+                      key={f.val}
+                      type="button"
+                      onClick={() => {
+                        updateCompressionSetting('frameStep', f.val);
+                        updateCompressionSetting('preset', 'custom');
+                      }}
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        (item.options.compression?.frameStep ?? 1) === f.val
+                          ? 'bg-amber-600 text-white border-amber-600'
+                          : 'bg-white text-stone-600 border-stone-200'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -847,6 +1109,32 @@ export const GifCard: React.FC<GifCardProps> = ({
         </div>
       )}
 
+      {/* Oversized Warning Alert */}
+      {isOversized && item.result && (
+        <div className="mx-3 my-2 p-2.5 bg-amber-50/95 border border-amber-300 rounded-lg flex items-center justify-between gap-2 text-xs text-amber-900 shadow-2xs">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            <span className="truncate">
+              当前体积 {formatFileSize(item.result.size)} 超出微信
+              {item.result.format === 'gif' ? '1MB' : '500KB'} 上限，上传微信会失败
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={item.status === 'processing'}
+            onClick={() => {
+              updateCompressionSetting('enabled', true);
+              updateCompressionSetting('autoCompressUnderLimit', true);
+              updateCompressionSetting('preset', 'wechat-auto');
+              onProcessItem(item.id, true);
+            }}
+            className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-bold shrink-0 transition-colors flex items-center gap-1 shadow-2xs cursor-pointer"
+          >
+            <Zap className="w-3 h-3" /> 一键压缩达标
+          </button>
+        </div>
+      )}
+
       {/* Card Footer Actions */}
       <div className="p-3 border-t border-stone-100 bg-white flex items-center justify-between gap-2 mt-auto">
         {/* Generate WeChat Sticker (Primary) */}
@@ -914,8 +1202,12 @@ export const GifCard: React.FC<GifCardProps> = ({
       {/* Helpful WeChat copy note */}
       <div className="px-3 pb-2 pt-0.5 bg-white text-[10px] text-stone-400 flex items-center justify-between border-t border-stone-50">
         <span>💡 微信中可直接长按或右键复制此图发送</span>
-        {item.result?.isWeChatSticker && (
-          <span className="text-[#07c160] font-medium">体积符合微信 &lt;1MB 限制</span>
+        {item.result && (
+          <span className={isOversized ? 'text-amber-600 font-semibold' : 'text-[#07c160] font-medium'}>
+            {isOversized
+              ? `体积超限 (${formatFileSize(item.result.size)})，需压缩至 ≤${item.result.format === 'gif' ? '1MB' : '500KB'}`
+              : `体积符合微信 ≤${item.result.format === 'gif' ? '1MB' : '500KB'} 规范`}
+          </span>
         )}
       </div>
     </div>

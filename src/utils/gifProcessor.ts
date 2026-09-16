@@ -182,56 +182,296 @@ export async function decodeGif(arrayBuffer: ArrayBuffer): Promise<DecodedGif> {
 }
 
 // Check if a file is an animated GIF
-export function isGifFile(file: File): boolean {
-  return file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
+export function isGifFile(file: File | Blob | { name?: string; type?: string }): boolean {
+  const f = file as { name?: string; type?: string };
+  return f.type === 'image/gif' || (!!f.name && f.name.toLowerCase().endsWith('.gif'));
+}
+
+/**
+ * Safely detach a browser DOM File into an in-memory File + ArrayBuffer.
+ * In Chromium/Edge, a File object connected to the disk can throw net::ERR_UPLOAD_FILE_CHANGED
+ * if the file on disk was modified, touched, moved, or temporarily locked (e.g. download finished, AV scan).
+ * Loading the bytes into an in-memory buffer detaches it from disk access entirely.
+ */
+export async function detachFileToMemory(file: File): Promise<{
+  safeFile: File;
+  arrayBuffer: ArrayBuffer;
+  dataUrl?: string;
+}> {
+  // Strategy 1: file.arrayBuffer()
+  try {
+    const ab = await file.arrayBuffer();
+    if (ab && ab.byteLength > 0) {
+      const safeBlob = new Blob([ab], { type: file.type || 'image/png' });
+      const safeFile = new File([safeBlob], file.name, {
+        type: file.type || 'image/png',
+        lastModified: file.lastModified || Date.now(),
+      });
+      return { safeFile, arrayBuffer: ab };
+    }
+  } catch (e1) {
+    console.warn('file.arrayBuffer() failed, trying FileReader...', e1);
+  }
+
+  // Strategy 2: FileReader.readAsArrayBuffer
+  try {
+    const ab = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+      reader.readAsArrayBuffer(file);
+    });
+    if (ab && ab.byteLength > 0) {
+      const safeBlob = new Blob([ab], { type: file.type || 'image/png' });
+      const safeFile = new File([safeBlob], file.name, {
+        type: file.type || 'image/png',
+        lastModified: file.lastModified || Date.now(),
+      });
+      return { safeFile, arrayBuffer: ab };
+    }
+  } catch (e2) {
+    console.warn('FileReader.readAsArrayBuffer failed, trying DataURL...', e2);
+  }
+
+  // Strategy 3: FileReader.readAsDataURL
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error || new Error('DataURL reader failed'));
+      reader.readAsDataURL(file);
+    });
+    const res = await fetch(dataUrl);
+    const ab = await res.arrayBuffer();
+    const safeBlob = new Blob([ab], { type: file.type || 'image/png' });
+    const safeFile = new File([safeBlob], file.name, {
+      type: file.type || 'image/png',
+      lastModified: file.lastModified || Date.now(),
+    });
+    return { safeFile, arrayBuffer: ab, dataUrl };
+  } catch (e3) {
+    console.warn('DataURL fallback failed, trying slice...', e3);
+  }
+
+  // Strategy 4: file.slice()
+  try {
+    const sliced = file.slice(0, file.size, file.type);
+    const ab = await sliced.arrayBuffer();
+    const safeBlob = new Blob([ab], { type: file.type || 'image/png' });
+    const safeFile = new File([safeBlob], file.name, {
+      type: file.type || 'image/png',
+      lastModified: file.lastModified || Date.now(),
+    });
+    return { safeFile, arrayBuffer: ab };
+  } catch (e4) {
+    console.warn('file.slice failed', e4);
+  }
+
+  return { safeFile: file, arrayBuffer: new ArrayBuffer(0) };
+}
+
+/**
+ * Safely extracts an ArrayBuffer from a File or Blob with multiple fallbacks
+ */
+export async function getSafeArrayBuffer(file: File | Blob, cachedBuffer?: ArrayBuffer): Promise<ArrayBuffer> {
+  if (cachedBuffer && cachedBuffer.byteLength > 0) {
+    return cachedBuffer;
+  }
+  try {
+    const ab = await file.arrayBuffer();
+    if (ab && ab.byteLength > 0) return ab;
+  } catch {
+    // fallback
+  }
+
+  try {
+    return await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+      reader.readAsArrayBuffer(file);
+    });
+  } catch {
+    // fallback
+  }
+
+  const detached = await detachFileToMemory(file as File);
+  if (detached.arrayBuffer && detached.arrayBuffer.byteLength > 0) {
+    return detached.arrayBuffer;
+  }
+
+  throw new Error('无法读取图片数据，文件可能已被操作系统修改或占用');
 }
 
 // Decode regular static image (PNG, JPG, JPEG, WEBP, BMP, SVG, etc.)
-export async function decodeStaticImage(file: File): Promise<DecodedGif> {
-  let imgBitmap: ImageBitmap | HTMLImageElement;
+// Highly resilient to net::ERR_UPLOAD_FILE_CHANGED and browser sandbox file restrictions
+export async function decodeStaticImage(
+  source: File | Blob | ArrayBuffer | string,
+  cachedBuffer?: ArrayBuffer
+): Promise<DecodedGif> {
+  let imgBitmap: ImageBitmap | HTMLImageElement | null = null;
   let width = 0;
   let height = 0;
+  let objectUrlToRevoke: string | null = null;
 
-  if (typeof createImageBitmap === 'function') {
+  // 1. If cachedBuffer or ArrayBuffer is available, build an in-memory detached Blob
+  let buffer: ArrayBuffer | null = cachedBuffer || null;
+  if (!buffer && source instanceof ArrayBuffer) {
+    buffer = source;
+  }
+
+  // 2. If source is already a string (Data URL or Object URL)
+  if (typeof source === 'string') {
     try {
-      imgBitmap = await createImageBitmap(file);
-      width = imgBitmap.width;
-      height = imgBitmap.height;
-    } catch {
-      const url = URL.createObjectURL(file);
       const img = new Image();
+      img.crossOrigin = 'anonymous';
       await new Promise<void>((resolve, reject) => {
         img.onload = () => resolve();
         img.onerror = () => reject(new Error('无法读取该图片文件'));
-        img.src = url;
+        img.src = source;
       });
-      URL.revokeObjectURL(url);
       width = img.naturalWidth || img.width;
       height = img.naturalHeight || img.height;
       imgBitmap = img;
+    } catch {
+      // Continue to other fallbacks
     }
-  } else {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error('无法读取该图片文件'));
-      img.src = url;
-    });
-    URL.revokeObjectURL(url);
-    width = img.naturalWidth || img.width;
-    height = img.naturalHeight || img.height;
-    imgBitmap = img;
+  }
+
+  // 3. If in-memory buffer is available, decode safely without disk I/O
+  if (!imgBitmap && buffer && buffer.byteLength > 0) {
+    const memoryBlob = new Blob([buffer], { type: 'image/png' });
+    if (typeof createImageBitmap === 'function') {
+      try {
+        imgBitmap = await createImageBitmap(memoryBlob);
+        width = imgBitmap.width;
+        height = imgBitmap.height;
+      } catch {
+        imgBitmap = null;
+      }
+    }
+
+    if (!imgBitmap) {
+      try {
+        const url = URL.createObjectURL(memoryBlob);
+        objectUrlToRevoke = url;
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('无法读取图片内存数据'));
+          img.src = url;
+        });
+        width = img.naturalWidth || img.width;
+        height = img.naturalHeight || img.height;
+        imgBitmap = img;
+      } catch {
+        imgBitmap = null;
+      }
+    }
+  }
+
+  // 4. If source is a File or Blob, detach to memory first to avoid ERR_UPLOAD_FILE_CHANGED
+  if (!imgBitmap && (source instanceof Blob || source instanceof File)) {
+    try {
+      const detached = await detachFileToMemory(source as File);
+      if (detached.arrayBuffer && detached.arrayBuffer.byteLength > 0) {
+        const memoryBlob = new Blob([detached.arrayBuffer], {
+          type: (source as File).type || 'image/png',
+        });
+        if (typeof createImageBitmap === 'function') {
+          try {
+            imgBitmap = await createImageBitmap(memoryBlob);
+            width = imgBitmap.width;
+            height = imgBitmap.height;
+          } catch {
+            imgBitmap = null;
+          }
+        }
+        if (!imgBitmap) {
+          const url = URL.createObjectURL(memoryBlob);
+          objectUrlToRevoke = url;
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('无法从内存解析图片'));
+            img.src = url;
+          });
+          width = img.naturalWidth || img.width;
+          height = img.naturalHeight || img.height;
+          imgBitmap = img;
+        }
+      }
+    } catch (detErr) {
+      console.warn('Memory detachment decode fallback:', detErr);
+    }
+  }
+
+  // 5. Fallback via FileReader readAsDataURL
+  if (!imgBitmap && (source instanceof Blob || source instanceof File)) {
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(source);
+      });
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('无法读取该图片文件'));
+        img.src = dataUrl;
+      });
+      width = img.naturalWidth || img.width;
+      height = img.naturalHeight || img.height;
+      imgBitmap = img;
+    } catch {
+      // Continue to final attempt
+    }
+  }
+
+  // 6. Final direct createImageBitmap attempt
+  if (!imgBitmap && (source instanceof Blob || source instanceof File)) {
+    if (typeof createImageBitmap === 'function') {
+      try {
+        imgBitmap = await createImageBitmap(source);
+        width = imgBitmap.width;
+        height = imgBitmap.height;
+      } catch (err) {
+        throw new Error('无法读取该图片文件 (ERR_UPLOAD_FILE_CHANGED)，请重新选择文件或点击重试');
+      }
+    }
+  }
+
+  if (!imgBitmap || width === 0 || height === 0) {
+    if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+    throw new Error('无法解析图片尺寸与像素内容，请确认图片文件是否有效');
   }
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('无法创建 Canvas 上下文');
-  ctx.drawImage(imgBitmap, 0, 0);
-  const imageData = ctx.getImageData(0, 0, width, height);
+  if (!ctx) {
+    if (objectUrlToRevoke) URL.revokeObjectURL(objectUrlToRevoke);
+    throw new Error('无法创建 Canvas 上下文');
+  }
 
+  ctx.drawImage(imgBitmap, 0, 0);
+
+  // Close imageBitmap if applicable
+  if ('close' in imgBitmap && typeof (imgBitmap as ImageBitmap).close === 'function') {
+    (imgBitmap as ImageBitmap).close();
+  }
+
+  // Only revoke object URL after rendering to canvas
+  if (objectUrlToRevoke) {
+    URL.revokeObjectURL(objectUrlToRevoke);
+  }
+
+  const imageData = ctx.getImageData(0, 0, width, height);
   const frames: FrameInfo[] = [{ imageData, delay: 0 }];
   const detectedBgColor = detectBackgroundColor(frames, width, height);
 
@@ -244,12 +484,20 @@ export async function decodeStaticImage(file: File): Promise<DecodedGif> {
 }
 
 // Unified decoder for both GIF and static images
-export async function decodeMediaFile(file: File): Promise<DecodedGif> {
-  if (isGifFile(file)) {
-    const arrayBuffer = await file.arrayBuffer();
+export async function decodeMediaFile(
+  file: File | Blob | ArrayBuffer,
+  cachedBuffer?: ArrayBuffer
+): Promise<DecodedGif> {
+  if (isGifFile(file as File)) {
+    let arrayBuffer: ArrayBuffer;
+    if (file instanceof ArrayBuffer) {
+      arrayBuffer = file;
+    } else {
+      arrayBuffer = await getSafeArrayBuffer(file as File | Blob, cachedBuffer);
+    }
     return decodeGif(arrayBuffer);
   } else {
-    return decodeStaticImage(file);
+    return decodeStaticImage(file, cachedBuffer);
   }
 }
 
@@ -396,6 +644,82 @@ export function removeBackgroundFromFrame(
 
   return resultData;
 }
+
+/**
+ * Detects and transparentizes contiguous black/near-black letterbox bars, margins,
+ * and unpainted padding starting strictly from the outer boundaries (edges).
+ * Preserves 100% of internal content and artwork without color-keying or eroding
+ * the actual sticker details ("内容保持原图完整不扣图，未选中/填充的边缘区域完全透明输出").
+ */
+export function cleanEdgeBlackBordersAndMargins(
+  imageData: ImageData,
+  maxBlackThreshold: number = 32
+): ImageData {
+  const width = imageData.width;
+  const height = imageData.height;
+  const totalPixels = width * height;
+  const data = imageData.data;
+
+  // 1. Any pixel with alpha <= 64 is already unpainted margin/padding
+  // 2. We flood from the outer boundary pixels: top row, bottom row, left col, right col
+  const isBackground = new Uint8Array(totalPixels);
+  const queue: number[] = [];
+
+  const isNearBlackOrTransparent = (idx: number) => {
+    const p = idx * 4;
+    const a = data[p + 3];
+    if (a <= 64) return true; // Already transparent/unpainted
+    const r = data[p];
+    const g = data[p + 1];
+    const b = data[p + 2];
+    // Near-black threshold check
+    return r <= maxBlackThreshold && g <= maxBlackThreshold && b <= maxBlackThreshold;
+  };
+
+  const checkAndQueue = (x: number, y: number) => {
+    const idx = y * width + x;
+    if (isBackground[idx] === 1) return;
+    if (isNearBlackOrTransparent(idx)) {
+      isBackground[idx] = 1;
+      queue.push(idx);
+    }
+  };
+
+  // Check top and bottom rows
+  for (let x = 0; x < width; x++) {
+    checkAndQueue(x, 0);
+    checkAndQueue(x, height - 1);
+  }
+  // Check left and right columns
+  for (let y = 0; y < height; y++) {
+    checkAndQueue(0, y);
+    checkAndQueue(width - 1, y);
+  }
+
+  // BFS contiguous flood fill
+  let head = 0;
+  while (head < queue.length) {
+    const curr = queue[head++];
+    const cx = curr % width;
+    const cy = Math.floor(curr / width);
+
+    // 4 neighbors
+    if (cx > 0) checkAndQueue(cx - 1, cy);
+    if (cx < width - 1) checkAndQueue(cx + 1, cy);
+    if (cy > 0) checkAndQueue(cx, cy - 1);
+    if (cy < height - 1) checkAndQueue(cx, cy + 1);
+  }
+
+  // Set alpha = 0 for all identified edge black bars / empty margins
+  for (let i = 0; i < totalPixels; i++) {
+    if (isBackground[i] === 1) {
+      data[i * 4 + 3] = 0;
+    }
+  }
+
+  return imageData;
+}
+
 
 // Apply white (or custom color) outline around transparent edges (WeChat Sticker Specification)
 export function applyWhiteOutline(
@@ -680,11 +1004,12 @@ export async function encodeTransparentGif(
 export async function processGifItem(
   file: File,
   options: RemovalOptions,
-  onProgress?: (progress: number, message: string) => void
+  onProgress?: (progress: number, message: string) => void,
+  cachedBuffer?: ArrayBuffer
 ): Promise<ProcessedGifResult> {
   const isWeChat = !!options.wechat?.enabled;
   onProgress?.(10, '正在解析 GIF 帧...');
-  const arrayBuffer = await file.arrayBuffer();
+  const arrayBuffer = await getSafeArrayBuffer(file, cachedBuffer);
   const decoded = await decodeGif(arrayBuffer);
 
   onProgress?.(
@@ -744,11 +1069,20 @@ export async function processGifItem(
 export async function processStaticImageItem(
   file: File,
   options: RemovalOptions,
-  onProgress?: (progress: number, message: string) => void
+  onProgress?: (progress: number, message: string) => void,
+  cachedBuffer?: ArrayBuffer,
+  cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
   const isWeChat = !!options.wechat?.enabled;
   onProgress?.(15, '正在读取并解析图片...');
-  const decoded = await decodeStaticImage(file);
+
+  let sourceImageData: ImageData;
+  if (cachedFrames && cachedFrames.length > 0 && cachedFrames[0]?.imageData) {
+    sourceImageData = cachedFrames[0].imageData;
+  } else {
+    const decoded = await decodeStaticImage(file, cachedBuffer);
+    sourceImageData = decoded.frames[0].imageData;
+  }
 
   onProgress?.(
     45,
@@ -757,7 +1091,7 @@ export async function processStaticImageItem(
       : '正在分析并消除背景色...'
   );
 
-  const rawTransparentData = removeBackgroundFromFrame(decoded.frames[0].imageData, options);
+  const rawTransparentData = removeBackgroundFromFrame(sourceImageData, options);
   const processedImageData = isWeChat
     ? renderFrameWithWeChatOptions(rawTransparentData, options.wechat)
     : rawTransparentData;
@@ -803,12 +1137,14 @@ export async function processStaticImageItem(
 export async function processMediaItem(
   file: File,
   options: RemovalOptions,
-  onProgress?: (progress: number, message: string) => void
+  onProgress?: (progress: number, message: string) => void,
+  cachedBuffer?: ArrayBuffer,
+  cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
   if (isGifFile(file)) {
-    return processGifItem(file, options, onProgress);
+    return processGifItem(file, options, onProgress, cachedBuffer);
   } else {
-    return processStaticImageItem(file, options, onProgress);
+    return processStaticImageItem(file, options, onProgress, cachedBuffer, cachedFrames);
   }
 }
 

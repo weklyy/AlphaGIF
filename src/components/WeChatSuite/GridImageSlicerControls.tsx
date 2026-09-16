@@ -26,11 +26,16 @@ import {
   Crosshair,
   RefreshCcw,
   Move,
+  Lock,
+  Unlock,
+  CheckCheck,
+  Square,
 } from 'lucide-react';
 import { ImageGridConfig, GridPreset, GridCropArea, CellOverride } from '../../types';
 import {
   removeBackgroundFromFrame,
   applyWhiteOutline,
+  cleanEdgeBlackBordersAndMargins,
   rgbToHex,
 } from '../../utils/gifProcessor';
 import {
@@ -40,7 +45,10 @@ import {
   getRowHeightsPercent,
   calculateCellBounds,
   autoDetectGridSplits,
+  calculateGridAspectFactor,
+  calibrateGridCropAreaToSquare,
 } from '../../utils/gridGeometry';
+import { GridMagnifierLens, MagnifierData } from './GridMagnifierLens';
 
 interface GridImageSlicerControlsProps {
   imageFile: File;
@@ -100,6 +108,11 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     message: string;
     type: 'success' | 'info';
   } | null>(null);
+
+  // Precision Edge Magnifier States
+  const [enableMagnifier, setEnableMagnifier] = useState<boolean>(true);
+  const [magnifierZoom, setMagnifierZoom] = useState<number>(3.5);
+  const [magnifierData, setMagnifierData] = useState<MagnifierData | null>(null);
 
   // Active cropArea with fallback
   const cropArea: GridCropArea = config.cropArea || { x: 0, y: 0, width: 100, height: 100 };
@@ -540,6 +553,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
 
     let imgData = ctx.getImageData(0, 0, 240, 240);
 
+    // Clean contiguous edge black bars and padding margins
+    cleanEdgeBlackBordersAndMargins(imgData, 32);
+
     if (config.autoTransparent) {
       imgData = removeBackgroundFromFrame(imgData, {
         targetColor: config.bgColor || '#ffffff',
@@ -632,6 +648,65 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     const startX = e.clientX;
     const startY = e.clientY;
     const startCrop = { ...cropArea };
+    const imgW = imgRef.current?.naturalWidth || 1024;
+    const imgH = imgRef.current?.naturalHeight || 1024;
+
+    const getCropFocal = (
+      c: { x: number; y: number; width: number; height: number },
+      h: string,
+      clientX?: number,
+      clientY?: number
+    ) => {
+      let focalNormX = c.x;
+      let focalNormY = c.y;
+      if (h === 'nw') {
+        focalNormX = c.x;
+        focalNormY = c.y;
+      } else if (h === 'ne') {
+        focalNormX = c.x + c.width;
+        focalNormY = c.y;
+      } else if (h === 'se') {
+        focalNormX = c.x + c.width;
+        focalNormY = c.y + c.height;
+      } else if (h === 'sw') {
+        focalNormX = c.x;
+        focalNormY = c.y + c.height;
+      } else if (h === 'n') {
+        focalNormX = c.x + c.width / 2;
+        focalNormY = c.y;
+      } else if (h === 's') {
+        focalNormX = c.x + c.width / 2;
+        focalNormY = c.y + c.height;
+      } else if (h === 'w') {
+        focalNormX = c.x;
+        focalNormY = c.y + c.height / 2;
+      } else if (h === 'e') {
+        focalNormX = c.x + c.width;
+        focalNormY = c.y + c.height / 2;
+      } else if (h === 'move' && clientX !== undefined && clientY !== undefined) {
+        focalNormX = Math.max(0, Math.min(100, ((clientX - containerRect.left) / containerRect.width) * 100));
+        focalNormY = Math.max(0, Math.min(100, ((clientY - containerRect.top) / containerRect.height) * 100));
+      }
+      return { focalNormX, focalNormY };
+    };
+
+    if (enableMagnifier) {
+      const { focalNormX, focalNormY } = getCropFocal(startCrop, handle, e.clientX, e.clientY);
+      const cellW = Math.round(((startCrop.width / 100) * imgW) / config.cols);
+      const cellH = Math.round(((startCrop.height / 100) * imgH) / config.rows);
+      setMagnifierData({
+        active: true,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        focalNormX,
+        focalNormY,
+        handle,
+        cellIndex: 0,
+        boxPixelW: cellW,
+        boxPixelH: cellH,
+        isSquare: Math.abs(cellW - cellH) <= 1,
+      });
+    }
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       moveEvent.preventDefault();
@@ -677,9 +752,33 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
           height: Math.round(newH * 10) / 10,
         },
       });
+
+      if (enableMagnifier) {
+        const { focalNormX, focalNormY } = getCropFocal(
+          { x: newX, y: newY, width: newW, height: newH },
+          handle,
+          moveEvent.clientX,
+          moveEvent.clientY
+        );
+        const cellW = Math.round(((newW / 100) * imgW) / config.cols);
+        const cellH = Math.round(((newH / 100) * imgH) / config.rows);
+        setMagnifierData({
+          active: true,
+          clientX: moveEvent.clientX,
+          clientY: moveEvent.clientY,
+          focalNormX,
+          focalNormY,
+          handle,
+          cellIndex: 0,
+          boxPixelW: cellW,
+          boxPixelH: cellH,
+          isSquare: Math.abs(cellW - cellH) <= 1,
+        });
+      }
     };
 
     const onPointerUp = () => {
+      setMagnifierData(null);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
@@ -1961,6 +2060,16 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
           </div>
         </div>
       </div>
+
+      {/* Precision Edge Magnifier Overlay */}
+      <GridMagnifierLens
+        data={magnifierData}
+        sourceElement={imgRef.current}
+        sourceWidth={imgRef.current?.naturalWidth || 1024}
+        sourceHeight={imgRef.current?.naturalHeight || 1024}
+        zoomLevel={magnifierZoom}
+        onZoomChange={setMagnifierZoom}
+      />
     </div>
   );
 };

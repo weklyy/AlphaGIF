@@ -43,6 +43,8 @@ export interface GifItem {
   id: string;
   name: string;
   file: File;
+  cachedBuffer?: ArrayBuffer;
+  cachedFrames?: FrameInfo[];
   mediaType: MediaType;
   originalUrl: string;
   originalSize: number;
@@ -98,6 +100,8 @@ export interface GridConfig {
   tolerance: number; // 0 - 100
   addWhiteOutline: boolean; // 2px white outline
   outlineWidth: number; // default 2
+  lockSquare?: boolean; // Lock 1:1 square ratio for each cell (default true)
+  transparentBorders?: boolean; // Ensure all unselected/padded border areas output as transparent (default true)
 }
 
 export interface ImageGridConfig {
@@ -117,6 +121,8 @@ export interface ImageGridConfig {
   addWhiteOutline: boolean; // 2px white outline
   outlineWidth: number; // default 2
   outputFormat: 'png' | 'gif'; // default 'png' (240x240 PNG is WeChat static sticker official standard)
+  lockSquare?: boolean; // Lock 1:1 square ratio for each cell (default true)
+  transparentBorders?: boolean; // Ensure all unselected/padded border areas output as transparent (default true)
 }
 
 export interface SlicedStickerItem {

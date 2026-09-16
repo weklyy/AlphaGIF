@@ -459,3 +459,124 @@ export function autoDetectGridSplits(
     rowSplits: normalizeSplits(detectedRows, rows),
   };
 }
+
+/**
+ * Calculates the aspect ratio conversion factor for linked grid mode.
+ * When cropArea.height = cropArea.width * factor, each cell is an exact 1:1 square in source pixels.
+ */
+export function calculateGridAspectFactor(cols: number, rows: number, sourceW: number, sourceH: number): number {
+  const safeW = Math.max(1, sourceW);
+  const safeH = Math.max(1, sourceH);
+  const safeCols = Math.max(1, cols);
+  const safeRows = Math.max(1, rows);
+  return (safeW / safeH) * (safeRows / safeCols);
+}
+
+/**
+ * Calibrates a linked grid cropArea so that every cell is an exact 1:1 pixel square,
+ * preserving the center of the cropArea while ensuring it fits completely within [0, 100]%.
+ */
+export function calibrateGridCropAreaToSquare(
+  cropArea: GridCropArea,
+  cols: number,
+  rows: number,
+  sourceW: number,
+  sourceH: number
+): GridCropArea {
+  const factor = calculateGridAspectFactor(cols, rows, sourceW, sourceH);
+  const centerX = cropArea.x + cropArea.width / 2;
+  const centerY = cropArea.y + cropArea.height / 2;
+
+  // Try using current width
+  let targetWidth = cropArea.width;
+  let targetHeight = targetWidth * factor;
+
+  // If height overflows 100%, scale down
+  if (targetHeight > 98) {
+    targetHeight = 98;
+    targetWidth = targetHeight / factor;
+  }
+  // If width overflows 100%, scale down
+  if (targetWidth > 98) {
+    targetWidth = 98;
+    targetHeight = targetWidth * factor;
+  }
+
+  targetWidth = Math.max(5, Math.min(100, Math.round(targetWidth * 10) / 10));
+  targetHeight = Math.max(5, Math.min(100, Math.round(targetHeight * 10) / 10));
+
+  let targetX = centerX - targetWidth / 2;
+  let targetY = centerY - targetHeight / 2;
+
+  targetX = Math.max(0, Math.min(100 - targetWidth, Math.round(targetX * 10) / 10));
+  targetY = Math.max(0, Math.min(100 - targetHeight, Math.round(targetY * 10) / 10));
+
+  return {
+    x: targetX,
+    y: targetY,
+    width: targetWidth,
+    height: targetHeight,
+  };
+}
+
+/**
+ * Calibrates an independent box so that its pixel width equals its pixel height (1:1 square in source pixels),
+ * preserving center position while clamping inside [0, 100]%.
+ */
+export function calibrateIndependentBoxToSquare(
+  box: GridCropArea,
+  sourceW: number,
+  sourceH: number
+): GridCropArea {
+  const safeW = Math.max(1, sourceW);
+  const safeH = Math.max(1, sourceH);
+  const aspect = safeW / safeH; // box.height = box.width * aspect
+
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+
+  let targetWidth = box.width;
+  let targetHeight = targetWidth * aspect;
+
+  if (targetHeight > 98) {
+    targetHeight = 98;
+    targetWidth = targetHeight / aspect;
+  }
+  if (targetWidth > 98) {
+    targetWidth = 98;
+    targetHeight = targetWidth * aspect;
+  }
+
+  targetWidth = Math.max(2, Math.min(100, Math.round(targetWidth * 10) / 10));
+  targetHeight = Math.max(2, Math.min(100, Math.round(targetHeight * 10) / 10));
+
+  let targetX = centerX - targetWidth / 2;
+  let targetY = centerY - targetHeight / 2;
+
+  targetX = Math.max(0, Math.min(100 - targetWidth, Math.round(targetX * 10) / 10));
+  targetY = Math.max(0, Math.min(100 - targetHeight, Math.round(targetY * 10) / 10));
+
+  return {
+    x: targetX,
+    y: targetY,
+    width: targetWidth,
+    height: targetHeight,
+  };
+}
+
+/**
+ * Calibrates all independent boxes in the record to exact 1:1 squares in source pixels.
+ */
+export function calibrateAllIndependentBoxesToSquare(
+  boxes: Record<number, GridCropArea>,
+  sourceW: number,
+  sourceH: number
+): Record<number, GridCropArea> {
+  const updated: Record<number, GridCropArea> = {};
+  for (const key in boxes) {
+    const idx = Number(key);
+    updated[idx] = calibrateIndependentBoxToSquare(boxes[idx], sourceW, sourceH);
+  }
+  return updated;
+}
+

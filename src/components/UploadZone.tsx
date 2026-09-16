@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Upload, Sparkles, Image as ImageIcon, Plus, Smile } from 'lucide-react';
+import { Upload, Sparkles, Image as ImageIcon, Plus, Smile, MousePointerClick } from 'lucide-react';
 import {
   generateWhiteBgDemoGif,
   generateBlackBgDemoGif,
@@ -15,6 +15,7 @@ interface UploadZoneProps {
 export const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, disabled = false }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [loadingDemo, setLoadingDemo] = useState(false);
+  const dragCounterRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isSupportedMedia = (file: File): boolean => {
@@ -26,21 +27,40 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, disable
     );
   };
 
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (disabled) return;
+    dragCounterRef.current += 1;
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+      setIsDragging(true);
+    }
+  };
+
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!disabled) setIsDragging(true);
+    if (disabled) return;
+    e.dataTransfer.dropEffect = 'copy';
+    if (!isDragging) {
+      setIsDragging(true);
+    }
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setIsDragging(false);
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    dragCounterRef.current = 0;
     setIsDragging(false);
     if (disabled) return;
 
@@ -109,7 +129,13 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, disable
   };
 
   return (
-    <div className="w-full bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden p-6 transition-all">
+    <div
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className="w-full bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden p-6 relative transition-all"
+    >
       <input
         id="gif-file-input"
         type="file"
@@ -122,39 +148,55 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, disable
 
       <div
         id="drop-zone-container"
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
         onClick={() => !disabled && fileInputRef.current?.click()}
         className={`group relative flex flex-col items-center justify-center p-8 md:p-12 rounded-xl border-2 border-dashed cursor-pointer transition-all ${
           isDragging
-            ? 'border-indigo-600 bg-indigo-50/70 scale-[1.005]'
+            ? 'border-indigo-600 bg-indigo-50/90 scale-[1.005] ring-4 ring-indigo-500/20'
             : 'border-stone-300 hover:border-indigo-500 hover:bg-stone-50/80 bg-stone-50/40'
         } ${disabled ? 'opacity-60 cursor-not-allowed' : ''}`}
       >
+        {/* Active Drag Hover Overlay */}
+        {isDragging && (
+          <div className="absolute inset-0 bg-indigo-500/10 backdrop-blur-[2px] rounded-xl flex flex-col items-center justify-center pointer-events-none z-20 animate-in fade-in zoom-in-95 duration-150">
+            <div className="w-16 h-16 rounded-2xl bg-indigo-600 text-white shadow-xl flex items-center justify-center mb-3 animate-bounce">
+              <Upload className="w-8 h-8" />
+            </div>
+            <p className="text-base font-bold text-indigo-950">
+              松开鼠标即可批量载入动图或图片
+            </p>
+            <p className="text-xs text-indigo-700 mt-1">
+              支持 GIF、PNG、JPG、JPEG、WebP、BMP、SVG 等格式
+            </p>
+          </div>
+        )}
+
         <div className="w-16 h-16 rounded-2xl bg-white shadow-md border border-stone-200 flex items-center justify-center text-indigo-600 group-hover:scale-105 group-hover:border-indigo-200 transition-transform mb-3">
           <Upload className="w-8 h-8" />
         </div>
 
-        <div className="mb-2">
+        <div className="mb-2 flex flex-wrap items-center justify-center gap-2">
           <span className="inline-flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-[#07c160] px-3 py-1 rounded-full border border-emerald-200 shadow-2xs">
             <Smile className="w-3.5 h-3.5" />
             支持一键生成微信表情包 (240×240 / 白色保护描边 / &lt;1MB)
           </span>
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-stone-100 text-stone-600 px-2.5 py-0.5 rounded-full border border-stone-200">
+            <MousePointerClick className="w-3 h-3 text-indigo-600" />
+            支持鼠标拖拽 / 点击按钮多选上传
+          </span>
         </div>
 
         <h3 className="text-lg font-bold text-stone-900 mb-1.5 text-center">
-          点击选择或将 GIF 动图 / 普通图片拖放到此处
+          上传动图或普通图片进行去底与表情包制作
         </h3>
         <p className="text-sm text-stone-500 text-center max-w-lg mb-4">
-          支持批量上传 GIF 动图及 PNG、JPG、JPEG、WebP、BMP 格式图片，一键批量去除底色或制作微信表情包
+          支持点击下方按钮选择本地文件（支持多选），或直接将文件拖拽至框内
         </p>
 
         <div className="flex items-center gap-2">
           <button
             id="select-files-btn"
             type="button"
-            className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors"
+            className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl shadow-sm transition-colors cursor-pointer"
             onClick={(e) => {
               e.stopPropagation();
               fileInputRef.current?.click();
@@ -166,6 +208,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({ onFilesSelected, disable
         </div>
 
         <div className="mt-4 flex flex-wrap justify-center items-center gap-2 text-xs text-stone-400">
+          <span className="text-indigo-600 font-medium">支持鼠标将文件直接拖入此框</span>
+          <span>•</span>
           <span>支持 Ctrl+V 直接粘贴剪贴板图片</span>
           <span>•</span>
           <span>动图导出透明 GIF，静态图导出透明 PNG</span>

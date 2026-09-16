@@ -33,11 +33,16 @@ import {
   Minimize2,
   LayoutGrid,
   Grid,
+  Lock,
+  Unlock,
+  CheckCheck,
+  Square,
 } from 'lucide-react';
 import { GridConfig, GridPreset, GridCropArea, CellOverride, SlicerLayoutMode } from '../../types';
 import {
   removeBackgroundFromFrame,
   applyWhiteOutline,
+  cleanEdgeBlackBordersAndMargins,
   rgbToHex,
 } from '../../utils/gifProcessor';
 import {
@@ -48,7 +53,12 @@ import {
   calculateCellBounds,
   autoDetectGridSplits,
   getIndependentBoxesFromGrid,
+  calculateGridAspectFactor,
+  calibrateGridCropAreaToSquare,
+  calibrateIndependentBoxToSquare,
+  calibrateAllIndependentBoxesToSquare,
 } from '../../utils/gridGeometry';
+import { GridMagnifierLens, MagnifierData } from './GridMagnifierLens';
 
 interface GridSlicerControlsProps {
   videoUrl: string;
@@ -115,6 +125,11 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     type: 'success' | 'info';
   } | null>(null);
 
+  // Real-time Precision Edge Magnifier States
+  const [enableMagnifier, setEnableMagnifier] = useState<boolean>(true);
+  const [magnifierZoom, setMagnifierZoom] = useState<number>(3.5);
+  const [magnifierData, setMagnifierData] = useState<MagnifierData | null>(null);
+
   // Active cropArea with fallback
   const cropArea: GridCropArea = config.cropArea || { x: 0, y: 0, width: 100, height: 100 };
   const currentSpeed = config.speed || 1.0;
@@ -130,6 +145,17 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
   const colPercents = getColWidthsPercent(config.colSplits, config.cols);
   const rowPercents = getRowHeightsPercent(config.rowSplits, config.rows);
 
+  // 1:1 Square Lock State (Default true per user specification)
+  const isLockSquare = config.lockSquare !== false;
+
+  const vidW = videoDimensions.width || 960;
+  const vidH = videoDimensions.height || 960;
+
+  // Single cell pixel calculation in grid mode
+  const gridCellPixelW = Math.round(((cropArea.width / 100) * vidW) / Math.max(1, config.cols));
+  const gridCellPixelH = Math.round(((cropArea.height / 100) * vidH) / Math.max(1, config.rows));
+  const isGridExactSquare = Math.abs(gridCellPixelW - gridCellPixelH) <= 1;
+
   // Compute current independent boxes with fallback from grid
   const currentIndependentBoxes = config.independentBoxes || getIndependentBoxesFromGrid(
     cropArea,
@@ -141,6 +167,72 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     videoDimensions.width,
     videoDimensions.height
   );
+
+  // Toggle 1:1 Square Lock Switch
+  const handleToggleLockSquare = () => {
+    const nextVal = !isLockSquare;
+    if (nextVal) {
+      if (layoutMode === 'independent') {
+        const calibrated = calibrateAllIndependentBoxesToSquare(currentIndependentBoxes, vidW, vidH);
+        onConfigChange({
+          ...config,
+          lockSquare: true,
+          independentBoxes: calibrated,
+        });
+      } else {
+        const calibratedCrop = calibrateGridCropAreaToSquare(cropArea, config.cols, config.rows, vidW, vidH);
+        onConfigChange({
+          ...config,
+          lockSquare: true,
+          cropArea: calibratedCrop,
+        });
+      }
+      setAutoAlignToast({
+        message: '🔒 已开启 1:1 正方形锁定并自动矫正，拖拽缩放时将严格等比联动！',
+        type: 'success',
+      });
+    } else {
+      onConfigChange({
+        ...config,
+        lockSquare: false,
+      });
+      setAutoAlignToast({
+        message: '🔓 已解锁 1:1 限制，当前可自由拉伸长宽比',
+        type: 'info',
+      });
+    }
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  // One-Click Calibrate to 1:1 Square
+  const handleOneClickCorrectSquare = () => {
+    if (layoutMode === 'independent') {
+      const calibrated = calibrateAllIndependentBoxesToSquare(currentIndependentBoxes, vidW, vidH);
+      onConfigChange({
+        ...config,
+        lockSquare: true,
+        independentBoxes: calibrated,
+      });
+      setAutoAlignToast({
+        message: `✨ 已一键矫正所有 ${totalCells} 个独立小方块为严格 1:1 正方形并锁定！`,
+        type: 'success',
+      });
+    } else {
+      const calibratedCrop = calibrateGridCropAreaToSquare(cropArea, config.cols, config.rows, vidW, vidH);
+      onConfigChange({
+        ...config,
+        lockSquare: true,
+        cropArea: calibratedCrop,
+      });
+      const cellW = Math.round(((calibratedCrop.width / 100) * vidW) / Math.max(1, config.cols));
+      const cellH = Math.round(((calibratedCrop.height / 100) * vidH) / Math.max(1, config.rows));
+      setAutoAlignToast({
+        message: `✨ 已一键矫正整网格为严格 1:1 正方形 (单格: ${cellW}×${cellH} px) 并开启锁定！`,
+        type: 'success',
+      });
+    }
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
 
   // Switch between connected 'grid' mode and 'independent' boxes mode
   const handleSwitchLayoutMode = (newMode: SlicerLayoutMode) => {
@@ -263,6 +355,64 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
     const startX = e.clientX;
     const startY = e.clientY;
+    const boxAspect = vidW / vidH; // box.height = box.width * boxAspect for 1:1 pixel square
+
+    const getFocalCoords = (
+      b: { x: number; y: number; width: number; height: number },
+      m: string,
+      clientX?: number,
+      clientY?: number
+    ) => {
+      let focalNormX = b.x;
+      let focalNormY = b.y;
+      if (m === 'nw') {
+        focalNormX = b.x;
+        focalNormY = b.y;
+      } else if (m === 'ne') {
+        focalNormX = b.x + b.width;
+        focalNormY = b.y;
+      } else if (m === 'se') {
+        focalNormX = b.x + b.width;
+        focalNormY = b.y + b.height;
+      } else if (m === 'sw') {
+        focalNormX = b.x;
+        focalNormY = b.y + b.height;
+      } else if (m === 'n') {
+        focalNormX = b.x + b.width / 2;
+        focalNormY = b.y;
+      } else if (m === 's') {
+        focalNormX = b.x + b.width / 2;
+        focalNormY = b.y + b.height;
+      } else if (m === 'w') {
+        focalNormX = b.x;
+        focalNormY = b.y + b.height / 2;
+      } else if (m === 'e') {
+        focalNormX = b.x + b.width;
+        focalNormY = b.y + b.height / 2;
+      } else if (m === 'move' && clientX !== undefined && clientY !== undefined) {
+        focalNormX = Math.max(0, Math.min(100, ((clientX - containerRect.left) / containerRect.width) * 100));
+        focalNormY = Math.max(0, Math.min(100, ((clientY - containerRect.top) / containerRect.height) * 100));
+      }
+      return { focalNormX, focalNormY };
+    };
+
+    if (enableMagnifier) {
+      const { focalNormX, focalNormY } = getFocalCoords(initialBox, mode, e.clientX, e.clientY);
+      const curPixelW = Math.round((initialBox.width / 100) * vidW);
+      const curPixelH = Math.round((initialBox.height / 100) * vidH);
+      setMagnifierData({
+        active: true,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        focalNormX,
+        focalNormY,
+        handle: mode,
+        cellIndex: idx,
+        boxPixelW: curPixelW,
+        boxPixelH: curPixelH,
+        isSquare: Math.abs(curPixelW - curPixelH) <= 1,
+      });
+    }
 
     const onPointerMove = (moveEv: PointerEvent) => {
       const deltaXPct = ((moveEv.clientX - startX) / containerRect.width) * 100;
@@ -273,6 +423,85 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
       if (mode === 'move') {
         newBox.x = Math.max(0, Math.min(100 - initialBox.width, initialBox.x + deltaXPct));
         newBox.y = Math.max(0, Math.min(100 - initialBox.height, initialBox.y + deltaYPct));
+      } else if (isLockSquare) {
+        // Locked 1:1 square proportional linkage
+        if (mode === 'se') {
+          let targetW = Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (initialBox.y + targetH > 100) {
+            targetH = 100 - initialBox.y;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+        } else if (mode === 'sw') {
+          const right = initialBox.x + initialBox.width;
+          let targetW = Math.max(2, Math.min(right, initialBox.width - deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (initialBox.y + targetH > 100) {
+            targetH = 100 - initialBox.y;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.x = right - targetW;
+        } else if (mode === 'ne') {
+          const bottom = initialBox.y + initialBox.height;
+          let targetW = Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (bottom - targetH < 0) {
+            targetH = bottom;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.y = bottom - targetH;
+        } else if (mode === 'nw') {
+          const right = initialBox.x + initialBox.width;
+          const bottom = initialBox.y + initialBox.height;
+          let targetW = Math.max(2, Math.min(right, initialBox.width - deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (bottom - targetH < 0) {
+            targetH = bottom;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.x = right - targetW;
+          newBox.y = bottom - targetH;
+        } else if (mode === 'e' || mode === 'w') {
+          let targetW = mode === 'e'
+            ? Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct))
+            : Math.max(2, Math.min(initialBox.x + initialBox.width, initialBox.width - deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (targetH > 100) {
+            targetH = 100;
+            targetW = targetH / boxAspect;
+          }
+          const centerY = initialBox.y + initialBox.height / 2;
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.y = Math.max(0, Math.min(100 - targetH, centerY - targetH / 2));
+          if (mode === 'w') {
+            newBox.x = (initialBox.x + initialBox.width) - targetW;
+          }
+        } else if (mode === 's' || mode === 'n') {
+          let targetH = mode === 's'
+            ? Math.max(2, Math.min(100 - initialBox.y, initialBox.height + deltaYPct))
+            : Math.max(2, Math.min(initialBox.y + initialBox.height, initialBox.height - deltaYPct));
+          let targetW = targetH / boxAspect;
+          if (targetW > 100) {
+            targetW = 100;
+            targetH = targetW * boxAspect;
+          }
+          const centerX = initialBox.x + initialBox.width / 2;
+          newBox.height = targetH;
+          newBox.width = targetW;
+          newBox.x = Math.max(0, Math.min(100 - targetW, centerX - targetW / 2));
+          if (mode === 'n') {
+            newBox.y = (initialBox.y + initialBox.height) - targetH;
+          }
+        }
       } else {
         if (mode.includes('w')) {
           const right = initialBox.x + initialBox.width;
@@ -307,9 +536,28 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
         layoutMode: 'independent',
         independentBoxes: updated,
       });
+
+      if (enableMagnifier) {
+        const { focalNormX, focalNormY } = getFocalCoords(newBox, mode, moveEv.clientX, moveEv.clientY);
+        const curPixelW = Math.round((newBox.width / 100) * vidW);
+        const curPixelH = Math.round((newBox.height / 100) * vidH);
+        setMagnifierData({
+          active: true,
+          clientX: moveEv.clientX,
+          clientY: moveEv.clientY,
+          focalNormX,
+          focalNormY,
+          handle: mode,
+          cellIndex: idx,
+          boxPixelW: curPixelW,
+          boxPixelH: curPixelH,
+          isSquare: Math.abs(curPixelW - curPixelH) <= 1,
+        });
+      }
     };
 
     const onPointerUp = () => {
+      setMagnifierData(null);
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
@@ -328,11 +576,24 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
       width: 20,
       height: 20,
     };
+    const boxAspect = vidW / vidH;
+
+    let targetW = Math.max(2, Math.min(100, partial.width !== undefined ? partial.width : current.width));
+    let targetH = Math.max(2, Math.min(100, partial.height !== undefined ? partial.height : current.height));
+
+    if (isLockSquare) {
+      if (partial.width !== undefined && partial.height === undefined) {
+        targetH = Math.max(2, Math.min(100, Math.round(targetW * boxAspect * 10) / 10));
+      } else if (partial.height !== undefined && partial.width === undefined) {
+        targetW = Math.max(2, Math.min(100, Math.round((targetH / boxAspect) * 10) / 10));
+      }
+    }
+
     const updatedBox: GridCropArea = {
-      x: Math.max(0, Math.min(99, partial.x !== undefined ? partial.x : current.x)),
-      y: Math.max(0, Math.min(99, partial.y !== undefined ? partial.y : current.y)),
-      width: Math.max(2, Math.min(100, partial.width !== undefined ? partial.width : current.width)),
-      height: Math.max(2, Math.min(100, partial.height !== undefined ? partial.height : current.height)),
+      x: Math.max(0, Math.min(100 - targetW, partial.x !== undefined ? partial.x : current.x)),
+      y: Math.max(0, Math.min(100 - targetH, partial.y !== undefined ? partial.y : current.y)),
+      width: targetW,
+      height: targetH,
     };
     onConfigChange({
       ...config,
@@ -756,6 +1017,9 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
           offInspCtx.drawImage(video, singleCellX, singleCellY, singleCellW, singleCellH, 0, 0, 240, 240);
           const cellRawData = offInspCtx.getImageData(0, 0, 240, 240);
 
+          // Clean contiguous edge black bars and padding margins
+          cleanEdgeBlackBordersAndMargins(cellRawData, 32);
+
           if (config.autoTransparent) {
             const cellProcessed = removeBackgroundFromFrame(cellRawData, {
               targetColor: config.bgColor || '#ffffff',
@@ -780,8 +1044,16 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
             inspCtx.putImageData(cellProcessed, 0, 0);
           } else {
-            setCellStats({ transparentPercent: 0, health: 'good' });
-            inspCtx.drawImage(offInsp, 0, 0);
+            let transparentCount = 0;
+            const totalPx = 240 * 240;
+            for (let i = 0; i < totalPx; i++) {
+              if (cellRawData.data[i * 4 + 3] === 0) transparentCount++;
+            }
+            const tPercent = Math.round((transparentCount / totalPx) * 100);
+            const health = tPercent < 10 ? 'low' : tPercent > 82 ? 'high' : 'good';
+            setCellStats({ transparentPercent: tPercent, health });
+
+            inspCtx.putImageData(cellRawData, 0, 0);
           }
         }
       }
@@ -917,19 +1189,24 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
   // Helper to update cropArea directly
   const updateCrop = (newCrop: Partial<GridCropArea>) => {
+    const gridFactor = calculateGridAspectFactor(config.cols, config.rows, vidW, vidH);
+    let targetW = Math.max(5, Math.min(100, newCrop.width !== undefined ? newCrop.width : cropArea.width));
+    let targetH = Math.max(5, Math.min(100, newCrop.height !== undefined ? newCrop.height : cropArea.height));
+
+    if (isLockSquare) {
+      if (newCrop.width !== undefined && newCrop.height === undefined) {
+        targetH = Math.max(5, Math.min(100, Math.round(targetW * gridFactor * 10) / 10));
+      } else if (newCrop.height !== undefined && newCrop.width === undefined) {
+        targetW = Math.max(5, Math.min(100, Math.round((targetH / gridFactor) * 10) / 10));
+      }
+    }
+
     const updated: GridCropArea = {
-      x: Math.max(0, Math.min(95, newCrop.x !== undefined ? newCrop.x : cropArea.x)),
-      y: Math.max(0, Math.min(95, newCrop.y !== undefined ? newCrop.y : cropArea.y)),
-      width: Math.max(5, Math.min(100, newCrop.width !== undefined ? newCrop.width : cropArea.width)),
-      height: Math.max(5, Math.min(100, newCrop.height !== undefined ? newCrop.height : cropArea.height)),
+      x: Math.max(0, Math.min(100 - targetW, newCrop.x !== undefined ? newCrop.x : cropArea.x)),
+      y: Math.max(0, Math.min(100 - targetH, newCrop.y !== undefined ? newCrop.y : cropArea.y)),
+      width: targetW,
+      height: targetH,
     };
-    // Ensure boundaries
-    if (updated.x + updated.width > 100) {
-      updated.width = 100 - updated.x;
-    }
-    if (updated.y + updated.height > 100) {
-      updated.height = 100 - updated.y;
-    }
     onConfigChange({ ...config, cropArea: updated });
   };
 
@@ -1003,6 +1280,64 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     const startX = e.clientX;
     const startY = e.clientY;
     const startCrop = { ...cropArea };
+    const gridFactor = calculateGridAspectFactor(config.cols, config.rows, vidW, vidH);
+
+    const getGridCropFocal = (
+      c: { x: number; y: number; width: number; height: number },
+      h: string,
+      clientX?: number,
+      clientY?: number
+    ) => {
+      let focalNormX = c.x;
+      let focalNormY = c.y;
+      if (h === 'nw') {
+        focalNormX = c.x;
+        focalNormY = c.y;
+      } else if (h === 'ne') {
+        focalNormX = c.x + c.width;
+        focalNormY = c.y;
+      } else if (h === 'se') {
+        focalNormX = c.x + c.width;
+        focalNormY = c.y + c.height;
+      } else if (h === 'sw') {
+        focalNormX = c.x;
+        focalNormY = c.y + c.height;
+      } else if (h === 'n') {
+        focalNormX = c.x + c.width / 2;
+        focalNormY = c.y;
+      } else if (h === 's') {
+        focalNormX = c.x + c.width / 2;
+        focalNormY = c.y + c.height;
+      } else if (h === 'w') {
+        focalNormX = c.x;
+        focalNormY = c.y + c.height / 2;
+      } else if (h === 'e') {
+        focalNormX = c.x + c.width;
+        focalNormY = c.y + c.height / 2;
+      } else if (h === 'move' && clientX !== undefined && clientY !== undefined) {
+        focalNormX = Math.max(0, Math.min(100, ((clientX - containerRect.left) / containerRect.width) * 100));
+        focalNormY = Math.max(0, Math.min(100, ((clientY - containerRect.top) / containerRect.height) * 100));
+      }
+      return { focalNormX, focalNormY };
+    };
+
+    if (enableMagnifier) {
+      const { focalNormX, focalNormY } = getGridCropFocal(startCrop, handle, e.clientX, e.clientY);
+      const cellW = Math.round(((startCrop.width / 100) * vidW) / config.cols);
+      const cellH = Math.round(((startCrop.height / 100) * vidH) / config.rows);
+      setMagnifierData({
+        active: true,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        focalNormX,
+        focalNormY,
+        handle,
+        cellIndex: 0,
+        boxPixelW: cellW,
+        boxPixelH: cellH,
+        isSquare: Math.abs(cellW - cellH) <= 1,
+      });
+    }
 
     const handlePointerMove = (ev: PointerEvent) => {
       ev.preventDefault();
@@ -1014,6 +1349,85 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
       if (handle === 'move') {
         newCrop.x = Math.max(0, Math.min(100 - startCrop.width, startCrop.x + deltaXPercent));
         newCrop.y = Math.max(0, Math.min(100 - startCrop.height, startCrop.y + deltaYPercent));
+      } else if (isLockSquare) {
+        // Locked 1:1 square proportional linkage for entire grid
+        if (handle === 'se') {
+          let targetW = Math.max(5, Math.min(100 - startCrop.x, startCrop.width + deltaXPercent));
+          let targetH = targetW * gridFactor;
+          if (startCrop.y + targetH > 100) {
+            targetH = 100 - startCrop.y;
+            targetW = targetH / gridFactor;
+          }
+          newCrop.width = targetW;
+          newCrop.height = targetH;
+        } else if (handle === 'sw') {
+          const right = startCrop.x + startCrop.width;
+          let targetW = Math.max(5, Math.min(right, startCrop.width - deltaXPercent));
+          let targetH = targetW * gridFactor;
+          if (startCrop.y + targetH > 100) {
+            targetH = 100 - startCrop.y;
+            targetW = targetH / gridFactor;
+          }
+          newCrop.width = targetW;
+          newCrop.height = targetH;
+          newCrop.x = right - targetW;
+        } else if (handle === 'ne') {
+          const bottom = startCrop.y + startCrop.height;
+          let targetW = Math.max(5, Math.min(100 - startCrop.x, startCrop.width + deltaXPercent));
+          let targetH = targetW * gridFactor;
+          if (bottom - targetH < 0) {
+            targetH = bottom;
+            targetW = targetH / gridFactor;
+          }
+          newCrop.width = targetW;
+          newCrop.height = targetH;
+          newCrop.y = bottom - targetH;
+        } else if (handle === 'nw') {
+          const right = startCrop.x + startCrop.width;
+          const bottom = startCrop.y + startCrop.height;
+          let targetW = Math.max(5, Math.min(right, startCrop.width - deltaXPercent));
+          let targetH = targetW * gridFactor;
+          if (bottom - targetH < 0) {
+            targetH = bottom;
+            targetW = targetH / gridFactor;
+          }
+          newCrop.width = targetW;
+          newCrop.height = targetH;
+          newCrop.x = right - targetW;
+          newCrop.y = bottom - targetH;
+        } else if (handle === 'e' || handle === 'w') {
+          let targetW = handle === 'e'
+            ? Math.max(5, Math.min(100 - startCrop.x, startCrop.width + deltaXPercent))
+            : Math.max(5, Math.min(startCrop.x + startCrop.width, startCrop.width - deltaXPercent));
+          let targetH = targetW * gridFactor;
+          if (targetH > 100) {
+            targetH = 100;
+            targetW = targetH / gridFactor;
+          }
+          const centerY = startCrop.y + startCrop.height / 2;
+          newCrop.width = targetW;
+          newCrop.height = targetH;
+          newCrop.y = Math.max(0, Math.min(100 - targetH, centerY - targetH / 2));
+          if (handle === 'w') {
+            newCrop.x = (startCrop.x + startCrop.width) - targetW;
+          }
+        } else if (handle === 's' || handle === 'n') {
+          let targetH = handle === 's'
+            ? Math.max(5, Math.min(100 - startCrop.y, startCrop.height + deltaYPercent))
+            : Math.max(5, Math.min(startCrop.y + startCrop.height, startCrop.height - deltaYPercent));
+          let targetW = targetH / gridFactor;
+          if (targetW > 100) {
+            targetW = 100;
+            targetH = targetW * gridFactor;
+          }
+          const centerX = startCrop.x + startCrop.width / 2;
+          newCrop.height = targetH;
+          newCrop.width = targetW;
+          newCrop.x = Math.max(0, Math.min(100 - targetW, centerX - targetW / 2));
+          if (handle === 'n') {
+            newCrop.y = (startCrop.y + startCrop.height) - targetH;
+          }
+        }
       } else {
         // Vertical adjustments
         if (handle.includes('n')) {
@@ -1043,9 +1457,28 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
           height: Math.round(newCrop.height * 10) / 10,
         },
       });
+
+      if (enableMagnifier) {
+        const { focalNormX, focalNormY } = getGridCropFocal(newCrop, handle, ev.clientX, ev.clientY);
+        const cellW = Math.round(((newCrop.width / 100) * vidW) / config.cols);
+        const cellH = Math.round(((newCrop.height / 100) * vidH) / config.rows);
+        setMagnifierData({
+          active: true,
+          clientX: ev.clientX,
+          clientY: ev.clientY,
+          focalNormX,
+          focalNormY,
+          handle,
+          cellIndex: 0,
+          boxPixelW: cellW,
+          boxPixelH: cellH,
+          isSquare: Math.abs(cellW - cellH) <= 1,
+        });
+      }
     };
 
     const handlePointerUp = () => {
+      setMagnifierData(null);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);
@@ -1195,102 +1628,201 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
         <div
           className={
             isFullscreen
-              ? 'fixed inset-0 z-50 bg-stone-950/98 flex flex-col p-4 backdrop-blur-md overflow-hidden select-none text-white'
+              ? 'fixed inset-0 z-50 bg-stone-950 flex flex-col p-2.5 backdrop-blur-md overflow-hidden select-none text-white'
               : 'lg:col-span-7 space-y-3'
           }
         >
           {/* Action Bar / Fullscreen Header */}
           {isFullscreen ? (
-            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/10 shrink-0">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <Maximize2 className="w-5 h-5 text-emerald-400" />
-                  <span className="font-bold text-base text-white">全屏放大精细预览与调节</span>
-                </div>
-
-                {/* Mode Switcher inside Fullscreen */}
-                <div className="inline-flex rounded-lg bg-stone-900 p-0.5 border border-white/15">
+            <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-stone-900/95 border-b border-white/10 rounded-lg shrink-0 text-xs shadow-md">
+              {/* Left: Mode Switcher + Mode Actions */}
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                {/* Mode Switcher */}
+                <div className="inline-flex items-center rounded-md bg-stone-950 p-0.5 border border-white/15 shrink-0">
                   <button
                     type="button"
                     onClick={() => handleSwitchLayoutMode('grid')}
-                    className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                       layoutMode === 'grid'
-                        ? 'bg-emerald-600 text-white shadow-xs'
-                        : 'text-stone-400 hover:text-white'
+                        ? 'bg-stone-700 text-white shadow-xs font-semibold'
+                        : 'text-stone-400 hover:text-stone-200'
                     }`}
+                    title="整网格模式"
                   >
-                    <Grid className="w-3.5 h-3.5" />
-                    <span>整网格模式</span>
+                    <Grid className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>整网格</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleSwitchLayoutMode('independent')}
-                    className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
                       layoutMode === 'independent'
-                        ? 'bg-amber-500 text-stone-950 font-bold shadow-xs'
-                        : 'text-stone-400 hover:text-white'
+                        ? 'bg-amber-500 text-stone-950 shadow-xs font-bold'
+                        : 'text-stone-400 hover:text-stone-200'
                     }`}
+                    title="独立小方块模式"
                   >
-                    <LayoutGrid className="w-3.5 h-3.5" />
-                    <span>独立小方块模式</span>
+                    <LayoutGrid className="w-3.5 h-3.5 text-stone-950" />
+                    <span>独立小方块</span>
                   </button>
                 </div>
 
-                {/* Contextual actions */}
+                <div className="h-4 w-[1px] bg-white/15 shrink-0" />
+
+                {/* Mode-specific actions */}
                 {layoutMode === 'grid' ? (
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleToggleLockSquare}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer shadow-xs ${
+                        isLockSquare
+                          ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 hover:bg-emerald-900'
+                          : 'bg-stone-800 border-white/10 text-stone-300 hover:bg-stone-700 hover:text-white'
+                      }`}
+                      title={isLockSquare ? '1:1 正方已锁定 (拖动等比联动)' : '自由长宽比'}
+                    >
+                      {isLockSquare ? <Lock className="w-3.5 h-3.5 text-emerald-400" /> : <Unlock className="w-3.5 h-3.5 text-stone-400" />}
+                      <span>{isLockSquare ? '1:1锁定' : '自由比例'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="一键校正整网格为严格 1:1 正方形"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>矫正1:1</span>
+                    </button>
                     <button
                       type="button"
                       onClick={handleAutoAlignSplits}
-                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-emerald-400 font-medium border border-emerald-500/30 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-emerald-400 hover:text-emerald-300 border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="智能吸附边缘缝隙"
                     >
-                      <Wand2 className="w-3.5 h-3.5" />
-                      <span>智能吸附边缘缝隙</span>
+                      <Wand2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>智能吸附</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleResetSplits}
-                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300 font-medium border border-white/15 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-300 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="重置分割线为均匀等距"
                     >
-                      <RefreshCcw className="w-3 h-3" />
+                      <RefreshCcw className="w-3 h-3 text-stone-400" />
                       <span>重置均分</span>
                     </button>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleToggleLockSquare}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer shadow-xs ${
+                        isLockSquare
+                          ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 hover:bg-emerald-900'
+                          : 'bg-stone-800 border-white/10 text-stone-300 hover:bg-stone-700 hover:text-white'
+                      }`}
+                      title={isLockSquare ? '1:1 正方已锁定' : '自由比例拉伸'}
+                    >
+                      {isLockSquare ? <Lock className="w-3.5 h-3.5 text-emerald-400" /> : <Unlock className="w-3.5 h-3.5 text-stone-400" />}
+                      <span>{isLockSquare ? '1:1锁定' : '自由比例'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="一键将所有独立方块矫正为 1:1 纯正方形"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>矫正1:1</span>
+                    </button>
                     <button
                       type="button"
                       onClick={handleUnifyBoxSizes}
-                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-amber-300 font-medium border border-amber-500/30 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-amber-300 hover:text-amber-200 border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="统一所有小方块为当前选中尺寸"
                     >
-                      <Layers className="w-3.5 h-3.5" />
-                      <span>统一方块尺寸</span>
+                      <Layers className="w-3.5 h-3.5 text-amber-400" />
+                      <span>统一尺寸</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleResetIndependentBoxesFromGrid}
-                      className="px-2.5 py-1 text-xs rounded-lg bg-stone-800 hover:bg-stone-700 text-stone-300 font-medium border border-white/15 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-300 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="从整网格重新对齐小方块"
                     >
-                      <RefreshCcw className="w-3 h-3" />
-                      <span>从网格重新对齐</span>
+                      <RefreshCcw className="w-3 h-3 text-stone-400" />
+                      <span>重新对齐</span>
                     </button>
                   </div>
                 )}
+
+                {/* Magnifier compact pill */}
+                <div className="inline-flex items-center rounded-md bg-stone-950 p-0.5 border border-white/15 text-xs shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setEnableMagnifier(!enableMagnifier)}
+                    className={`px-2 py-0.5 rounded text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer ${
+                      enableMagnifier ? 'text-amber-400 bg-stone-800' : 'text-stone-400 hover:text-stone-200'
+                    }`}
+                    title="拉动边缘调整大小时自动唤起放大镜"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
+                    <span>放大镜 {enableMagnifier ? '开' : '关'}</span>
+                  </button>
+                  {enableMagnifier && (
+                    <div className="flex items-center border-l border-white/10 pl-1 ml-0.5 gap-0.5">
+                      {[2.5, 3.5, 5.0].map((z) => (
+                        <button
+                          key={z}
+                          type="button"
+                          onClick={() => setMagnifierZoom(z)}
+                          className={`px-1 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                            Math.abs(magnifierZoom - z) < 0.1
+                              ? 'bg-amber-500 text-stone-950 font-bold'
+                              : 'text-stone-400 hover:text-white'
+                          }`}
+                          title={`切换至 ${z}x`}
+                        >
+                          {z}x
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                {/* Zoom factor */}
-                <div className="flex items-center gap-1 bg-stone-900 px-2.5 py-1 rounded-lg border border-white/15 text-xs">
-                  <ZoomIn className="w-3.5 h-3.5 text-stone-400 mr-1" />
-                  <span className="text-stone-400 mr-1">放大:</span>
+              {/* Right: Dimension & 1:1 indicator, View Zoom, Exit Fullscreen */}
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Dimension & 1:1 status badge */}
+                <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-stone-950 border border-white/10 font-mono text-[11px] text-stone-300">
+                  <span className="text-stone-400">单格:</span>
+                  <span className="font-bold text-white">{gridCellPixelW}×{gridCellPixelH}</span>
+                  {isGridExactSquare ? (
+                    <span className="text-emerald-400 font-sans text-[10px] bg-emerald-950/60 px-1 rounded border border-emerald-500/30">1:1 正方</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="text-amber-400 hover:text-amber-300 font-sans text-[10px] bg-amber-950/60 px-1 rounded border border-amber-500/30 cursor-pointer"
+                      title="点击一键矫正 1:1"
+                    >
+                      非正方(校正)
+                    </button>
+                  )}
+                </div>
+
+                {/* Viewport Zoom */}
+                <div className="flex items-center gap-0.5 bg-stone-950 p-0.5 rounded-md border border-white/15 text-xs">
                   {[1, 1.25, 1.5, 2].map((z) => (
                     <button
                       key={z}
                       type="button"
                       onClick={() => setZoomLevel(z)}
-                      className={`px-1.5 py-0.5 rounded text-[11px] font-mono transition-colors cursor-pointer ${
+                      className={`px-1.5 py-0.5 rounded text-[11px] font-mono cursor-pointer transition-colors ${
                         zoomLevel === z
-                          ? 'bg-emerald-600 text-white font-bold'
+                          ? 'bg-stone-700 text-white font-bold'
                           : 'text-stone-400 hover:text-white'
                       }`}
                     >
@@ -1303,10 +1835,11 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsFullscreen(false)}
-                  className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-md transition-colors"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white border border-stone-600 transition-colors cursor-pointer shadow-xs"
+                  title="退出全屏 (ESC)"
                 >
-                  <Minimize2 className="w-4 h-4" />
-                  <span>退出全屏 (ESC)</span>
+                  <Minimize2 className="w-3.5 h-3.5 text-stone-300" />
+                  <span>退出全屏</span>
                 </button>
               </div>
             </div>
@@ -1347,17 +1880,48 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                   <>
                     <button
                       type="button"
+                      onClick={handleToggleLockSquare}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                        isLockSquare
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                      }`}
+                      title={isLockSquare ? '已锁定 1:1 正方形 (拖拽等比联动)。点击可解锁自由拉伸' : '当前为自由长宽比。点击开启 1:1 正方形锁定'}
+                    >
+                      {isLockSquare ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>1:1 锁定</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3.5 h-3.5 text-stone-400" />
+                          <span>自由比例</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="px-2.5 py-1 rounded-md bg-stone-100 hover:bg-stone-200 text-stone-800 font-medium text-xs border border-stone-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      title="一键校正整网格为严格 1:1 正方形 (单格像素等宽等高)"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>矫正 1:1</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={handleAutoAlignSplits}
-                      className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-medium border border-emerald-600 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
                       title="自动扫描当前视频帧中各小图边缘及缝隙，自动吸附对齐内部网格线"
                     >
                       <Wand2 className="w-3.5 h-3.5" />
-                      <span>智能吸附边缘缝隙</span>
+                      <span>吸附缝隙</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleResetSplits}
-                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="px-2.5 py-1 rounded-md bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
                       title="恢复所有内部线为均匀等距"
                     >
                       <RefreshCcw className="w-3 h-3 text-stone-500" />
@@ -1368,22 +1932,85 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                   <>
                     <button
                       type="button"
+                      onClick={handleToggleLockSquare}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs ${
+                        isLockSquare
+                          ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                      }`}
+                      title={isLockSquare ? '已锁定 1:1 正方形 (拖拽等比联动)。点击可解锁自由拉伸' : '当前为自由长宽比。点击开启 1:1 正方形锁定'}
+                    >
+                      {isLockSquare ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5 text-amber-600" />
+                          <span>1:1 锁定</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3.5 h-3.5 text-stone-400" />
+                          <span>自由比例</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="px-2.5 py-1 rounded-md bg-stone-100 hover:bg-stone-200 text-stone-800 font-medium text-xs border border-stone-300 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                      title="一键将所有独立方块矫正为严格 1:1 正方形"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>矫正 1:1</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={handleUnifyBoxSizes}
-                      className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="px-2.5 py-1 rounded-md bg-amber-500 hover:bg-amber-600 text-stone-950 font-medium border border-amber-500 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
                       title="将所有小方块的宽高统一对齐为当前选中小方块的尺寸"
                     >
                       <Layers className="w-3.5 h-3.5" />
-                      <span>统一方块尺寸</span>
+                      <span>统一尺寸</span>
                     </button>
                     <button
                       type="button"
                       onClick={handleResetIndependentBoxesFromGrid}
-                      className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                      className="px-2.5 py-1 rounded-md bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
                       title="根据当前整体网格重新排列对齐所有独立小方块"
                     >
                       <RefreshCcw className="w-3 h-3 text-stone-500" />
-                      <span>从网格重新对齐</span>
+                      <span>重新对齐</span>
                     </button>
+                    <div className="inline-flex items-center gap-1 bg-stone-100 border border-stone-200 p-0.5 rounded-md text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setEnableMagnifier(!enableMagnifier)}
+                        className={`px-2 py-0.5 rounded flex items-center gap-1 text-xs font-medium cursor-pointer transition-colors ${
+                          enableMagnifier ? 'text-amber-800 bg-white font-semibold shadow-xs' : 'text-stone-600 hover:text-stone-900'
+                        }`}
+                        title="拉动小方块调整大小时自动显示边缘放大镜"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5 text-amber-600" />
+                        <span>放大镜 {enableMagnifier ? '开' : '关'}</span>
+                      </button>
+                      {enableMagnifier && (
+                        <div className="flex items-center gap-0.5 border-l border-stone-300 pl-1">
+                          {[2.5, 3.5, 5.0].map((z) => (
+                            <button
+                              key={z}
+                              type="button"
+                              onClick={() => setMagnifierZoom(z)}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                                Math.abs(magnifierZoom - z) < 0.1
+                                  ? 'bg-amber-500 text-stone-950 font-bold'
+                                  : 'text-stone-600 hover:text-stone-900'
+                              }`}
+                              title={`切换至 ${z}x 放大倍率`}
+                            >
+                              {z}x
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </>
                 )}
               </div>
@@ -1415,11 +2042,59 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
             </div>
           )}
 
+          {/* Real-time Cell Dimensions & Edge Transparency Status Ribbon */}
+          {!isFullscreen && (
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-stone-900 text-stone-300 rounded-xl text-xs border border-stone-800">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-stone-400">单格实际像素:</span>
+                <span className="font-mono font-bold text-white bg-stone-800 px-2 py-0.5 rounded border border-stone-700">
+                  {gridCellPixelW} × {gridCellPixelH} px
+                </span>
+                {isGridExactSquare ? (
+                  <span className="inline-flex items-center gap-1 text-emerald-400 bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 rounded font-medium">
+                    <CheckCheck className="w-3 h-3" />
+                    <span>严格 1:1 正方 (微信规范)</span>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleOneClickCorrectSquare}
+                    className="inline-flex items-center gap-1 text-amber-300 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 px-2 py-0.5 rounded cursor-pointer transition-colors"
+                    title="点击立即校正为 1:1 正方形"
+                  >
+                    <Square className="w-3 h-3" />
+                    <span>当前非正方 (点击一键矫正 1:1)</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEnableMagnifier(!enableMagnifier)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded cursor-pointer transition-colors ${
+                    enableMagnifier
+                      ? 'text-amber-300 bg-amber-500/15 border border-amber-500/30 hover:bg-amber-500/25'
+                      : 'text-stone-400 bg-stone-800 border border-stone-700 hover:text-stone-300'
+                  }`}
+                  title="调整独立小方块或网格拉动大小时自动唤起边缘放大镜"
+                >
+                  <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
+                  <span>边缘放大镜: {enableMagnifier ? `开启 (${magnifierZoom}x)` : '已关闭'}</span>
+                </button>
+                <span className="inline-flex items-center gap-1.5 text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>边缘黑边透明化 · 内容完整不扣图</span>
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* Viewport container wrapping video + overlays */}
           <div
             className={
               isFullscreen
-                ? 'flex-1 min-h-0 w-full flex items-center justify-center overflow-auto relative p-2'
+                ? 'flex-1 min-h-0 w-full flex items-center justify-center relative overflow-hidden py-1'
                 : 'w-full'
             }
           >
@@ -1434,10 +2109,10 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                   videoDimensions.width && videoDimensions.height
                     ? `${videoDimensions.width} / ${videoDimensions.height}`
                     : '16 / 9',
-                maxHeight: isFullscreen ? 'calc(100vh - 170px)' : '520px',
+                maxHeight: isFullscreen ? '100%' : '520px',
                 maxWidth: '100%',
                 width: isFullscreen ? 'auto' : '100%',
-                height: isFullscreen ? 'auto' : undefined,
+                height: isFullscreen ? '100%' : undefined,
                 transform: isFullscreen && zoomLevel !== 1 ? `scale(${zoomLevel})` : undefined,
               }}
             >
@@ -1859,35 +2534,39 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
             )}
 
             {/* Play/Pause Overlay button */}
-            <button
-              type="button"
-              onClick={togglePlay}
-              className="absolute bottom-3 left-3 p-2 rounded-lg bg-black/70 hover:bg-black/90 text-white text-xs flex items-center gap-1.5 backdrop-blur-xs shadow-md border border-white/20 transition-all z-10"
-            >
-              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-              <span>{isPlaying ? '暂停播放' : '播放循环'}</span>
-            </button>
+            {!isFullscreen && (
+              <button
+                type="button"
+                onClick={togglePlay}
+                className="absolute bottom-3 left-3 p-2 rounded-lg bg-black/70 hover:bg-black/90 text-white text-xs flex items-center gap-1.5 backdrop-blur-xs shadow-md border border-white/20 transition-all z-10"
+              >
+                {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                <span>{isPlaying ? '暂停播放' : '播放循环'}</span>
+              </button>
+            )}
 
             {/* Time indicator overlay */}
-            <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded bg-black/75 text-white text-[11px] font-mono backdrop-blur-xs border border-white/20 z-10 flex items-center gap-1.5 shadow-md">
-              <span>{currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
-              {currentSpeed !== 1 && (
-                <span className="text-amber-400 font-bold bg-amber-400/20 px-1.5 py-0.2 rounded text-[10px] border border-amber-400/30">
-                  {currentSpeed.toFixed(1)}x
-                </span>
-              )}
-            </div>
+            {!isFullscreen && (
+              <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded bg-black/75 text-white text-[11px] font-mono backdrop-blur-xs border border-white/20 z-10 flex items-center gap-1.5 shadow-md">
+                <span>{currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
+                {currentSpeed !== 1 && (
+                  <span className="text-amber-400 font-bold bg-amber-400/20 px-1.5 py-0.2 rounded text-[10px] border border-amber-400/30">
+                    {currentSpeed.toFixed(1)}x
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           </div>
 
           {/* Fullscreen Bottom Bar */}
           {isFullscreen && (
-            <div className="pt-3 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 bg-stone-900/90 px-4 py-2.5 rounded-xl">
+            <div className="px-3 py-1.5 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 bg-stone-900/95 rounded-lg shadow-md">
               <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={togglePlay}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-medium transition-colors cursor-pointer shadow-xs"
                 >
                   {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
                   <span>{isPlaying ? '暂停' : '播放'}</span>
@@ -1895,7 +2574,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
                 <div className="text-stone-300 font-mono text-xs flex items-center gap-2">
                   <span>进度: {currentTime.toFixed(2)}s / {duration.toFixed(2)}s</span>
-                  <span className="text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30">
+                  <span className="text-emerald-400 font-bold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-500/30 text-[11px]">
                     表情时长: {effectiveStickerDuration.toFixed(2)}s
                   </span>
                 </div>
@@ -1904,17 +2583,17 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               {/* Target cell & fine tune pills */}
               <div className="flex items-center gap-2">
                 <span className="text-stone-400">当前选中小格:</span>
-                <span className="px-2 py-0.5 rounded bg-amber-500 text-stone-950 font-bold font-mono">
+                <span className="px-2 py-0.5 rounded bg-amber-500 text-stone-950 font-bold font-mono text-xs">
                   第 {(Math.max(0, Math.min(totalCells - 1, inspectCellIndex)) + 1).toString().padStart(2, '0')} 格
                 </span>
 
                 {layoutMode === 'independent' && (
                   <div className="flex items-center gap-1 ml-2">
-                    <span className="text-stone-400 mr-1">微调移动:</span>
+                    <span className="text-stone-400 mr-0.5">微调移动:</span>
                     <button
                       type="button"
                       onClick={() => handleStepActiveBox('x', -1)}
-                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
                       title="向左移动 1%"
                     >
                       ← X
@@ -1922,7 +2601,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                     <button
                       type="button"
                       onClick={() => handleStepActiveBox('x', 1)}
-                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
                       title="向右移动 1%"
                     >
                       X →
@@ -1930,7 +2609,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                     <button
                       type="button"
                       onClick={() => handleStepActiveBox('y', -1)}
-                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
                       title="向上移动 1%"
                     >
                       ↑ Y
@@ -1938,16 +2617,16 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                     <button
                       type="button"
                       onClick={() => handleStepActiveBox('y', 1)}
-                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-white rounded font-mono border border-white/10 cursor-pointer"
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
                       title="向下移动 1%"
                     >
                       Y ↓
                     </button>
-                    <span className="text-stone-400 mx-1">尺寸:</span>
+                    <span className="text-stone-400 mx-0.5">尺寸:</span>
                     <button
                       type="button"
                       onClick={() => handleStepActiveBox('width', 1)}
-                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-amber-400 rounded font-mono border border-amber-500/30 cursor-pointer"
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-amber-400 rounded font-mono border border-amber-500/30 cursor-pointer text-xs"
                       title="加宽 1%"
                     >
                       W+
@@ -1955,7 +2634,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                     <button
                       type="button"
                       onClick={() => handleStepActiveBox('height', 1)}
-                      className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-amber-400 rounded font-mono border border-amber-500/30 cursor-pointer"
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-amber-400 rounded font-mono border border-amber-500/30 cursor-pointer text-xs"
                       title="加高 1%"
                     >
                       H+
@@ -2491,14 +3170,58 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               )}
             </div>
 
+            {/* 1:1 Square Calibration & Ratio Locking Card */}
+            <div className="p-2.5 bg-white rounded-lg border border-stone-200 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-stone-800 flex items-center gap-1.5">
+                  <Square className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>1:1 正方形比例与黑边优化</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleToggleLockSquare}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold border flex items-center gap-1 cursor-pointer transition-colors ${
+                    isLockSquare
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                      : 'bg-stone-100 text-stone-600 border-stone-300'
+                  }`}
+                >
+                  {isLockSquare ? <Lock className="w-3 h-3 text-emerald-600" /> : <Unlock className="w-3 h-3 text-stone-400" />}
+                  <span>{isLockSquare ? '已锁定 1:1' : '自由长宽比'}</span>
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 pt-1 border-t border-stone-100 text-[11px]">
+                <div className="text-stone-600">
+                  当前单格像素: <span className="font-mono font-bold text-stone-900">{gridCellPixelW}×{gridCellPixelH} px</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleOneClickCorrectSquare}
+                  className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-[11px] shadow-xs flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <CheckCheck className="w-3 h-3" />
+                  <span>一键矫正 1:1</span>
+                </button>
+              </div>
+            </div>
+
             {/* Quick Presets for Removing Black Bars / Margins */}
             <div>
               <span className="text-[11px] text-stone-500 block mb-1.5">一键快捷对齐与去黑边:</span>
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
+                  onClick={handleOneClickCorrectSquare}
+                  className="px-2 py-1.5 text-[11px] font-medium bg-indigo-50 hover:bg-indigo-100 text-indigo-900 border border-indigo-200 rounded-lg text-left transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <span className="w-2 h-2 rounded-full bg-indigo-600 shrink-0" />
+                  <span>严格 1:1 正方校准</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => applyCropPreset('removeTop30')}
-                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-emerald-50 text-stone-800 hover:text-emerald-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5"
+                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-emerald-50 text-stone-800 hover:text-emerald-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
                   <span>剔除顶部 30% 黑边</span>
@@ -2506,7 +3229,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 <button
                   type="button"
                   onClick={() => applyCropPreset('removeTopBottom15')}
-                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-emerald-50 text-stone-800 hover:text-emerald-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5"
+                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-emerald-50 text-stone-800 hover:text-emerald-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <span className="w-2 h-2 rounded-full bg-indigo-500 shrink-0" />
                   <span>剔除上下各 15% 黑边</span>
@@ -2514,7 +3237,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 <button
                   type="button"
                   onClick={() => applyCropPreset('center80')}
-                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-emerald-50 text-stone-800 hover:text-emerald-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5"
+                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-emerald-50 text-stone-800 hover:text-emerald-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
                   <span>居中缩放 80% 区域</span>
@@ -2522,7 +3245,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 <button
                   type="button"
                   onClick={() => applyCropPreset('full')}
-                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-stone-100 text-stone-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5"
+                  className="px-2 py-1.5 text-[11px] font-medium bg-white hover:bg-stone-100 text-stone-800 border border-stone-200 rounded-lg text-left transition-colors flex items-center gap-1.5 cursor-pointer col-span-2"
                 >
                   <Maximize2 className="w-3 h-3 text-stone-400 shrink-0" />
                   <span>满屏 100% 覆盖</span>
@@ -3381,6 +4104,16 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
           )}
         </div>
       </div>
+
+      {/* Real-time High-Precision Edge Magnifier Overlay */}
+      <GridMagnifierLens
+        data={magnifierData}
+        sourceElement={videoRef.current}
+        sourceWidth={vidW}
+        sourceHeight={vidH}
+        zoomLevel={magnifierZoom}
+        onZoomChange={setMagnifierZoom}
+      />
     </div>
   );
 };

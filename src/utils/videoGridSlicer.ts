@@ -1,6 +1,6 @@
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { GridConfig, SlicedStickerItem } from '../types';
-import { removeBackgroundFromFrame, applyWhiteOutline } from './gifProcessor';
+import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
 
 // Generate a demo 16-grid animated video file (4x4)
@@ -389,6 +389,10 @@ export async function sliceVideoIntoStickers(
       sampleCtx.drawImage(videoSource, sx, sy, sw, sh, dx, dy, dw, dh);
       let imgData = sampleCtx.getImageData(0, 0, 240, 240);
 
+      // Clean unselected margins & edge black bars so unpainted padding and video letterboxing
+      // are completely transparent, while keeping 100% of internal content intact without keying ("内容保持原图完整不扣图")
+      imgData = cleanEdgeBlackBordersAndMargins(imgData, 32);
+
       // Apply background transparency if enabled
       if (autoTransparent) {
         imgData = removeBackgroundFromFrame(imgData, {
@@ -474,7 +478,7 @@ export async function sliceVideoIntoStickers(
         gif.writeFrame(finalIndices, 240, 240, {
           palette: fullPalette,
           delay: frames[f].delay,
-          transparent: autoTransparent,
+          transparent: true, // Always transparent: index 0 is transparent background
           transparentIndex: 0,
           dispose: 2,
           repeat: 0,

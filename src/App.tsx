@@ -38,6 +38,7 @@ import {
   decodeMediaFile,
   processMediaItem,
   isGifFile,
+  detachFileToMemory,
 } from './utils/gifProcessor';
 import { UploadZone } from './components/UploadZone';
 import { BatchControls } from './components/BatchControls';
@@ -154,6 +155,19 @@ export default function App() {
     }, 4000);
   };
 
+  // Prevent browser default behavior of navigating to dropped files if dropped outside target areas
+  useEffect(() => {
+    const preventWindowDrop = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener('dragover', preventWindowDrop);
+    window.addEventListener('drop', preventWindowDrop);
+    return () => {
+      window.removeEventListener('dragover', preventWindowDrop);
+      window.removeEventListener('drop', preventWindowDrop);
+    };
+  }, []);
+
   // -------------------------------------------------------------
   // Tab 1: Video Loading & Slicing Handlers
   // -------------------------------------------------------------
@@ -163,6 +177,7 @@ export default function App() {
     setVideoUrl(url);
     setSlicedStickers([]);
     setMaterials(null);
+    setActiveTab('suite_video');
     showNotification(`已载入视频「${file.name}」，请在下方调整宫格与修剪秒数`);
   };
 
@@ -718,17 +733,20 @@ export default function App() {
     const newItems: GifItem[] = [];
 
     for (const file of files) {
+      // Detach DOM File to in-memory File + ArrayBuffer to prevent net::ERR_UPLOAD_FILE_CHANGED in Edge/Chrome
+      const { safeFile, arrayBuffer } = await detachFileToMemory(file);
       const id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const url = URL.createObjectURL(file);
-      const isGif = isGifFile(file);
+      const url = URL.createObjectURL(safeFile);
+      const isGif = isGifFile(safeFile);
 
       const item: GifItem = {
         id,
-        name: file.name,
-        file,
+        name: safeFile.name,
+        file: safeFile,
+        cachedBuffer: arrayBuffer,
         mediaType: isGif ? 'gif' : 'image',
         originalUrl: url,
-        originalSize: file.size,
+        originalSize: safeFile.size,
         width: 0,
         height: 0,
         frameCount: isGif ? 0 : 1,
@@ -762,7 +780,7 @@ export default function App() {
 
     for (const item of newItems) {
       try {
-        const decoded = await decodeMediaFile(item.file);
+        const decoded = await decodeMediaFile(item.file, item.cachedBuffer);
         setItems((prev) =>
           prev.map((i) =>
             i.id === item.id
@@ -772,6 +790,7 @@ export default function App() {
                   height: decoded.height,
                   frameCount: decoded.frames.length,
                   detectedBgColor: decoded.detectedBgColor,
+                  cachedFrames: decoded.frames,
                   options: {
                     ...i.options,
                     targetColor: decoded.detectedBgColor || '#ffffff',
@@ -841,7 +860,9 @@ export default function App() {
               i.id === id ? { ...i, progress, statusMessage: message } : i
             )
           );
-        }
+        },
+        currentItem.cachedBuffer,
+        currentItem.cachedFrames
       );
 
       setItems((prev) =>
@@ -938,7 +959,9 @@ export default function App() {
                   : i
               )
             );
-          }
+          },
+          item.cachedBuffer,
+          item.cachedFrames
         );
 
         setItems((prev) =>
@@ -1264,7 +1287,10 @@ export default function App() {
           <div className="space-y-6 animate-in fade-in duration-200">
             {!imageUrl ? (
               <div className="space-y-6">
-                <GridImageUploader onImageLoaded={handleImageLoaded} />
+                <GridImageUploader
+                  onImageLoaded={handleImageLoaded}
+                  onVideoDropped={handleVideoLoaded}
+                />
 
                 {/* Workflow Cards */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

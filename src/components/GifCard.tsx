@@ -67,8 +67,12 @@ export const GifCard: React.FC<GifCardProps> = ({
   useEffect(() => {
     let cancelled = false;
     async function loadFrames() {
+      if (item.cachedFrames && item.cachedFrames.length > 0) {
+        setDecodedFrames(item.cachedFrames);
+        return;
+      }
       try {
-        const decoded = await decodeMediaFile(item.file);
+        const decoded = await decodeMediaFile(item.file, item.cachedBuffer);
         if (cancelled) return;
         setDecodedFrames(decoded.frames);
       } catch (err) {
@@ -79,7 +83,7 @@ export const GifCard: React.FC<GifCardProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [item.file]);
+  }, [item.file, item.cachedBuffer, item.cachedFrames]);
 
   // Frame animation player loop when playing
   useEffect(() => {
@@ -336,12 +340,22 @@ export const GifCard: React.FC<GifCardProps> = ({
           ) : null}
 
           {item.status === 'error' && (
-            <span
-              className="inline-flex items-center gap-1 text-[11px] font-medium text-red-700 bg-red-50 px-2 py-0.5 rounded-full border border-red-200"
-              title={item.errorMessage}
-            >
-              <AlertCircle className="w-3 h-3" /> 失败
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-red-700 bg-red-50 px-2 py-0.5 rounded-full border border-red-200"
+                title={item.errorMessage || '处理失败'}
+              >
+                <AlertCircle className="w-3 h-3" /> 失败
+              </span>
+              <button
+                type="button"
+                onClick={() => onProcessItem(item.id, item.options.wechat?.enabled)}
+                className="inline-flex items-center gap-0.5 text-[11px] font-medium text-red-700 hover:text-red-800 bg-red-100 hover:bg-red-200 px-2 py-0.5 rounded-full border border-red-300 transition-colors cursor-pointer"
+                title="重新尝试处理"
+              >
+                <RefreshCw className="w-2.5 h-2.5" /> 重试
+              </button>
+            </div>
           )}
 
           <button
@@ -813,6 +827,25 @@ export const GifCard: React.FC<GifCardProps> = ({
           </div>
         )}
       </div>
+
+      {/* Error Callout if processing failed */}
+      {item.status === 'error' && (
+        <div className="mx-3 my-2 p-2 bg-red-50/90 border border-red-200 rounded-lg flex items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+            <span className="text-red-700 truncate" title={item.errorMessage}>
+              {item.errorMessage || '处理遇到问题，请重试'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => onProcessItem(item.id, item.options.wechat?.enabled)}
+            className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[11px] font-medium shrink-0 cursor-pointer transition-colors flex items-center gap-1"
+          >
+            <RefreshCw className="w-2.5 h-2.5" /> 重试
+          </button>
+        </div>
+      )}
 
       {/* Card Footer Actions */}
       <div className="p-3 border-t border-stone-100 bg-white flex items-center justify-between gap-2 mt-auto">

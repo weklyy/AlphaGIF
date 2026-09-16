@@ -1,6 +1,6 @@
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { ImageGridConfig, SlicedStickerItem } from '../types';
-import { removeBackgroundFromFrame, applyWhiteOutline } from './gifProcessor';
+import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
 
 /**
@@ -266,6 +266,9 @@ export async function sliceImageIntoStickers(
       // Read pixel data
       let imageData = cellCtx.getImageData(0, 0, 240, 240);
 
+      // Clean unselected margins & edge black bars so unpainted padding is completely transparent
+      imageData = cleanEdgeBlackBordersAndMargins(imageData, 32);
+
       // Remove background if requested
       if (autoTransparent) {
         imageData = removeBackgroundFromFrame(imageData, {
@@ -294,10 +297,56 @@ export async function sliceImageIntoStickers(
 
       if (outputFormat === 'gif') {
         const encoder = new GIFEncoder();
-        const rgba = new Uint8Array(imageData.data.buffer);
-        const palette = quantize(rgba, 256, { format: 'rgba4444' });
-        const indexed = applyPalette(rgba, palette);
-        encoder.writeFrame(indexed, 240, 240, { palette, transparent: true, delay: 0 });
+        const data = imageData.data;
+        const totalPixels = 240 * 240;
+        let opaqueCount = 0;
+        for (let p = 0; p < totalPixels; p++) {
+          if (data[p * 4 + 3] > 64) opaqueCount++;
+        }
+
+        if (opaqueCount === 0) {
+          const palette = [[0, 0, 0]];
+          const index = new Uint8Array(totalPixels);
+          encoder.writeFrame(index, 240, 240, {
+            palette,
+            delay: 0,
+            transparent: true,
+            transparentIndex: 0,
+            dispose: 2,
+            repeat: 0,
+          });
+        } else {
+          const opaquePixels = new Uint8Array(opaqueCount * 4);
+          let opIdx = 0;
+          for (let p = 0; p < totalPixels; p++) {
+            if (data[p * 4 + 3] > 64) {
+              opaquePixels[opIdx] = data[p * 4];
+              opaquePixels[opIdx + 1] = data[p * 4 + 1];
+              opaquePixels[opIdx + 2] = data[p * 4 + 2];
+              opaquePixels[opIdx + 3] = 255;
+              opIdx += 4;
+            }
+          }
+          const opaquePalette = quantize(opaquePixels, 255, { format: 'rgb565' });
+          const fullPalette = [[0, 0, 0], ...opaquePalette];
+          const rawIndices = applyPalette(data, opaquePalette, 'rgb565');
+          const finalIndices = new Uint8Array(totalPixels);
+          for (let p = 0; p < totalPixels; p++) {
+            if (data[p * 4 + 3] <= 64) {
+              finalIndices[p] = 0;
+            } else {
+              finalIndices[p] = rawIndices[p] + 1;
+            }
+          }
+          encoder.writeFrame(finalIndices, 240, 240, {
+            palette: fullPalette,
+            delay: 0,
+            transparent: true,
+            transparentIndex: 0,
+            dispose: 2,
+            repeat: 0,
+          });
+        }
         encoder.finish();
         const gifBytes = encoder.bytes();
         blob = new Blob([gifBytes], { type: 'image/gif' });

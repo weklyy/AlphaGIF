@@ -20,7 +20,7 @@ import {
   IconOptions,
 } from '../../types';
 import { BANNER_COLOR_THEMES } from '../../utils/materialGenerator';
-import { exportWeChatPackageZip } from '../../utils/wechatZipExporter';
+import { exportWeChatPackageZip, isStaticStickerSet } from '../../utils/wechatZipExporter';
 
 interface MaterialsManagerProps {
   stickers: SlicedStickerItem[];
@@ -56,6 +56,7 @@ export const MaterialsManager: React.FC<MaterialsManagerProps> = ({
   isGeneratingMaterials,
 }) => {
   const [isExportingZip, setIsExportingZip] = useState(false);
+  const isStatic = isStaticStickerSet(stickers);
 
   const handleExportZip = async () => {
     if (stickers.length === 0 || isExportingZip) return;
@@ -106,7 +107,7 @@ export const MaterialsManager: React.FC<MaterialsManagerProps> = ({
             type="button"
             disabled={isGeneratingMaterials}
             onClick={onRegenerateMaterials}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 bg-stone-100 hover:bg-stone-200 rounded-xl transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 bg-stone-100 hover:bg-stone-200 rounded-xl transition-colors disabled:opacity-50 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingMaterials ? 'animate-spin' : ''}`} />
             <span>重新拼装全部物料</span>
@@ -116,10 +117,16 @@ export const MaterialsManager: React.FC<MaterialsManagerProps> = ({
             type="button"
             disabled={isExportingZip || isGeneratingMaterials}
             onClick={handleExportZip}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#07c160] hover:bg-[#06ad56] text-white text-sm font-bold rounded-xl shadow-md transition-all active:scale-[0.98] disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#07c160] hover:bg-[#06ad56] text-white text-sm font-bold rounded-xl shadow-md transition-all active:scale-[0.98] disabled:opacity-50 cursor-pointer"
           >
             <FolderArchive className="w-4 h-4" />
-            <span>{isExportingZip ? '正在打包 ZIP...' : '一键打包下载微信表情物料包 (ZIP)'}</span>
+            <span>
+              {isExportingZip
+                ? '正在打包 ZIP...'
+                : isStatic
+                ? '一键打包下载静态表情物料包 (PNG ZIP)'
+                : '一键打包下载动态表情物料包 (GIF ZIP)'}
+            </span>
           </button>
         </div>
       </div>
@@ -129,7 +136,10 @@ export const MaterialsManager: React.FC<MaterialsManagerProps> = ({
         <div className="flex items-center justify-between text-xs font-bold text-emerald-900">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-[#07c160]" />
-            <span>微信表情开放平台全套物料格式合规检测报告：全部通过</span>
+            <span>
+              微信表情开放平台全套物料格式合规检测报告：全部通过（
+              {isStatic ? '静态表情专辑 PNG 标准' : '动态表情专辑 GIF 标准'}）
+            </span>
           </div>
           <span className="text-[11px] font-mono text-emerald-700">6 大物料全绿灯</span>
         </div>
@@ -137,7 +147,9 @@ export const MaterialsManager: React.FC<MaterialsManagerProps> = ({
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-1 text-[11px]">
           <div className="bg-white/80 p-2 rounded-lg border border-emerald-200">
             <div className="font-semibold text-stone-800">01_表情主图</div>
-            <div className="text-emerald-700 font-mono">240×240 &lt;500KB ✅</div>
+            <div className="text-emerald-700 font-mono">
+              {isStatic ? '240×240 PNG <500KB ✅' : '240×240 GIF <1MB ✅'}
+            </div>
           </div>
           <div className="bg-white/80 p-2 rounded-lg border border-emerald-200">
             <div className="font-semibold text-stone-800">02_详情页横幅</div>

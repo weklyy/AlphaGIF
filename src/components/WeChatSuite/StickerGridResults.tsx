@@ -9,8 +9,15 @@ import {
   ShieldCheck,
   Image as ImageIcon,
   Sliders,
+  FolderArchive,
+  FileImage,
+  Loader2,
 } from 'lucide-react';
 import { SlicedStickerItem } from '../../types';
+import {
+  exportSlicedStickersOnlyZip,
+  isStaticStickerSet,
+} from '../../utils/wechatZipExporter';
 
 interface StickerGridResultsProps {
   stickers: SlicedStickerItem[];
@@ -40,11 +47,28 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
   currentThanksIndex,
 }) => {
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [isExportingZip, setIsExportingZip] = useState(false);
+
+  const isStatic = isStaticStickerSet(stickers);
+
+  const handleExportZip = async () => {
+    if (stickers.length === 0 || isExportingZip) return;
+    setIsExportingZip(true);
+    try {
+      await exportSlicedStickersOnlyZip(stickers);
+    } catch (err) {
+      console.error('Failed to export stickers ZIP', err);
+    } finally {
+      setIsExportingZip(false);
+    }
+  };
 
   const handleDownloadSingle = (sticker: SlicedStickerItem) => {
     const a = document.createElement('a');
     a.href = sticker.url;
-    a.download = sticker.name;
+    const baseName = sticker.name.replace(/\.[^/.]+$/, '');
+    const ext = isStatic ? 'png' : 'gif';
+    a.download = `${baseName}.${ext}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -56,30 +80,53 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-stone-100">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-emerald-50 text-[#07c160] flex items-center justify-center font-bold shadow-2xs">
-            <Smile className="w-5 h-5" />
+            {isStatic ? <FileImage className="w-5 h-5" /> : <Smile className="w-5 h-5" />}
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h3 className="text-base font-bold text-stone-900">
                 01_表情主图切片结果 ({stickers.length} 个)
               </h3>
-              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3" />
-                全部严格锁定 240×240 &lt; 500KB
-              </span>
+              {isStatic ? (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3 text-[#07c160]" />
+                  240×240 PNG 格式（微信静态官方唯一标准）
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" />
+                  全部严格锁定 240×240 GIF &lt; 1MB
+                </span>
+              )}
             </div>
-            <p className="text-xs text-stone-500">
-              符合微信官方表情主图数量规范（8~24之间），支持循环播放、白边保护与一键指派为配套物料
+            <p className="text-xs text-stone-500 mt-0.5">
+              {isStatic
+                ? '严格输出微信官方 240×240 无损透明 PNG 格式，每张均满足 ≤500KB 规范，支持 2px 白色描边与一键指派物料'
+                : '符合微信官方表情主图数量规范（8~24之间），支持循环播放、白边保护与一键指派为配套物料'}
             </p>
           </div>
         </div>
 
-        {/* Global Action: Import to Tab 2 */}
-        <div className="flex items-center gap-2">
+        {/* Global Action: Download Zip and Import to Tab 2 */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleExportZip}
+            disabled={isExportingZip}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-[#07c160] hover:bg-[#06ad56] text-white text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95 disabled:opacity-50 cursor-pointer"
+          >
+            {isExportingZip ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <FolderArchive className="w-3.5 h-3.5" />
+            )}
+            <span>{isStatic ? '打包下载全部 PNG 主图 (ZIP)' : '打包下载全部 GIF 主图 (ZIP)'}</span>
+          </button>
+
           <button
             type="button"
             onClick={onImportAllToTab2}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl border border-indigo-200 transition-colors shadow-2xs"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl border border-indigo-200 transition-colors shadow-2xs cursor-pointer"
           >
             <Sliders className="w-3.5 h-3.5 text-indigo-600" />
             <span>全部导入「背景透明化工具」继续微调</span>
@@ -108,11 +155,26 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
             >
               {/* Top Header inside card */}
               <div className="flex items-center justify-between mb-2">
-                <span className="font-mono text-xs font-bold text-stone-800 bg-white px-2 py-0.5 rounded border border-stone-200 shadow-2xs">
-                  {sticker.name}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-stone-200 text-stone-700 text-[10px] font-mono font-bold flex items-center justify-center">
+                    {sticker.index}
+                  </span>
+                  <span className="font-mono text-xs font-bold text-stone-800 bg-white px-1.5 py-0.5 rounded border border-stone-200 shadow-2xs">
+                    {String(sticker.index).padStart(2, '0')}_T.{isStatic ? 'png' : 'gif'}
+                  </span>
+                </div>
 
                 <div className="flex items-center gap-1">
+                  <span
+                    className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                      isStatic
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : 'bg-blue-100 text-blue-800 border border-blue-300'
+                    }`}
+                  >
+                    {isStatic ? 'PNG' : 'GIF'}
+                  </span>
+
                   {isCover && (
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
                       封面
@@ -136,7 +198,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                 </div>
               </div>
 
-              {/* GIF Preview with checkerboard background */}
+              {/* Preview with checkerboard background */}
               <div
                 className="relative w-full aspect-square rounded-lg overflow-hidden border border-stone-200 flex items-center justify-center mb-2"
                 style={{
@@ -163,9 +225,19 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                 <span className="flex items-center gap-1">
                   <span>{sticker.width}×{sticker.height}</span>
                   <span className="text-stone-300">•</span>
-                  <span>{sticker.duration ? `${sticker.duration.toFixed(1)}s` : 'GIF'}</span>
-                  <span className="text-stone-300">•</span>
-                  <span>{sticker.frameCount}帧</span>
+                  <span>
+                    {isStatic
+                      ? 'PNG'
+                      : sticker.duration
+                      ? `${sticker.duration.toFixed(1)}s`
+                      : 'GIF'}
+                  </span>
+                  {!isStatic && (
+                    <>
+                      <span className="text-stone-300">•</span>
+                      <span>{sticker.frameCount}帧</span>
+                    </>
+                  )}
                 </span>
                 <span className="font-mono text-emerald-700 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
                   {sizeKb} KB
@@ -179,7 +251,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   <button
                     type="button"
                     onClick={() => onSetAsCover(sticker.index)}
-                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors ${
+                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors cursor-pointer ${
                       isCover
                         ? 'bg-amber-500 text-white border-amber-600 font-bold'
                         : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-200'
@@ -190,7 +262,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   <button
                     type="button"
                     onClick={() => onSetAsIcon(sticker.index)}
-                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors ${
+                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors cursor-pointer ${
                       isIcon
                         ? 'bg-blue-600 text-white border-blue-700 font-bold'
                         : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-200'
@@ -201,7 +273,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   <button
                     type="button"
                     onClick={() => onSetAsGuide(sticker.index)}
-                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors ${
+                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors cursor-pointer ${
                       isGuide
                         ? 'bg-purple-600 text-white border-purple-700 font-bold'
                         : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-200'
@@ -212,7 +284,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   <button
                     type="button"
                     onClick={() => onSetAsThanks(sticker.index)}
-                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors ${
+                    className={`py-1 px-1.5 rounded font-medium border text-center transition-colors cursor-pointer ${
                       isThanks
                         ? 'bg-rose-600 text-white border-rose-700 font-bold'
                         : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-200'
@@ -227,17 +299,17 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   <button
                     type="button"
                     onClick={() => handleDownloadSingle(sticker)}
-                    className="flex-1 py-1 px-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors"
+                    className="flex-1 py-1 px-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3" />
-                    下载单张
+                    下载单张 ({isStatic ? 'PNG' : 'GIF'})
                   </button>
 
                   <button
                     type="button"
                     onClick={() => onImportSingleToTab2(sticker)}
                     title="导入到背景透明化工具进行高级微调"
-                    className="py-1 px-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-indigo-200/60"
+                    className="py-1 px-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-indigo-200/60 cursor-pointer"
                   >
                     <Sliders className="w-3 h-3" />
                     微调

@@ -4068,6 +4068,104 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 防止表情在微信深色模式（深黑底色）下轮廓隐形
               </p>
             </div>
+
+            {/* AI Loop Mode (Boomerang Ping-Pong Loop) */}
+            <div className="pt-2 border-t border-stone-200 space-y-1.5">
+              <div className="flex items-center justify-between text-xs font-semibold text-stone-800">
+                <span className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>AI 动图无缝循环模式</span>
+                </span>
+                <span className="text-[10px] font-mono text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                  {config.loopMode === 'boomerang' ? '🪃 往返平滑循环' : '常规单向播放'}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => onConfigChange({ ...config, loopMode: 'normal' })}
+                  className={`py-1.5 px-2 rounded-lg border text-left text-xs transition-all cursor-pointer ${
+                    (config.loopMode || 'normal') === 'normal'
+                      ? 'bg-indigo-50 border-indigo-500 text-indigo-950 font-bold shadow-2xs'
+                      : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                  }`}
+                >
+                  <div className="font-semibold">常规单向播放</div>
+                  <div className="text-[10px] text-stone-500">按抽帧时间线正序播放</div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onConfigChange({ ...config, loopMode: 'boomerang' })}
+                  className={`py-1.5 px-2 rounded-lg border text-left text-xs transition-all cursor-pointer ${
+                    config.loopMode === 'boomerang'
+                      ? 'bg-indigo-50 border-indigo-500 text-indigo-950 font-bold shadow-2xs'
+                      : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                  }`}
+                >
+                  <div className="font-semibold flex items-center gap-1">
+                    <span>🪃 往返丝滑循环</span>
+                    <span className="text-[9px] bg-indigo-200 text-indigo-900 px-1 rounded">推荐</span>
+                  </div>
+                  <div className="text-[10px] text-stone-500">自动首尾往返，彻底杜绝跳帧</div>
+                </button>
+              </div>
+              <p className="text-[10px] text-stone-500">
+                针对 AI 生成视频：如眨眼、点头、大笑、比心等动作，开启往返循环后动画丝滑衔接，不会出现视频结束时突然跳回第一帧的僵硬感！
+              </p>
+            </div>
+
+            {/* AI Smart Subject Auto-Center & Scale for Animation */}
+            <div className="pt-2 border-t border-stone-200 space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-xs font-semibold text-stone-800 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-pink-600" />
+                    <span>AI 主体智能居中与对齐 (Auto-Center)</span>
+                  </label>
+                  <p className="text-[11px] text-stone-500">
+                    自动识别各格角色中心并校准到画面中央，解决 AI 人物偏心或贴边
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config.smartAutoCenter || false}
+                  onChange={(e) =>
+                    onConfigChange({ ...config, smartAutoCenter: e.target.checked })
+                  }
+                  className="w-4 h-4 rounded text-pink-600 accent-pink-600 cursor-pointer"
+                />
+              </div>
+
+              {config.smartAutoCenter && (
+                <div className="p-2.5 bg-pink-50/70 rounded-xl border border-pink-200/70 space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-stone-700 font-medium">主体画面占比:</span>
+                    <span className="font-mono text-pink-700 font-bold">
+                      {Math.round((config.subjectScaleTarget || 0.82) * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="65"
+                    max="92"
+                    value={Math.round((config.subjectScaleTarget || 0.82) * 100)}
+                    onChange={(e) =>
+                      onConfigChange({
+                        ...config,
+                        subjectScaleTarget: (parseInt(e.target.value) || 82) / 100,
+                      })
+                    }
+                    className="w-full accent-pink-600 cursor-pointer"
+                  />
+                  <div className="text-[10px] text-pink-700 flex items-center justify-between">
+                    <span>65% (宽松)</span>
+                    <span className="font-bold text-pink-900">推荐 82% (完美留白)</span>
+                    <span>92% (饱满)</span>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Slicing Progress Bar or Action Button */}

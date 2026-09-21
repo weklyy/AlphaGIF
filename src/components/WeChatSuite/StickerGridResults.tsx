@@ -12,6 +12,7 @@ import {
   FolderArchive,
   FileImage,
   Loader2,
+  Paintbrush,
 } from 'lucide-react';
 import { SlicedStickerItem } from '../../types';
 import {
@@ -23,6 +24,7 @@ interface StickerGridResultsProps {
   stickers: SlicedStickerItem[];
   onImportAllToTab2: () => void;
   onImportSingleToTab2: (sticker: SlicedStickerItem) => void;
+  onSendToRetouch?: (sticker: SlicedStickerItem) => void;
   onSetAsCover: (index: number) => void;
   onSetAsIcon: (index: number) => void;
   onSetAsGuide: (index: number) => void;
@@ -37,6 +39,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
   stickers,
   onImportAllToTab2,
   onImportSingleToTab2,
+  onSendToRetouch,
   onSetAsCover,
   onSetAsIcon,
   onSetAsGuide,
@@ -305,6 +308,18 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                     下载单张 ({isStatic ? 'PNG' : 'GIF'})
                   </button>
 
+                  {onSendToRetouch && (
+                    <button
+                      type="button"
+                      onClick={() => onSendToRetouch(sticker)}
+                      title="送往 AI 修图去水印画板（消除杂物/文字/水印/打码）"
+                      className="py-1 px-2 bg-emerald-50 hover:bg-emerald-100 text-[#07c160] rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-emerald-200/60 cursor-pointer"
+                    >
+                      <Paintbrush className="w-3 h-3" />
+                      修图
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => onImportSingleToTab2(sticker)}
@@ -312,7 +327,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                     className="py-1 px-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-indigo-200/60 cursor-pointer"
                   >
                     <Sliders className="w-3 h-3" />
-                    微调
+                    去底
                   </button>
                 </div>
               </div>

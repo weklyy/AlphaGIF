@@ -119,6 +119,9 @@ export interface GridConfig {
   outlineWidth: number; // default 2
   lockSquare?: boolean; // Lock 1:1 square ratio for each cell (default true)
   transparentBorders?: boolean; // Ensure all unselected/padded border areas output as transparent (default true)
+  loopMode?: 'normal' | 'boomerang' | 'crossfade'; // AI 动图循环模式: normal=常规, boomerang=往返首尾丝滑, crossfade=交叉淡入
+  smartAutoCenter?: boolean; // AI 主体智能检测并居中对齐 (解决 AI 多宫格偏心忽大忽小)
+  subjectScaleTarget?: number; // AI 主体画面占比 (例如 0.82 即 82%，保留微信安全边距)
 }
 
 export interface ImageGridConfig {
@@ -140,6 +143,8 @@ export interface ImageGridConfig {
   outputFormat: 'png' | 'gif'; // default 'png' (240x240 PNG is WeChat static sticker official standard)
   lockSquare?: boolean; // Lock 1:1 square ratio for each cell (default true)
   transparentBorders?: boolean; // Ensure all unselected/padded border areas output as transparent (default true)
+  smartAutoCenter?: boolean; // AI 主体智能检测并居中对齐 (解决 AI 九宫格/16格偏心忽大忽小)
+  subjectScaleTarget?: number; // AI 主体画面占比 (默认 0.82 即 82%)
 }
 
 export interface SlicedStickerItem {
@@ -193,3 +198,33 @@ export interface WeChatMaterialsState {
   rewardGuide: MaterialItemInfo;
   rewardThanks: MaterialItemInfo;
 }
+
+// -----------------------------------------------------------------
+// Image Retouch & Watermark Removal Types
+// -----------------------------------------------------------------
+export type RetouchTool =
+  | 'brush-remove'      // 智能涂抹消除 (纹理修复)
+  | 'rect-remove'       // 矩形圈选消除 (纹理修复)
+  | 'lasso-remove'      // 自由套索圈选消除 (纹理修复)
+  | 'brush-transparent' // 涂抹擦除透底 (直接消抹为透明)
+  | 'brush-restore'     // 消除透底 / 涂抹恢复原图 (将透明底恢复为不透明原图)
+  | 'rect-transparent'  // 矩形框选清除透底 (直接消抹为透明)
+  | 'color-transparent' // 吸管点除去背景 (直接消抹为透明)
+  | 'mosaic'            // 像素马赛克打码
+  | 'blur'              // 柔和毛玻璃模糊打码
+  | 'eraser'            // 选区橡皮擦 (修正涂抹蒙版)
+  | 'pan';              // 抓手平移移动画布
+
+export interface RetouchOptions {
+  tool: RetouchTool;
+  brushSize: number;            // 4px ~ 120px
+  eraserSize: number;           // 4px ~ 120px
+  mosaicSize: number;           // 4px ~ 64px 像素块颗粒度
+  blurRadius: number;           // 2px ~ 30px 高斯模糊半径
+  mosaicStyle: 'pixel' | 'blur';// 像素马赛克 vs 毛玻璃
+  autoFeather: boolean;         // 边缘平滑自适应羽化
+  colorTolerance?: number;      // 吸管去底容差 (0 - 100)
+  contiguous?: boolean;         // 仅清除连通边缘 (保护主体内部)
+  whiteOutlinePreview?: boolean;// 微信 2px 白描边实时叠加预览
+}
+

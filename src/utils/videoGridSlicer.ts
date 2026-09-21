@@ -2,6 +2,7 @@ import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { GridConfig, SlicedStickerItem } from '../types';
 import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
+import { autoCenterAndScaleSubject } from './imageInpainting';
 
 // Generate a demo 16-grid animated video file (4x4)
 export async function generateDemo16GridVideo(): Promise<{ file: File; duration: number }> {
@@ -270,6 +271,9 @@ export async function sliceVideoIntoStickers(
     cellOverrides,
     layoutMode,
     independentBoxes,
+    loopMode = 'normal',
+    smartAutoCenter,
+    subjectScaleTarget = 0.82,
   } = config;
 
   const totalCells = cols * rows;
@@ -401,10 +405,22 @@ export async function sliceVideoIntoStickers(
           contiguous: true,
           defringe: 1,
         });
+      }
 
-        if (addWhiteOutline) {
-          imgData = applyWhiteOutline(imgData, outlineWidth || 2, '#ffffff');
-        }
+      // AI Smart Auto-Center for animated cell
+      if (smartAutoCenter) {
+        imgData = autoCenterAndScaleSubject(
+          imgData,
+          240,
+          subjectScaleTarget || 0.82,
+          bgColor,
+          tolerance || 20
+        );
+      }
+
+      // Add WeChat official 2px white outline if requested
+      if (autoTransparent && addWhiteOutline) {
+        imgData = applyWhiteOutline(imgData, outlineWidth || 2, '#ffffff');
       }
 
       cellFrames[c].frames.push({
@@ -426,7 +442,13 @@ export async function sliceVideoIntoStickers(
     onProgress?.(progressBase, c + 1, totalCells, `正在压缩编码第 ${c + 1}/${totalCells} 个表情 GIF...`);
 
     const gif = GIFEncoder();
-    const frames = item.frames;
+    
+    // Apply AI Loop Mode (Boomerang ping-pong loop)
+    let frames = item.frames;
+    if (loopMode === 'boomerang' && frames.length >= 3) {
+      const returnFrames = frames.slice(1, -1).reverse();
+      frames = [...frames, ...returnFrames];
+    }
 
     for (let f = 0; f < frames.length; f++) {
       const frameData = frames[f].imageData.data;

@@ -49,6 +49,7 @@ import { GridImageUploader } from './components/WeChatSuite/GridImageUploader';
 import { GridImageSlicerControls } from './components/WeChatSuite/GridImageSlicerControls';
 import { StickerGridResults } from './components/WeChatSuite/StickerGridResults';
 import { MaterialsManager } from './components/WeChatSuite/MaterialsManager';
+import { ImageRetouchWorkspace } from './components/WeChatSuite/ImageRetouchWorkspace';
 import { sliceVideoIntoStickers } from './utils/videoGridSlicer';
 import { sliceImageIntoStickers } from './utils/imageGridSlicer';
 import {
@@ -61,8 +62,15 @@ import {
 } from './utils/materialGenerator';
 
 export default function App() {
-  // Triple-tab navigation state
-  const [activeTab, setActiveTab] = useState<'suite_video' | 'suite_image' | 'transparency'>('suite_video');
+  // Navigation state: Static Slicer, Dynamic Slicer, Consolidated Transparency & Retouch Tool
+  const [activeTab, setActiveTab] = useState<'suite_image' | 'suite_video' | 'transparency'>('suite_image');
+  const [transparencySubView, setTransparencySubView] = useState<'batch' | 'retouch'>('batch');
+
+  // Retouch & Watermark Workspace State
+  const [retouchImageFile, setRetouchImageFile] = useState<File | null>(null);
+  const [activeRetouchItemId, setActiveRetouchItemId] = useState<string | null>(null);
+  const [isRetouchImageLoaded, setIsRetouchImageLoaded] = useState<boolean>(false);
+  const [manualShowBanner, setManualShowBanner] = useState<boolean>(false);
 
   // Tab 1: WeChat Dynamic Video Sticker Suite State
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -386,6 +394,51 @@ export default function App() {
     setImageMaterials(null);
   };
 
+  const handleSendToRetouch = (file: File) => {
+    setRetouchImageFile(file);
+    setActiveRetouchItemId(null);
+    setTransparencySubView('retouch');
+    setActiveTab('transparency');
+    showNotification('已将图片载入背景透明化工具的精细修图与透底画板！');
+  };
+
+  const handleRetouchSendToStaticSlicer = (file: File) => {
+    setImageFile(file);
+    setImageUrl(URL.createObjectURL(file));
+    setActiveTab('suite_image');
+    showNotification('已将修图去水印后的图片导入静态多宫格切片套件！');
+  };
+
+  const handleRetouchSyncToBatch = (file: File) => {
+    if (activeRetouchItemId) {
+      setItems((prev) =>
+        prev.map((it) => {
+          if (it.id === activeRetouchItemId) {
+            const url = URL.createObjectURL(file);
+            return {
+              ...it,
+              file,
+              originalUrl: url,
+              originalSize: file.size,
+              status: 'idle',
+              result: undefined,
+            };
+          }
+          return it;
+        })
+      );
+      showNotification(`已将修图与透底结果同步更新至表情「${file.name}」！`);
+    } else {
+      handleFilesSelected([file]);
+      showNotification(`已将修图与透底结果添加至批量处理列表！`);
+    }
+    setTransparencySubView('batch');
+  };
+
+  const handleRetouchSendToTransparency = (file: File) => {
+    handleRetouchSyncToBatch(file);
+  };
+
   const handleStartImageSlice = async (imgElement: HTMLImageElement) => {
     setIsImageSlicing(true);
     setImageSliceProgress(0);
@@ -619,6 +672,24 @@ export default function App() {
     setItems((prev) => [item, ...prev]);
     setActiveTab('transparency');
     showNotification(`已将表情 ${s.name} 导入批量透明化工具`);
+  };
+
+  const handleSendStickerToRetouch = (s: SlicedStickerItem) => {
+    const isGif = s.name.endsWith('.gif');
+    const file = new File([s.blob], s.name, { type: isGif ? 'image/gif' : 'image/png' });
+    setRetouchImageFile(file);
+    setActiveRetouchItemId(null);
+    setTransparencySubView('retouch');
+    setActiveTab('transparency');
+    showNotification(`已将表情「${s.name}」导入背景透明化工具的精细修图与透底画板！`);
+  };
+
+  const handleSendMediaFileToRetouch = (file: File, itemId?: string) => {
+    setRetouchImageFile(file);
+    setActiveRetouchItemId(itemId || null);
+    setTransparencySubView('retouch');
+    setActiveTab('transparency');
+    showNotification(`已将图片「${file.name}」导入背景透明化工具的精细修图与透底画板！`);
   };
 
   // -------------------------------------------------------------
@@ -1258,96 +1329,118 @@ export default function App() {
 
       {/* Header Bar */}
       <header className="bg-white border-b border-stone-200 sticky top-0 z-30 shadow-2xs">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-[#07c160] text-white flex items-center justify-center shadow-sm">
-              <Smile className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-bold text-stone-900 leading-tight">
-                  微信表情包一站式切片与全套审核物料生成器
-                </h1>
-                <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                  6大物料自动生成 • 100%合规
-                </span>
+        {/* 顶部宣传 Banner：载入图片后自动隐藏以腾出 90px+ 垂直操作空间，同时支持用户手动切换展开/收起 */}
+        {(!isRetouchImageLoaded || activeTab !== 'transparency' || transparencySubView !== 'retouch' || manualShowBanner) && (
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between animate-in fade-in duration-150">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-[#07c160] text-white flex items-center justify-center shadow-sm">
+                <Smile className="w-5 h-5" />
               </div>
-              <p className="text-xs text-stone-500">
-                多宫格视频切片 ➔ 240×240 GIF (&lt;500KB) ➔ 横幅/封面/图标/引导/致谢 ➔ 一键 ZIP 打包
-              </p>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-base font-bold text-stone-900 leading-tight">
+                    微信表情包一站式切片与全套审核物料生成器
+                  </h1>
+                  <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    6大物料自动生成 • 100%合规
+                  </span>
+                </div>
+                <p className="text-xs text-stone-500">
+                  多宫格视频切片 ➔ 240×240 GIF (&lt;500KB) ➔ 横幅/封面/图标/引导/致谢 ➔ 一键 ZIP 打包
+                </p>
+              </div>
             </div>
-          </div>
 
-          <div className="flex items-center gap-3 text-xs text-stone-500">
-            <div className="hidden sm:flex items-center gap-1.5 text-stone-600 font-medium">
-              <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>纯本地浏览器离线运算，安全隐私不过服务器</span>
+            <div className="flex items-center gap-3 text-xs text-stone-500">
+              <div className="hidden sm:flex items-center gap-1.5 text-stone-600 font-medium">
+                <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                <span>纯本地浏览器离线运算，安全隐私不过服务器</span>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Three Tab Navigation Bar */}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center gap-2 border-t border-stone-100 pt-1 -mb-px overflow-x-auto">
-            <button
-              type="button"
-              onClick={() => setActiveTab('suite_video')}
-              className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
-                activeTab === 'suite_video'
-                  ? 'border-[#07c160] text-[#07c160]'
-                  : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
-              }`}
-            >
-              <Film className="w-4 h-4" />
-              <span>动态表情（视频多宫格切片）</span>
-              {slicedStickers.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
-                  {slicedStickers.length}
-                </span>
-              )}
-            </button>
+          <div className="flex items-center justify-between border-t border-stone-100 pt-1 -mb-px overflow-x-auto">
+            <div className="flex items-center gap-2 overflow-x-auto">
+              <button
+                type="button"
+                onClick={() => setActiveTab('suite_image')}
+                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'suite_image'
+                    ? 'border-[#07c160] text-[#07c160]'
+                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                }`}
+              >
+                <ImageIcon className="w-4 h-4" />
+                <span>静态表情（静态图多宫格切片）</span>
+                {imageSlicedStickers.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
+                    {imageSlicedStickers.length}
+                  </span>
+                )}
+              </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab('suite_image')}
-              className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
-                activeTab === 'suite_image'
-                  ? 'border-[#07c160] text-[#07c160]'
-                  : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
-              }`}
-            >
-              <ImageIcon className="w-4 h-4" />
-              <span>静态表情（静态图多宫格切片）</span>
-              {imageSlicedStickers.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
-                  {imageSlicedStickers.length}
-                </span>
-              )}
-            </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('suite_video')}
+                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'suite_video'
+                    ? 'border-[#07c160] text-[#07c160]'
+                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                }`}
+              >
+                <Film className="w-4 h-4" />
+                <span>动态表情（视频多宫格切片）</span>
+                {slicedStickers.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
+                    {slicedStickers.length}
+                  </span>
+                )}
+              </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab('transparency')}
-              className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
-                activeTab === 'transparency'
-                  ? 'border-indigo-600 text-indigo-700'
-                  : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
-              }`}
-            >
-              <Sliders className="w-4 h-4" />
-              <span>背景透明化工具</span>
-              {items.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-indigo-100 text-indigo-800 font-mono">
-                  {items.length}
-                </span>
-              )}
-            </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('transparency')}
+                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'transparency'
+                    ? 'border-indigo-600 text-indigo-700'
+                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                }`}
+              >
+                <Sliders className="w-4 h-4" />
+                <span>背景透明化与修图去水印</span>
+                {items.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-indigo-100 text-indigo-800 font-mono">
+                    {items.length}
+                  </span>
+                )}
+                {retouchImageFile && (
+                  <span className="w-2 h-2 rounded-full bg-pink-500 animate-pulse" title="画板有正在编辑的图片" />
+                )}
+              </button>
+            </div>
+
+            {/* 当处于修图画板且已载入图片时，显示微型横幅切换开关 */}
+            {isRetouchImageLoaded && activeTab === 'transparency' && transparencySubView === 'retouch' && (
+              <button
+                type="button"
+                onClick={() => setManualShowBanner((v) => !v)}
+                className="shrink-0 ml-2 px-2.5 py-1 text-[11px] font-medium text-stone-500 hover:text-stone-800 rounded-md hover:bg-stone-100 border border-stone-200 transition-colors cursor-pointer whitespace-nowrap"
+                title="已自动隐藏顶部横幅以最大化画板空间，可随时切换"
+              >
+                <span>{manualShowBanner ? '收起横幅' : '展开横幅'}</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
 
       {/* Main Workspace Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className={`flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 ${
+        isRetouchImageLoaded && activeTab === 'transparency' && transparencySubView === 'retouch' ? 'py-1 sm:py-2' : 'py-6'
+      }`}>
         {/* ======================================================== */}
         {/* TAB 1: 微信动态表情制作套件 (Multi-grid Video Slicer) */}
         {/* ======================================================== */}
@@ -1421,6 +1514,7 @@ export default function App() {
                     stickers={slicedStickers}
                     onImportAllToTab2={handleImportAllStickersToTab2}
                     onImportSingleToTab2={handleImportSingleStickerToTab2}
+                    onSendToRetouch={handleSendStickerToRetouch}
                     onSetAsCover={handleCoverIndexChange}
                     onSetAsIcon={(idx) => handleIconOptionsChange({ ...iconOptions, selectedStickerIndex: idx })}
                     onSetAsGuide={handleRewardGuideIndexChange}
@@ -1516,6 +1610,7 @@ export default function App() {
                   config={imageGridConfig}
                   onConfigChange={setImageGridConfig}
                   onStartSlice={handleStartImageSlice}
+                  onSendToRetouch={handleSendToRetouch}
                   isSlicing={isImageSlicing}
                   sliceProgress={imageSliceProgress}
                   sliceStatusText={imageSliceStatusText}
@@ -1528,6 +1623,7 @@ export default function App() {
                     stickers={imageSlicedStickers}
                     onImportAllToTab2={handleImportAllImageStickersToTab3}
                     onImportSingleToTab2={handleImportSingleImageStickerToTab3}
+                    onSendToRetouch={handleSendStickerToRetouch}
                     onSetAsCover={handleImageCoverIndexChange}
                     onSetAsIcon={(idx) => handleImageIconOptionsChange({ ...imageIconOptions, selectedStickerIndex: idx })}
                     onSetAsGuide={handleImageRewardGuideIndexChange}
@@ -1564,7 +1660,7 @@ export default function App() {
         )}
 
         {/* ======================================================== */}
-        {/* TAB 3: 批量 GIF & 图片背景透明化工具 (Deep Transparency) */}
+        {/* TAB 3: 背景透明化与修图去水印 (Integrated Transparency & Retouch) */}
         {/* ======================================================== */}
         {activeTab === 'transparency' && (
           <div className="space-y-6 animate-in fade-in duration-200">
@@ -1602,81 +1698,162 @@ export default function App() {
               </div>
             )}
 
-            {/* Upload Zone */}
-            <UploadZone
-              onFilesSelected={handleFilesSelected}
-              disabled={isProcessingAny}
-            />
+            {/* Sub-view Switcher: 批量透明化与压缩列表 VS 精细修图去水印与局部透底画板 */}
+            <div className={`flex items-center justify-between bg-white border border-stone-200 shadow-2xs flex-wrap gap-2 transition-all ${
+              transparencySubView === 'retouch' ? 'p-1.5 rounded-xl' : 'p-2.5 rounded-2xl'
+            }`}>
+              <div className="flex items-center gap-1.5 p-1 bg-stone-100/90 border border-stone-200/80 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setTransparencySubView('batch')}
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer select-none ${
+                    transparencySubView === 'batch'
+                      ? 'bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-600/25'
+                      : 'text-stone-600 hover:text-stone-900 hover:bg-stone-200/50'
+                  }`}
+                >
+                  <Sliders className={`w-4 h-4 ${transparencySubView === 'batch' ? 'text-white' : 'text-stone-400'}`} />
+                  <span>批量透明化与压缩列表</span>
+                  {items.length > 0 && (
+                    <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                      transparencySubView === 'batch' ? 'bg-indigo-700 text-white' : 'bg-stone-200 text-stone-700'
+                    }`}>
+                      {items.length}
+                    </span>
+                  )}
+                  {transparencySubView === 'batch' && (
+                    <span className="text-[10px] bg-indigo-500/80 text-white px-1.5 py-0.5 rounded font-medium ml-0.5">
+                      当前视图
+                    </span>
+                  )}
+                </button>
 
-            {/* If items exist: Batch Controls + Grid of GIF cards */}
-            {items.length > 0 && (
-              <div className="space-y-6 animate-in fade-in duration-200">
-                <BatchControls
-                  items={items}
-                  isProcessingAny={isProcessingAny}
-                  onProcessAll={handleProcessAll}
-                  onCompressAll={handleCompressAll}
-                  onCompressOversized={handleCompressOversized}
-                  onDownloadAllZip={handleDownloadAllZip}
-                  onClearAll={handleClearAll}
-                  onApplyGlobalOptions={handleApplyGlobalOptions}
-                  previewBg={previewBg}
-                  onPreviewBgChange={setPreviewBg}
+                <button
+                  type="button"
+                  onClick={() => setTransparencySubView('retouch')}
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer select-none ${
+                    transparencySubView === 'retouch'
+                      ? 'bg-pink-600 text-white shadow-sm ring-2 ring-pink-600/25'
+                      : 'text-stone-600 hover:text-stone-900 hover:bg-stone-200/50'
+                  }`}
+                >
+                  <Sparkles className={`w-4 h-4 ${transparencySubView === 'retouch' ? 'text-white' : 'text-stone-400'}`} />
+                  <span>精细修图去水印与局部透底画板</span>
+                  {retouchImageFile && (
+                    <span className={`w-2 h-2 rounded-full ${transparencySubView === 'retouch' ? 'bg-white' : 'bg-pink-500'} animate-pulse`} />
+                  )}
+                  {transparencySubView === 'retouch' && (
+                    <span className="text-[10px] bg-pink-500/80 text-white px-1.5 py-0.5 rounded font-medium ml-0.5">
+                      当前视图
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              <div className="text-xs text-stone-500 flex items-center gap-2 pr-2">
+                {transparencySubView === 'batch' ? (
+                  <span className="hidden sm:inline">💡 针对单张图需局部抹除水印或边缘精修，可点击卡片上的「去水印/修图」画笔或切换至画板</span>
+                ) : (
+                  <span className="hidden md:inline text-stone-400">💡 圈选或涂抹快速消除水印，处理完可一键同步回列表或送往切片</span>
+                )}
+              </div>
+            </div>
+
+            {/* Sub-view 1: 精细修图去水印与透底画板 */}
+            {transparencySubView === 'retouch' && (
+              <div className="space-y-2">
+                <ImageRetouchWorkspace
+                  initialFile={retouchImageFile}
+                  onSyncToBatch={handleRetouchSyncToBatch}
+                  onSendToStaticSlicer={handleRetouchSendToStaticSlicer}
+                  onSendToTransparency={handleRetouchSendToTransparency}
+                  onImageLoadedStateChange={setIsRetouchImageLoaded}
+                  showToast={showNotification}
                 />
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {items.map((item) => (
-                    <GifCard
-                      key={item.id}
-                      item={item}
-                      previewBg={previewBg}
-                      onUpdateOptions={handleUpdateOptions}
-                      onProcessItem={handleProcessItem}
-                      onDeleteItem={handleDeleteItem}
-                    />
-                  ))}
-                </div>
               </div>
             )}
 
-            {/* Empty state hints */}
-            {items.length === 0 && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
-                <div className="bg-white p-4.5 rounded-xl border border-stone-200 shadow-2xs">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
-                    <Sliders className="w-4 h-4" />
-                  </div>
-                  <h4 className="text-sm font-bold text-stone-900 mb-1">
-                    边缘向内泛洪消除算法
-                  </h4>
-                  <p className="text-xs text-stone-500 leading-relaxed">
-                    智能从画面四周边缘向内扩散抠图，完整保护人物眼白、高光与衣服内部白色图案。
-                  </p>
-                </div>
+            {/* Sub-view 2: 批量透明化与压缩列表 */}
+            {transparencySubView === 'batch' && (
+              <div className="space-y-6">
+                {/* Upload Zone */}
+                <UploadZone
+                  onFilesSelected={handleFilesSelected}
+                  disabled={isProcessingAny}
+                />
 
-                <div className="bg-white p-4.5 rounded-xl border border-stone-200 shadow-2xs">
-                  <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3">
-                    <Smile className="w-4 h-4" />
-                  </div>
-                  <h4 className="text-sm font-bold text-stone-900 mb-1">
-                    微信标准 2px 白色描边
-                  </h4>
-                  <p className="text-xs text-stone-500 leading-relaxed">
-                    自适应 240×240 缩放并生成均匀外轮廓白边，在微信深色和浅色聊天背景中均清晰呈现。
-                  </p>
-                </div>
+                {/* If items exist: Batch Controls + Grid of GIF cards */}
+                {items.length > 0 && (
+                  <div className="space-y-6 animate-in fade-in duration-200">
+                    <BatchControls
+                      items={items}
+                      isProcessingAny={isProcessingAny}
+                      onProcessAll={handleProcessAll}
+                      onCompressAll={handleCompressAll}
+                      onCompressOversized={handleCompressOversized}
+                      onDownloadAllZip={handleDownloadAllZip}
+                      onClearAll={handleClearAll}
+                      onApplyGlobalOptions={handleApplyGlobalOptions}
+                      previewBg={previewBg}
+                      onPreviewBgChange={setPreviewBg}
+                    />
 
-                <div className="bg-white p-4.5 rounded-xl border border-stone-200 shadow-2xs">
-                  <div className="w-8 h-8 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center mb-3">
-                    <Type className="w-4 h-4" />
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      {items.map((item) => (
+                        <GifCard
+                          key={item.id}
+                          item={item}
+                          previewBg={previewBg}
+                          onUpdateOptions={handleUpdateOptions}
+                          onProcessItem={handleProcessItem}
+                          onDeleteItem={handleDeleteItem}
+                          onSendToRetouch={(file) => handleSendMediaFileToRetouch(file, item.id)}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  <h4 className="text-sm font-bold text-stone-900 mb-1">
-                    文字配字与黑色描边
-                  </h4>
-                  <p className="text-xs text-stone-500 leading-relaxed">
-                    支持在动图下方或上方添加粗体字，配备深色反衬描边，聊天传情生动有趣。
-                  </p>
-                </div>
+                )}
+
+                {/* Empty state hints */}
+                {items.length === 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+                    <div className="bg-white p-4.5 rounded-xl border border-stone-200 shadow-2xs">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center mb-3">
+                        <Sliders className="w-4 h-4" />
+                      </div>
+                      <h4 className="text-sm font-bold text-stone-900 mb-1">
+                        边缘向内泛洪消除算法
+                      </h4>
+                      <p className="text-xs text-stone-500 leading-relaxed">
+                        智能从画面四周边缘向内扩散抠图，完整保护人物眼白、高光与衣服内部白色图案。
+                      </p>
+                    </div>
+
+                    <div className="bg-white p-4.5 rounded-xl border border-stone-200 shadow-2xs">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center mb-3">
+                        <Smile className="w-4 h-4" />
+                      </div>
+                      <h4 className="text-sm font-bold text-stone-900 mb-1">
+                        微信标准 2px 白色描边
+                      </h4>
+                      <p className="text-xs text-stone-500 leading-relaxed">
+                        自适应 240×240 缩放并生成均匀外轮廓白边，在微信深色和浅色聊天背景中均清晰呈现。
+                      </p>
+                    </div>
+
+                    <div className="bg-white p-4.5 rounded-xl border border-stone-200 shadow-2xs">
+                      <div className="w-8 h-8 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center mb-3">
+                        <Type className="w-4 h-4" />
+                      </div>
+                      <h4 className="text-sm font-bold text-stone-900 mb-1">
+                        文字配字与黑色描边
+                      </h4>
+                      <p className="text-xs text-stone-500 leading-relaxed">
+                        支持在动图下方或上方添加粗体字，配备深色反衬描边，聊天传情生动有趣。
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

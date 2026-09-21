@@ -60,6 +60,7 @@ interface GridImageSlicerControlsProps {
   onConfigChange: (newConfig: ImageGridConfig) => void;
   onStartSlice: (imgElement: HTMLImageElement) => void;
   onResetImage: () => void;
+  onSendToRetouch?: (file: File) => void;
   isSlicing: boolean;
   sliceProgress: number;
   sliceStatusText: string;
@@ -72,6 +73,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
   onConfigChange,
   onStartSlice,
   onResetImage,
+  onSendToRetouch,
   isSlicing,
   sliceProgress,
   sliceStatusText,
@@ -1788,6 +1790,19 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                     )}
                   </div>
 
+                  {/* Send to Retouch Button */}
+                  {onSendToRetouch && (
+                    <button
+                      type="button"
+                      onClick={() => onSendToRetouch(imageFile)}
+                      className="px-2.5 py-1 bg-pink-50 hover:bg-pink-100 text-pink-700 rounded-lg text-xs font-bold border border-pink-200 transition-colors flex items-center gap-1 cursor-pointer shadow-2xs"
+                      title="打开修图画板，去除画面水印、杂点或马赛克"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-pink-600" />
+                      <span>修图去水印</span>
+                    </button>
+                  )}
+
                   {/* Fullscreen Button */}
                   <button
                     type="button"
@@ -3325,6 +3340,58 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 }
                 className="w-4 h-4 rounded text-emerald-600 accent-[#07c160] cursor-pointer"
               />
+            </div>
+
+            {/* AI Smart Subject Auto-Center & Scale */}
+            <div className="pt-2 border-t border-stone-200/70 space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <label className="text-xs font-semibold text-stone-800 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-pink-600" />
+                    <span>AI 主体智能居中与比例对齐 (Auto-Center)</span>
+                  </label>
+                  <p className="text-[11px] text-stone-500">
+                    自动识别 AI 角色质心并对齐到 240×240 正中心，规避偏心和忽大忽小
+                  </p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config.smartAutoCenter || false}
+                  onChange={(e) =>
+                    onConfigChange({ ...config, smartAutoCenter: e.target.checked })
+                  }
+                  className="w-4 h-4 rounded text-pink-600 accent-pink-600 cursor-pointer"
+                />
+              </div>
+
+              {config.smartAutoCenter && (
+                <div className="p-2.5 bg-pink-50/70 rounded-xl border border-pink-200/70 space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-stone-700 font-medium">主体画面占比 (预留微信安全边):</span>
+                    <span className="font-mono text-pink-700 font-bold">
+                      {Math.round((config.subjectScaleTarget || 0.82) * 100)}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="65"
+                    max="92"
+                    value={Math.round((config.subjectScaleTarget || 0.82) * 100)}
+                    onChange={(e) =>
+                      onConfigChange({
+                        ...config,
+                        subjectScaleTarget: (parseInt(e.target.value) || 82) / 100,
+                      })
+                    }
+                    className="w-full accent-pink-600 cursor-pointer"
+                  />
+                  <div className="text-[10px] text-pink-700 flex items-center justify-between">
+                    <span>65% (更宽松)</span>
+                    <span className="font-bold text-pink-900">推荐 82% (留白 22px 防微信裁边)</span>
+                    <span>92% (紧凑饱满)</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Output Format Selection */}

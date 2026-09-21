@@ -1,6 +1,6 @@
 {
   "name": "Batch GIF Background Remover",
-  "description": "微信表情包一站式切片与全套审核物料生成器：支持多宫格视频与静态大图（PNG/JPG/WEBP）一键精确切片为 240×240 微信标准表情，自动智能背景透明化与 2px 白描边，自动生成横幅、封面、图标、赞赏引导与致谢等全套微信官方审核物料并一键 ZIP 规范打包，内置体积自动多级压缩（确保符合微信动图≤1MB、静态图≤500KB上传要求）。",
+  "description": "微信表情包一站式切片与全套审核物料生成器：支持多宫格视频与静态大图（PNG/JPG/WEBP）一键精确切片为 240×240 微信标准表情，具备智能圈选与手动涂抹修图去水印、打马赛克，AI 主体智能居中比例校准、动图往返无缝循环（Boomerang），自动智能背景透明化与 2px 白描边，自动生成横幅、封面、图标、赞赏引导与致谢等全套微信官方审核物料并一键 ZIP 规范打包，内置体积自动多级压缩（确保符合微信动图≤1MB、静态图≤500KB上传要求）。",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

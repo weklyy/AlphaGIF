@@ -22,6 +22,7 @@ import {
   Zap,
   Gauge,
   Scale,
+  Paintbrush,
 } from 'lucide-react';
 import {
   GifItem,
@@ -47,6 +48,7 @@ interface GifCardProps {
   onUpdateOptions: (id: string, options: RemovalOptions) => void;
   onProcessItem: (id: string, asWeChat?: boolean) => void;
   onDeleteItem: (id: string) => void;
+  onSendToRetouch?: (file: File) => void;
 }
 
 export const GifCard: React.FC<GifCardProps> = ({
@@ -55,6 +57,7 @@ export const GifCard: React.FC<GifCardProps> = ({
   onUpdateOptions,
   onProcessItem,
   onDeleteItem,
+  onSendToRetouch,
 }) => {
   const [viewMode, setViewMode] = useState<'transparent' | 'original' | 'split'>('transparent');
   const [isPlaying, setIsPlaying] = useState(true);
@@ -409,6 +412,26 @@ export const GifCard: React.FC<GifCardProps> = ({
                 <RefreshCw className="w-2.5 h-2.5" /> 重试
               </button>
             </div>
+          )}
+
+          {onSendToRetouch && (
+            <button
+              type="button"
+              onClick={async () => {
+                if (item.result?.blob) {
+                  const f = new File([item.result.blob], item.name.replace(/\.[^/.]+$/, '') + '_transparent.png', {
+                    type: item.result.format === 'png' ? 'image/png' : 'image/gif',
+                  });
+                  onSendToRetouch(f);
+                } else {
+                  onSendToRetouch(item.file);
+                }
+              }}
+              className="text-stone-400 hover:text-[#07c160] p-1 rounded-md hover:bg-stone-200/60 transition-colors"
+              title="送往 AI 修图去水印画板（消除杂物/文字/修复瑕疵）"
+            >
+              <Paintbrush className="w-3.5 h-3.5" />
+            </button>
           )}
 
           <button

@@ -2,6 +2,7 @@ import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { ImageGridConfig, SlicedStickerItem } from '../types';
 import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
+import { autoCenterAndScaleSubject } from './imageInpainting';
 
 /**
  * Generate a high-resolution 16-grid (4x4) static emoji spritesheet demo image
@@ -171,6 +172,8 @@ export async function sliceImageIntoStickers(
     layoutMode,
     independentBoxes,
     transparentBorders = true,
+    smartAutoCenter,
+    subjectScaleTarget = 0.82,
   } = config;
 
   let imgElement: HTMLImageElement;
@@ -280,6 +283,17 @@ export async function sliceImageIntoStickers(
           contiguous: false,
           defringe: 1,
         });
+      }
+
+      // AI Smart Auto-Center & Visual Scale (Aligns AI character centroid to 120, 120 and normalizes visual size)
+      if (smartAutoCenter) {
+        imageData = autoCenterAndScaleSubject(
+          imageData,
+          240,
+          subjectScaleTarget || 0.82,
+          bgColor || '#ffffff',
+          tolerance || 20
+        );
       }
 
       // Add WeChat official 2px white outline if requested

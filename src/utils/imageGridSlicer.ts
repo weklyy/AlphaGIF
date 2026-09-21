@@ -170,6 +170,7 @@ export async function sliceImageIntoStickers(
     cellOverrides,
     layoutMode,
     independentBoxes,
+    transparentBorders = true,
   } = config;
 
   let imgElement: HTMLImageElement;
@@ -267,7 +268,9 @@ export async function sliceImageIntoStickers(
       let imageData = cellCtx.getImageData(0, 0, 240, 240);
 
       // Clean unselected margins & edge black bars so unpainted padding is completely transparent
-      imageData = cleanEdgeBlackBordersAndMargins(imageData, 32);
+      if (transparentBorders !== false) {
+        imageData = cleanEdgeBlackBordersAndMargins(imageData, 32);
+      }
 
       // Remove background if requested
       if (autoTransparent) {

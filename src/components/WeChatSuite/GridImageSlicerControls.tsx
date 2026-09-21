@@ -30,8 +30,9 @@ import {
   Unlock,
   CheckCheck,
   Square,
+  ShieldCheck,
 } from 'lucide-react';
-import { ImageGridConfig, GridPreset, GridCropArea, CellOverride } from '../../types';
+import { ImageGridConfig, GridPreset, GridCropArea, CellOverride, SlicerLayoutMode } from '../../types';
 import {
   removeBackgroundFromFrame,
   applyWhiteOutline,
@@ -47,6 +48,8 @@ import {
   autoDetectGridSplits,
   calculateGridAspectFactor,
   calibrateGridCropAreaToSquare,
+  calibrateAllIndependentBoxesToSquare,
+  getIndependentBoxesFromGrid,
 } from '../../utils/gridGeometry';
 import { GridMagnifierLens, MagnifierData } from './GridMagnifierLens';
 
@@ -161,6 +164,498 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
       rowSplits: getDefaultSplits(rows),
       cellOverrides: {},
     });
+  };
+
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+
+  const imgW = naturalDimensions.width || 1024;
+  const imgH = naturalDimensions.height || 1024;
+  const totalCells = config.cols * config.rows;
+
+  const layoutMode: SlicerLayoutMode = config.layoutMode || 'grid';
+  const isLockSquare = config.lockSquare !== false;
+
+  // Single cell pixel calculation in grid mode
+  const gridCellPixelW = Math.round(((cropArea.width / 100) * imgW) / Math.max(1, config.cols));
+  const gridCellPixelH = Math.round(((cropArea.height / 100) * imgH) / Math.max(1, config.rows));
+  const isGridExactSquare = Math.abs(gridCellPixelW - gridCellPixelH) <= 1;
+
+  // Compute current independent boxes with fallback from grid
+  const currentIndependentBoxes =
+    config.independentBoxes && Object.keys(config.independentBoxes).length > 0
+      ? config.independentBoxes
+      : getIndependentBoxesFromGrid(
+          cropArea,
+          config.cols,
+          config.rows,
+          config.colSplits,
+          config.rowSplits,
+          config.cellOverrides,
+          imgW,
+          imgH
+        );
+
+  // Toggle 1:1 Square Lock Switch
+  const handleToggleLockSquare = () => {
+    const nextVal = !isLockSquare;
+    if (nextVal) {
+      if (layoutMode === 'independent') {
+        const calibrated = calibrateAllIndependentBoxesToSquare(currentIndependentBoxes, imgW, imgH);
+        onConfigChange({
+          ...config,
+          lockSquare: true,
+          independentBoxes: calibrated,
+        });
+      } else {
+        const calibratedCrop = calibrateGridCropAreaToSquare(cropArea, config.cols, config.rows, imgW, imgH);
+        onConfigChange({
+          ...config,
+          lockSquare: true,
+          cropArea: calibratedCrop,
+        });
+      }
+      setAutoAlignToast({
+        message: '🔒 已开启 1:1 正方形锁定并自动矫正，拖拽缩放时将严格等比联动！',
+        type: 'success',
+      });
+    } else {
+      onConfigChange({
+        ...config,
+        lockSquare: false,
+      });
+      setAutoAlignToast({
+        message: '🔓 已解锁 1:1 限制，当前可自由拉伸长宽比',
+        type: 'info',
+      });
+    }
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  // One-Click Calibrate to 1:1 Square
+  const handleOneClickCorrectSquare = () => {
+    if (layoutMode === 'independent') {
+      const calibrated = calibrateAllIndependentBoxesToSquare(currentIndependentBoxes, imgW, imgH);
+      onConfigChange({
+        ...config,
+        lockSquare: true,
+        independentBoxes: calibrated,
+      });
+      setAutoAlignToast({
+        message: `✨ 已一键矫正所有 ${totalCells} 个独立小方块为严格 1:1 正方形并锁定！`,
+        type: 'success',
+      });
+    } else {
+      const calibratedCrop = calibrateGridCropAreaToSquare(cropArea, config.cols, config.rows, imgW, imgH);
+      onConfigChange({
+        ...config,
+        lockSquare: true,
+        cropArea: calibratedCrop,
+      });
+      const cellW = Math.round(((calibratedCrop.width / 100) * imgW) / Math.max(1, config.cols));
+      const cellH = Math.round(((calibratedCrop.height / 100) * imgH) / Math.max(1, config.rows));
+      setAutoAlignToast({
+        message: `✨ 已一键矫正整网格为严格 1:1 正方形 (单格: ${cellW}×${cellH} px) 并开启锁定！`,
+        type: 'success',
+      });
+    }
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  // Switch between connected 'grid' mode and 'independent' boxes mode
+  const handleSwitchLayoutMode = (newMode: SlicerLayoutMode) => {
+    if (newMode === 'independent') {
+      const boxes =
+        config.independentBoxes && Object.keys(config.independentBoxes).length > 0
+          ? config.independentBoxes
+          : getIndependentBoxesFromGrid(
+              cropArea,
+              config.cols,
+              config.rows,
+              config.colSplits,
+              config.rowSplits,
+              config.cellOverrides,
+              imgW,
+              imgH
+            );
+      onConfigChange({
+        ...config,
+        layoutMode: 'independent',
+        independentBoxes: boxes,
+      });
+      setAutoAlignToast({
+        message: `已切换为独立小方块模式：共 ${totalCells} 个独立选框，均可单独拖拽与拉伸调整大小！`,
+        type: 'success',
+      });
+      setTimeout(() => setAutoAlignToast(null), 3500);
+    } else {
+      onConfigChange({
+        ...config,
+        layoutMode: 'grid',
+      });
+      setAutoAlignToast({
+        message: '已切换为连通整网格模式',
+        type: 'info',
+      });
+      setTimeout(() => setAutoAlignToast(null), 2500);
+    }
+  };
+
+  // Re-initialize independent boxes from current grid alignment
+  const handleResetIndependentBoxesFromGrid = () => {
+    const boxes = getIndependentBoxesFromGrid(
+      cropArea,
+      config.cols,
+      config.rows,
+      config.colSplits,
+      config.rowSplits,
+      config.cellOverrides,
+      imgW,
+      imgH
+    );
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: boxes,
+    });
+    setAutoAlignToast({
+      message: '已根据当前网格排布重新对齐所有独立小方块',
+      type: 'success',
+    });
+    setTimeout(() => setAutoAlignToast(null), 2500);
+  };
+
+  // Unify dimensions of all independent boxes to match currently selected box
+  const handleUnifyBoxSizes = () => {
+    const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+    const base = currentIndependentBoxes[safeIdx] || {
+      x: 0,
+      y: 0,
+      width: 100 / config.cols,
+      height: 100 / config.rows,
+    };
+    const updated: Record<number, GridCropArea> = {};
+    for (let i = 0; i < totalCells; i++) {
+      const prev = currentIndependentBoxes[i] || {
+        x: (i % config.cols) * base.width,
+        y: Math.floor(i / config.cols) * base.height,
+        width: base.width,
+        height: base.height,
+      };
+      updated[i] = {
+        ...prev,
+        width: Math.max(2, Math.min(100, Math.round(base.width * 100) / 100)),
+        height: Math.max(2, Math.min(100, Math.round(base.height * 100) / 100)),
+      };
+    }
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: updated,
+    });
+    setAutoAlignToast({
+      message: `已将所有小方块的尺寸统一对齐为第 ${(safeIdx + 1).toString().padStart(2, '0')} 格的尺寸 (${base.width.toFixed(1)}% × ${base.height.toFixed(1)}%)`,
+      type: 'success',
+    });
+    setTimeout(() => setAutoAlignToast(null), 3000);
+  };
+
+  const handleUpdateActiveBox = (partial: Partial<GridCropArea>) => {
+    const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+    const boxes = currentIndependentBoxes;
+    const current = boxes[safeIdx] || {
+      x: 0,
+      y: 0,
+      width: 100 / config.cols,
+      height: 100 / config.rows,
+    };
+
+    const boxAspect = imgW / imgH;
+
+    let targetW = Math.max(2, Math.min(100, partial.width !== undefined ? partial.width : current.width));
+    let targetH = Math.max(2, Math.min(100, partial.height !== undefined ? partial.height : current.height));
+
+    if (isLockSquare) {
+      if (partial.width !== undefined && partial.height === undefined) {
+        targetH = Math.max(2, Math.min(100, Math.round(targetW * boxAspect * 10) / 10));
+      } else if (partial.height !== undefined && partial.width === undefined) {
+        targetW = Math.max(2, Math.min(100, Math.round((targetH / boxAspect) * 10) / 10));
+      }
+    }
+
+    const updatedBox: GridCropArea = {
+      x: Math.max(0, Math.min(100 - targetW, partial.x !== undefined ? partial.x : current.x)),
+      y: Math.max(0, Math.min(100 - targetH, partial.y !== undefined ? partial.y : current.y)),
+      width: targetW,
+      height: targetH,
+    };
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: {
+        ...boxes,
+        [safeIdx]: updatedBox,
+      },
+    });
+  };
+
+  const handleUpdateSingleIndependentBox = (idx: number, newBox: GridCropArea) => {
+    onConfigChange({
+      ...config,
+      layoutMode: 'independent',
+      independentBoxes: {
+        ...currentIndependentBoxes,
+        [idx]: newBox,
+      },
+    });
+  };
+
+  const handleStepActiveBox = (key: keyof GridCropArea, deltaPct: number) => {
+    const safeIdx = Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+    const current = currentIndependentBoxes[safeIdx] || {
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 20,
+    };
+    handleUpdateActiveBox({
+      [key]: Math.round((current[key] + deltaPct) * 100) / 100,
+    });
+  };
+
+  const handleIndependentBoxPointerDown = (
+    e: React.PointerEvent,
+    idx: number,
+    mode: 'move' | 'nw' | 'ne' | 'se' | 'sw' | 'n' | 's' | 'w' | 'e'
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setInspectCellIndex(idx);
+
+    const container = imgContainerRef.current;
+    if (!container) return;
+    const containerRect = container.getBoundingClientRect();
+
+    const boxes = currentIndependentBoxes;
+    const initialBox = boxes[idx] || {
+      x: (idx % config.cols) * (100 / config.cols),
+      y: Math.floor(idx / config.cols) * (100 / config.rows),
+      width: 100 / config.cols,
+      height: 100 / config.rows,
+    };
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const boxAspect = imgW / imgH;
+
+    const getFocalCoords = (
+      b: { x: number; y: number; width: number; height: number },
+      m: string,
+      clientX?: number,
+      clientY?: number
+    ) => {
+      let focalNormX = b.x;
+      let focalNormY = b.y;
+      if (m === 'nw') {
+        focalNormX = b.x;
+        focalNormY = b.y;
+      } else if (m === 'ne') {
+        focalNormX = b.x + b.width;
+        focalNormY = b.y;
+      } else if (m === 'se') {
+        focalNormX = b.x + b.width;
+        focalNormY = b.y + b.height;
+      } else if (m === 'sw') {
+        focalNormX = b.x;
+        focalNormY = b.y + b.height;
+      } else if (m === 'n') {
+        focalNormX = b.x + b.width / 2;
+        focalNormY = b.y;
+      } else if (m === 's') {
+        focalNormX = b.x + b.width / 2;
+        focalNormY = b.y + b.height;
+      } else if (m === 'w') {
+        focalNormX = b.x;
+        focalNormY = b.y + b.height / 2;
+      } else if (m === 'e') {
+        focalNormX = b.x + b.width;
+        focalNormY = b.y + b.height / 2;
+      } else if (m === 'move' && clientX !== undefined && clientY !== undefined) {
+        focalNormX = Math.max(0, Math.min(100, ((clientX - containerRect.left) / containerRect.width) * 100));
+        focalNormY = Math.max(0, Math.min(100, ((clientY - containerRect.top) / containerRect.height) * 100));
+      }
+      return { focalNormX, focalNormY };
+    };
+
+    if (enableMagnifier) {
+      const { focalNormX, focalNormY } = getFocalCoords(initialBox, mode, e.clientX, e.clientY);
+      const curPixelW = Math.round((initialBox.width / 100) * imgW);
+      const curPixelH = Math.round((initialBox.height / 100) * imgH);
+      setMagnifierData({
+        active: true,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        focalNormX,
+        focalNormY,
+        handle: mode,
+        cellIndex: idx,
+        boxPixelW: curPixelW,
+        boxPixelH: curPixelH,
+        isSquare: Math.abs(curPixelW - curPixelH) <= 1,
+      });
+    }
+
+    const onPointerMove = (moveEv: PointerEvent) => {
+      const deltaXPct = ((moveEv.clientX - startX) / containerRect.width) * 100;
+      const deltaYPct = ((moveEv.clientY - startY) / containerRect.height) * 100;
+
+      let newBox = { ...initialBox };
+
+      if (mode === 'move') {
+        newBox.x = Math.max(0, Math.min(100 - initialBox.width, initialBox.x + deltaXPct));
+        newBox.y = Math.max(0, Math.min(100 - initialBox.height, initialBox.y + deltaYPct));
+      } else if (isLockSquare) {
+        if (mode === 'se') {
+          let targetW = Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (initialBox.y + targetH > 100) {
+            targetH = 100 - initialBox.y;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+        } else if (mode === 'sw') {
+          const right = initialBox.x + initialBox.width;
+          let targetW = Math.max(2, Math.min(right, initialBox.width - deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (initialBox.y + targetH > 100) {
+            targetH = 100 - initialBox.y;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.x = right - targetW;
+        } else if (mode === 'ne') {
+          const bottom = initialBox.y + initialBox.height;
+          let targetW = Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (bottom - targetH < 0) {
+            targetH = bottom;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.y = bottom - targetH;
+        } else if (mode === 'nw') {
+          const right = initialBox.x + initialBox.width;
+          const bottom = initialBox.y + initialBox.height;
+          let targetW = Math.max(2, Math.min(right, initialBox.width - deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (bottom - targetH < 0) {
+            targetH = bottom;
+            targetW = targetH / boxAspect;
+          }
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.x = right - targetW;
+          newBox.y = bottom - targetH;
+        } else if (mode === 'e' || mode === 'w') {
+          let targetW =
+            mode === 'e'
+              ? Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct))
+              : Math.max(2, Math.min(initialBox.x + initialBox.width, initialBox.width - deltaXPct));
+          let targetH = targetW * boxAspect;
+          if (targetH > 100) {
+            targetH = 100;
+            targetW = targetH / boxAspect;
+          }
+          const centerY = initialBox.y + initialBox.height / 2;
+          newBox.width = targetW;
+          newBox.height = targetH;
+          newBox.y = Math.max(0, Math.min(100 - targetH, centerY - targetH / 2));
+          if (mode === 'w') {
+            newBox.x = initialBox.x + initialBox.width - targetW;
+          }
+        } else if (mode === 's' || mode === 'n') {
+          let targetH =
+            mode === 's'
+              ? Math.max(2, Math.min(100 - initialBox.y, initialBox.height + deltaYPct))
+              : Math.max(2, Math.min(initialBox.y + initialBox.height, initialBox.height - deltaYPct));
+          let targetW = targetH / boxAspect;
+          if (targetW > 100) {
+            targetW = 100;
+            targetH = targetW * boxAspect;
+          }
+          const centerX = initialBox.x + initialBox.width / 2;
+          newBox.height = targetH;
+          newBox.width = targetW;
+          newBox.x = Math.max(0, Math.min(100 - targetW, centerX - targetW / 2));
+          if (mode === 'n') {
+            newBox.y = initialBox.y + initialBox.height - targetH;
+          }
+        }
+      } else {
+        if (mode.includes('w')) {
+          const right = initialBox.x + initialBox.width;
+          const proposedX = Math.max(0, Math.min(right - 2, initialBox.x + deltaXPct));
+          newBox.x = proposedX;
+          newBox.width = right - proposedX;
+        }
+        if (mode.includes('e')) {
+          const proposedW = Math.max(2, Math.min(100 - initialBox.x, initialBox.width + deltaXPct));
+          newBox.width = proposedW;
+        }
+        if (mode.includes('n')) {
+          const bottom = initialBox.y + initialBox.height;
+          const proposedY = Math.max(0, Math.min(bottom - 2, initialBox.y + deltaYPct));
+          newBox.y = proposedY;
+          newBox.height = bottom - proposedY;
+        }
+        if (mode.includes('s')) {
+          const proposedH = Math.max(2, Math.min(100 - initialBox.y, initialBox.height + deltaYPct));
+          newBox.height = proposedH;
+        }
+      }
+
+      newBox.x = Math.round(newBox.x * 100) / 100;
+      newBox.y = Math.round(newBox.y * 100) / 100;
+      newBox.width = Math.round(newBox.width * 100) / 100;
+      newBox.height = Math.round(newBox.height * 100) / 100;
+
+      const updated = { ...boxes, [idx]: newBox };
+      onConfigChange({
+        ...config,
+        layoutMode: 'independent',
+        independentBoxes: updated,
+      });
+
+      if (enableMagnifier) {
+        const { focalNormX, focalNormY } = getFocalCoords(newBox, mode, moveEv.clientX, moveEv.clientY);
+        const curPixelW = Math.round((newBox.width / 100) * imgW);
+        const curPixelH = Math.round((newBox.height / 100) * imgH);
+        setMagnifierData({
+          active: true,
+          clientX: moveEv.clientX,
+          clientY: moveEv.clientY,
+          focalNormX,
+          focalNormY,
+          handle: mode,
+          cellIndex: idx,
+          boxPixelW: curPixelW,
+          boxPixelH: curPixelH,
+          isSquare: Math.abs(curPixelW - curPixelH) <= 1,
+        });
+      }
+    };
+
+    const onPointerUp = () => {
+      setMagnifierData(null);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
   };
 
   // Dragging internal divider lines (Tier 2)
@@ -302,27 +797,71 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
   };
 
   // Keyboard shortcut listener for micro-tuning active cell
+  // Keyboard shortcut listener for ESC (fullscreen) and micro-tuning active cell / independent box
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) {
         return;
       }
-      const step = e.shiftKey ? 5 : 1;
-      let handled = false;
-      const current = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
 
-      if (e.key === 'ArrowLeft') {
-        handleUpdateOverride('dx', Math.max(-50, (current.dx || 0) - step));
-        handled = true;
-      } else if (e.key === 'ArrowRight') {
-        handleUpdateOverride('dx', Math.min(50, (current.dx || 0) + step));
-        handled = true;
-      } else if (e.key === 'ArrowUp') {
-        handleUpdateOverride('dy', Math.max(-50, (current.dy || 0) - step));
-        handled = true;
-      } else if (e.key === 'ArrowDown') {
-        handleUpdateOverride('dy', Math.min(50, (current.dy || 0) + step));
-        handled = true;
+      if (e.key === 'Escape' && isFullscreen) {
+        setIsFullscreen(false);
+        e.preventDefault();
+        return;
+      }
+
+      let handled = false;
+
+      if (config.layoutMode === 'independent') {
+        const delta = e.shiftKey ? 2 : 0.5;
+        if (e.altKey) {
+          // Resize width/height
+          if (e.key === 'ArrowLeft') {
+            handleStepActiveBox('width', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowRight') {
+            handleStepActiveBox('width', delta);
+            handled = true;
+          } else if (e.key === 'ArrowUp') {
+            handleStepActiveBox('height', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowDown') {
+            handleStepActiveBox('height', delta);
+            handled = true;
+          }
+        } else {
+          // Move x/y
+          if (e.key === 'ArrowLeft') {
+            handleStepActiveBox('x', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowRight') {
+            handleStepActiveBox('x', delta);
+            handled = true;
+          } else if (e.key === 'ArrowUp') {
+            handleStepActiveBox('y', -delta);
+            handled = true;
+          } else if (e.key === 'ArrowDown') {
+            handleStepActiveBox('y', delta);
+            handled = true;
+          }
+        }
+      } else {
+        const step = e.shiftKey ? 5 : 1;
+        const current = config.cellOverrides?.[inspectCellIndex] || { dx: 0, dy: 0, dw: 0, dh: 0 };
+
+        if (e.key === 'ArrowLeft') {
+          handleUpdateOverride('dx', Math.max(-50, (current.dx || 0) - step));
+          handled = true;
+        } else if (e.key === 'ArrowRight') {
+          handleUpdateOverride('dx', Math.min(50, (current.dx || 0) + step));
+          handled = true;
+        } else if (e.key === 'ArrowUp') {
+          handleUpdateOverride('dy', Math.max(-50, (current.dy || 0) - step));
+          handled = true;
+        } else if (e.key === 'ArrowDown') {
+          handleUpdateOverride('dy', Math.min(50, (current.dy || 0) + step));
+          handled = true;
+        }
       }
 
       if (handled) {
@@ -332,7 +871,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [inspectCellIndex, config]);
+  }, [isFullscreen, inspectCellIndex, config, currentIndependentBoxes]);
 
   // Helper to update cropArea directly
   const updateCrop = (newCrop: Partial<GridCropArea>) => {
@@ -511,6 +1050,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
       rows: config.rows,
       col,
       row,
+      cellIndex: safeIdx,
+      layoutMode,
+      independentBox: currentIndependentBoxes[safeIdx],
       colSplits: config.colSplits,
       rowSplits: config.rowSplits,
       cellOverride: config.cellOverrides?.[safeIdx],
@@ -554,7 +1096,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     let imgData = ctx.getImageData(0, 0, 240, 240);
 
     // Clean contiguous edge black bars and padding margins
-    cleanEdgeBlackBordersAndMargins(imgData, 32);
+    if (config.transparentBorders !== false) {
+      cleanEdgeBlackBordersAndMargins(imgData, 32);
+    }
 
     if (config.autoTransparent) {
       imgData = removeBackgroundFromFrame(imgData, {
@@ -610,7 +1154,10 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     config.colSplits,
     config.rowSplits,
     config.cellOverrides,
+    config.transparentBorders,
     inspectCellIndex,
+    layoutMode,
+    currentIndependentBoxes,
   ]);
 
   // Quick preset crop alignments
@@ -793,14 +1340,12 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     }
   };
 
-  const totalCells = config.cols * config.rows;
-
   return (
     <div className="w-full bg-white rounded-2xl border border-stone-200 shadow-sm p-5 space-y-6">
       {/* Top Bar: Title & Source File Meta */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-stone-100">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
             <h2 className="text-base font-bold text-stone-900">
               静态图多宫格切片与微信物料工作台
@@ -814,18 +1359,93 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 <span>实时容差微调中 ({config.tolerance})</span>
               </span>
             )}
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-stone-100 border border-stone-200 text-stone-700 flex items-center gap-1">
+              <span>单格: {gridCellPixelW}×{gridCellPixelH}px</span>
+              {isGridExactSquare ? (
+                <span className="text-emerald-700 font-bold">🔒 1:1</span>
+              ) : (
+                <span className="text-amber-700 font-semibold">非 1:1</span>
+              )}
+            </span>
           </div>
-          <p className="text-xs text-stone-500 mt-0.5">
+          <p className="text-xs mt-0.5 text-stone-500">
             当前图片: <span className="font-mono text-stone-700 font-medium">{imageFile.name}</span> (原图尺寸: {naturalDimensions.width}×{naturalDimensions.height})
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Mode Switcher */}
+          <div className="flex items-center gap-1 bg-stone-100 p-0.5 rounded-lg border border-stone-200 text-stone-800">
+            <button
+              type="button"
+              onClick={() => handleSwitchLayoutMode('grid')}
+              className={`px-2 py-1 text-xs font-semibold rounded transition-colors flex items-center gap-1 cursor-pointer ${
+                layoutMode === 'grid'
+                  ? 'bg-white text-emerald-800 shadow-xs font-bold'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+              title="连通整网格模式：拖拽与调整整个外框，内部均分或通过中线调整各格"
+            >
+              <Layers className="w-3.5 h-3.5 text-emerald-600" />
+              <span>整网格</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSwitchLayoutMode('independent')}
+              className={`px-2 py-1 text-xs font-semibold rounded transition-colors flex items-center gap-1 cursor-pointer ${
+                layoutMode === 'independent'
+                  ? 'bg-amber-500 text-stone-950 font-bold shadow-xs'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+              title="独立小方块模式：将网格分散为 N 个独立自由方块，每个小方块可单独拖拽移动和拉伸调整大小"
+            >
+              <Scan className="w-3.5 h-3.5" />
+              <span>独立方块</span>
+            </button>
+          </div>
+
+          {/* 1:1 Lock Switch */}
+          <button
+            type="button"
+            onClick={handleToggleLockSquare}
+            className={`px-2 py-1 rounded text-xs font-semibold border flex items-center gap-1.5 transition-all cursor-pointer ${
+              isLockSquare
+                ? 'bg-amber-50 text-amber-900 border-amber-300'
+                : 'bg-stone-100 text-stone-600 border-stone-200'
+            }`}
+            title={isLockSquare ? '已锁定 1:1 正方形比例' : '自由长宽比，点击锁定 1:1'}
+          >
+            {isLockSquare ? <Lock className="w-3 h-3 text-amber-600" /> : <Unlock className="w-3 h-3 text-stone-400" />}
+            <span>{isLockSquare ? '1:1锁定' : '自由比'}</span>
+          </button>
+
+          {/* One-Click 1:1 Calibration */}
+          <button
+            type="button"
+            onClick={handleOneClickCorrectSquare}
+            className="px-2 py-1 rounded text-xs font-semibold bg-white hover:bg-stone-50 text-stone-700 border border-stone-200 shadow-2xs transition-all flex items-center gap-1 cursor-pointer"
+            title="一键将选区矫正为 1:1 严格正方形"
+          >
+            <CheckCheck className="w-3 h-3 text-emerald-600" />
+            <span>一键矫正 1:1</span>
+          </button>
+
+          {/* Fullscreen Button */}
+          <button
+            type="button"
+            onClick={() => setIsFullscreen(true)}
+            className="px-2.5 py-1.5 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 bg-white text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+            title="全屏微调大画板 (可按 ESC 退出，或双击预览窗)"
+          >
+            <Maximize2 className="w-3.5 h-3.5 text-emerald-600" />
+            <span>全屏微调</span>
+          </button>
+
           <button
             type="button"
             onClick={onResetImage}
             disabled={isSlicing}
-            className="px-3 py-1.5 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            className="px-3 py-1.5 rounded-lg border border-stone-300 hover:bg-stone-50 text-stone-700 bg-white text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>更换图片</span>
@@ -835,150 +1455,448 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
 
       {/* Main Workspace Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column (7 cols): Interactive Visual Canvas Slicer Area */}
-        <div className="lg:col-span-7 space-y-3">
-          {/* Header Bar with Live Matting Controls */}
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-stone-800 flex items-center gap-1.5">
-                <Scan className="w-4 h-4 text-emerald-600" />
-                <span>N 宫格实时预览</span>
-              </span>
-
-              {config.autoTransparent && (
-                <button
-                  type="button"
-                  onClick={() => setShowLiveMatting(!showLiveMatting)}
-                  className={`px-2 py-0.5 rounded text-[11px] font-medium border flex items-center gap-1 transition-all cursor-pointer ${
-                    showLiveMatting
-                      ? 'bg-emerald-50 text-[#07c160] border-emerald-300 font-bold'
-                      : 'bg-stone-100 text-stone-600 border-stone-200'
-                  }`}
-                  title="开关 N 宫格抠图实时透明化效果"
-                >
-                  <Sparkles className="w-3 h-3" />
-                  <span>{showLiveMatting ? '实时抠图已开' : '显示原图'}</span>
-                </button>
-              )}
-            </div>
-
-            {/* Background Switcher & Hold to Compare */}
-            <div className="flex items-center gap-1.5">
-              {config.autoTransparent && showLiveMatting && (
-                <div className="flex items-center gap-1 bg-stone-100 p-0.5 rounded-lg border border-stone-200">
-                  <span className="text-[10px] text-stone-500 pl-1">背景:</span>
+        {/* Left Column (7 cols): Interactive Visual Canvas Slicer Area or Fullscreen Modal */}
+        <div
+          className={
+            isFullscreen
+              ? 'fixed inset-0 z-50 bg-stone-950 flex flex-col p-2.5 backdrop-blur-md overflow-hidden select-none text-white'
+              : 'lg:col-span-7 space-y-3'
+          }
+        >
+          {/* Action Bar / Fullscreen Header */}
+          {isFullscreen ? (
+            <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-stone-900/95 border-b border-white/10 rounded-lg shrink-0 text-xs shadow-md">
+              {/* Left: Mode Switcher + Mode Actions */}
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                {/* Mode Switcher */}
+                <div className="inline-flex items-center rounded-md bg-stone-950 p-0.5 border border-white/15 shrink-0">
                   <button
                     type="button"
-                    onClick={() => setPreviewBg('checkerboard')}
-                    className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
-                      previewBg === 'checkerboard' ? 'bg-white shadow-xs font-bold text-stone-900' : 'text-stone-600 hover:text-stone-900'
+                    onClick={() => handleSwitchLayoutMode('grid')}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      layoutMode === 'grid'
+                        ? 'bg-stone-700 text-white shadow-xs font-semibold'
+                        : 'text-stone-400 hover:text-stone-200'
                     }`}
-                    title="棋盘格透明底"
+                    title="整网格模式"
                   >
-                    🏁 棋盘
+                    <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>整网格</span>
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPreviewBg('dark')}
-                    className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
-                      previewBg === 'dark' ? 'bg-stone-900 text-white shadow-xs font-bold' : 'text-stone-600 hover:text-stone-900'
+                    onClick={() => handleSwitchLayoutMode('independent')}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      layoutMode === 'independent'
+                        ? 'bg-amber-500 text-stone-950 shadow-xs font-bold'
+                        : 'text-stone-400 hover:text-stone-200'
                     }`}
-                    title="深色黑底（检验 2px 白描边及暗部杂色最佳）"
+                    title="独立小方块模式"
                   >
-                    ⬛ 深色
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPreviewBg('chatGray')}
-                    className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
-                      previewBg === 'chatGray' ? 'bg-[#ededed] shadow-xs font-bold text-stone-900' : 'text-stone-600 hover:text-stone-900'
-                    }`}
-                    title="微信聊天浅灰底"
-                  >
-                    💬 聊天灰
+                    <Scan className="w-3.5 h-3.5" />
+                    <span>独立小方块</span>
                   </button>
                 </div>
-              )}
 
-              {/* Hold to Compare Original */}
-              {config.autoTransparent && showLiveMatting && (
+                <div className="h-4 w-[1px] bg-white/15 shrink-0" />
+
+                {/* Mode-specific actions */}
+                {layoutMode === 'grid' ? (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleToggleLockSquare}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer shadow-xs ${
+                        isLockSquare
+                          ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 hover:bg-emerald-900'
+                          : 'bg-stone-800 border-white/10 text-stone-300 hover:bg-stone-700 hover:text-white'
+                      }`}
+                      title={isLockSquare ? '1:1 正方已锁定 (拖动等比联动)' : '自由长宽比'}
+                    >
+                      {isLockSquare ? <Lock className="w-3.5 h-3.5 text-emerald-400" /> : <Unlock className="w-3.5 h-3.5 text-stone-400" />}
+                      <span>{isLockSquare ? '1:1锁定' : '自由比例'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="一键校正整网格为严格 1:1 正方形"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>矫正1:1</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleAutoAlignSplits}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-emerald-400 hover:text-emerald-300 border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="智能吸附边缘缝隙"
+                    >
+                      <Wand2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>智能吸附</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetSplits}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-300 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="重置分割线为均匀等距"
+                    >
+                      <RefreshCcw className="w-3 h-3 text-stone-400" />
+                      <span>重置均分</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleToggleLockSquare}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer shadow-xs ${
+                        isLockSquare
+                          ? 'bg-emerald-950/80 border-emerald-500/60 text-emerald-300 hover:bg-emerald-900'
+                          : 'bg-stone-800 border-white/10 text-stone-300 hover:bg-stone-700 hover:text-white'
+                      }`}
+                      title={isLockSquare ? '1:1 正方已锁定' : '自由比例拉伸'}
+                    >
+                      {isLockSquare ? <Lock className="w-3.5 h-3.5 text-emerald-400" /> : <Unlock className="w-3.5 h-3.5 text-stone-400" />}
+                      <span>{isLockSquare ? '1:1锁定' : '自由比例'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="一键将所有独立方块矫正为 1:1 纯正方形"
+                    >
+                      <CheckCheck className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>矫正1:1</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleUnifyBoxSizes}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-amber-300 hover:text-amber-200 border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="统一所有小方块为当前选中尺寸"
+                    >
+                      <Layers className="w-3.5 h-3.5 text-amber-400" />
+                      <span>统一尺寸</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetIndependentBoxesFromGrid}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-stone-800 hover:bg-stone-700 text-stone-300 hover:text-white border border-white/10 transition-colors cursor-pointer shadow-xs"
+                      title="从整网格重新对齐小方块"
+                    >
+                      <RefreshCcw className="w-3 h-3 text-stone-400" />
+                      <span>重新对齐</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Magnifier compact pill */}
+                <div className="inline-flex items-center rounded-md bg-stone-950 p-0.5 border border-white/15 text-xs shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setEnableMagnifier(!enableMagnifier)}
+                    className={`px-2 py-0.5 rounded text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer ${
+                      enableMagnifier ? 'text-amber-400 bg-stone-800' : 'text-stone-400 hover:text-stone-200'
+                    }`}
+                    title="拉动边缘调整大小时自动唤起放大镜"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
+                    <span>放大镜 {enableMagnifier ? '开' : '关'}</span>
+                  </button>
+                  {enableMagnifier && (
+                    <div className="flex items-center border-l border-white/10 pl-1 ml-0.5 gap-0.5">
+                      {[2.5, 3.5, 5.0].map((z) => (
+                        <button
+                          key={z}
+                          type="button"
+                          onClick={() => setMagnifierZoom(z)}
+                          className={`px-1 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                            Math.abs(magnifierZoom - z) < 0.1
+                              ? 'bg-amber-500 text-stone-950 font-bold'
+                              : 'text-stone-400 hover:text-white'
+                          }`}
+                          title={`切换至 ${z}x`}
+                        >
+                          {z}x
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Right: Dimension & 1:1 indicator, View Zoom, Exit Fullscreen */}
+              <div className="flex items-center gap-2 shrink-0">
+                {/* Dimension & 1:1 status badge */}
+                <div className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-stone-950 border border-white/10 font-mono text-[11px] text-stone-300">
+                  <span className="text-stone-400">单格:</span>
+                  <span className="font-bold text-white">{gridCellPixelW}×{gridCellPixelH}</span>
+                  {isGridExactSquare ? (
+                    <span className="text-emerald-400 font-sans text-[10px] bg-emerald-950/60 px-1 rounded border border-emerald-500/30">1:1 正方</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleOneClickCorrectSquare}
+                      className="text-amber-400 hover:text-amber-300 font-sans text-[10px] bg-amber-950/60 px-1 rounded border border-amber-500/30 cursor-pointer"
+                      title="点击一键矫正 1:1"
+                    >
+                      非正方(校正)
+                    </button>
+                  )}
+                </div>
+
+                {/* Viewport Zoom */}
+                <div className="flex items-center gap-0.5 bg-stone-950 p-0.5 rounded-md border border-white/15 text-xs">
+                  {[1, 1.25, 1.5, 2].map((z) => (
+                    <button
+                      key={z}
+                      type="button"
+                      onClick={() => setZoomLevel(z)}
+                      className={`px-1.5 py-0.5 rounded text-[11px] font-mono cursor-pointer transition-colors ${
+                        zoomLevel === z
+                          ? 'bg-stone-700 text-white font-bold'
+                          : 'text-stone-400 hover:text-white'
+                      }`}
+                    >
+                      {Math.round(z * 100)}%
+                    </button>
+                  ))}
+                </div>
+
+                {/* Exit Fullscreen */}
                 <button
                   type="button"
-                  onPointerDown={() => setIsComparingOriginal(true)}
-                  onPointerUp={() => setIsComparingOriginal(false)}
-                  onPointerLeave={() => setIsComparingOriginal(false)}
-                  className="px-2 py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-[11px] font-medium border border-stone-300 transition-colors cursor-pointer select-none flex items-center gap-1"
-                  title="按住鼠标左键临时查看未抠图的原图"
+                  onClick={() => setIsFullscreen(false)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white border border-stone-600 transition-colors cursor-pointer shadow-xs"
+                  title="退出全屏 (ESC)"
                 >
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>按住对比原图</span>
+                  <Minimize2 className="w-3.5 h-3.5 text-stone-300" />
+                  <span>退出全屏</span>
                 </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Header Bar with Live Matting Controls when not in fullscreen */}
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-stone-800 flex items-center gap-1.5">
+                    <Scan className="w-4 h-4 text-emerald-600" />
+                    <span>N 宫格实时预览</span>
+                  </span>
+
+                  {config.autoTransparent && (
+                    <button
+                      type="button"
+                      onClick={() => setShowLiveMatting(!showLiveMatting)}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium border flex items-center gap-1 transition-all cursor-pointer ${
+                        showLiveMatting
+                          ? 'bg-emerald-50 text-[#07c160] border-emerald-300 font-bold'
+                          : 'bg-stone-100 text-stone-600 border-stone-200'
+                      }`}
+                      title="开关 N 宫格抠图实时透明化效果"
+                    >
+                      <Sparkles className="w-3 h-3" />
+                      <span>{showLiveMatting ? '实时抠图已开' : '显示原图'}</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Background Switcher & Hold to Compare */}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {config.autoTransparent && showLiveMatting && (
+                    <div className="flex items-center gap-1 bg-stone-100 p-0.5 rounded-lg border border-stone-200">
+                      <span className="text-[10px] text-stone-500 pl-1">背景:</span>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewBg('checkerboard')}
+                        className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                          previewBg === 'checkerboard' ? 'bg-white shadow-xs font-bold text-stone-900' : 'text-stone-600 hover:text-stone-900'
+                        }`}
+                        title="棋盘格透明底"
+                      >
+                        🏁 棋盘
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewBg('dark')}
+                        className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                          previewBg === 'dark' ? 'bg-stone-900 text-white shadow-xs font-bold' : 'text-stone-600 hover:text-stone-900'
+                        }`}
+                        title="深色黑底（检验 2px 白描边及暗部杂色最佳）"
+                      >
+                        ⬛ 深色
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewBg('chatGray')}
+                        className={`px-1.5 py-0.5 rounded text-[10px] transition-all cursor-pointer ${
+                          previewBg === 'chatGray' ? 'bg-[#ededed] shadow-xs font-bold text-stone-900' : 'text-stone-600 hover:text-stone-900'
+                        }`}
+                        title="微信聊天浅灰底"
+                      >
+                        💬 聊天灰
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Hold to Compare Original */}
+                  {config.autoTransparent && showLiveMatting && (
+                    <button
+                      type="button"
+                      onPointerDown={() => setIsComparingOriginal(true)}
+                      onPointerUp={() => setIsComparingOriginal(false)}
+                      onPointerLeave={() => setIsComparingOriginal(false)}
+                      className="px-2 py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-[11px] font-medium border border-stone-300 transition-colors cursor-pointer select-none flex items-center gap-1"
+                      title="按住鼠标左键临时查看未抠图的原图"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>按住对比原图</span>
+                    </button>
+                  )}
+
+                  {/* Magnifier compact pill */}
+                  <div className="inline-flex items-center rounded-lg bg-stone-100 p-0.5 border border-stone-200 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setEnableMagnifier(!enableMagnifier)}
+                      className={`px-2 py-0.5 rounded text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer ${
+                        enableMagnifier ? 'text-amber-800 bg-amber-100 font-semibold' : 'text-stone-600 hover:text-stone-900'
+                      }`}
+                      title="拉动边缘调整大小时自动唤起放大镜"
+                    >
+                      <ZoomIn className="w-3.5 h-3.5 text-amber-600" />
+                      <span>放大镜 {enableMagnifier ? '开' : '关'}</span>
+                    </button>
+                    {enableMagnifier && (
+                      <div className="flex items-center border-l border-stone-200 pl-1 ml-0.5 gap-0.5">
+                        {[2.5, 3.5, 5.0].map((z) => (
+                          <button
+                            key={z}
+                            type="button"
+                            onClick={() => setMagnifierZoom(z)}
+                            className={`px-1 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                              Math.abs(magnifierZoom - z) < 0.1
+                                ? 'bg-amber-500 text-stone-950 font-bold'
+                                : 'text-stone-600 hover:text-stone-900'
+                            }`}
+                            title={`切换至 ${z}x`}
+                          >
+                            {z}x
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Fullscreen Button */}
+                  <button
+                    type="button"
+                    onClick={() => setIsFullscreen(true)}
+                    className="px-2 py-1 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg text-xs font-semibold border border-stone-300 transition-colors flex items-center gap-1 cursor-pointer"
+                    title="全屏微调大画板 (可按 ESC 退出，或双击预览窗)"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>全屏</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 3-Tier Grid Alignment & Adjustment Action Bar */}
+              <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200/90 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-stone-700 flex items-center gap-1.5">
+                    <Sliders className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>分格对齐方式:</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleAutoAlignSplits}
+                    className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="自动扫描图中各小图边缘及缝隙，自动吸附对齐内部网格线"
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    <span>智能吸附边缘缝隙</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetSplits}
+                    className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="恢复所有内部线为均匀等距"
+                  >
+                    <RefreshCcw className="w-3 h-3 text-stone-500" />
+                    <span>重置均分</span>
+                  </button>
+                </div>
+
+                <div className="text-[11px] text-stone-500 flex items-center gap-1.5">
+                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                  <span>拖拽图内绿色中线可调宽窄，双击预览窗可全屏放大</span>
+                </div>
+              </div>
+
+              {/* Toast Notification for Auto-Align */}
+              {autoAlignToast && (
+                <div
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition-all ${
+                    autoAlignToast.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-900 border border-emerald-300'
+                      : 'bg-stone-100 text-stone-800 border border-stone-300'
+                  }`}
+                >
+                  <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>{autoAlignToast.message}</span>
+                </div>
               )}
-            </div>
-          </div>
-
-          {/* 3-Tier Grid Alignment & Adjustment Action Bar */}
-          <div className="p-2.5 rounded-xl bg-stone-50 border border-stone-200/90 flex flex-wrap items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-bold text-stone-700 flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-emerald-600" />
-                <span>分格对齐方式:</span>
-              </span>
-              <button
-                type="button"
-                onClick={handleAutoAlignSplits}
-                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
-                title="自动扫描图中各小图边缘及缝隙，自动吸附对齐内部网格线"
-              >
-                <Wand2 className="w-3.5 h-3.5" />
-                <span>智能吸附边缘缝隙</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleResetSplits}
-                className="px-2.5 py-1.5 rounded-lg bg-white border border-stone-200 hover:bg-stone-100 text-stone-700 font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
-                title="恢复所有内部线为均匀等距"
-              >
-                <RefreshCcw className="w-3 h-3 text-stone-500" />
-                <span>重置均分</span>
-              </button>
-            </div>
-
-            <div className="text-[11px] text-stone-500 flex items-center gap-1.5">
-              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-              <span>拖拽图内绿色中线可调宽窄，选中单格可在右侧像素级微调</span>
-            </div>
-          </div>
-
-          {/* Toast Notification for Auto-Align */}
-          {autoAlignToast && (
-            <div
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-2 transition-all ${
-                autoAlignToast.type === 'success'
-                  ? 'bg-emerald-50 text-emerald-900 border border-emerald-300'
-                  : 'bg-stone-100 text-stone-800 border border-stone-300'
-              }`}
-            >
-              <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>{autoAlignToast.message}</span>
-            </div>
+            </>
           )}
 
-          {/* Interactive Image Container */}
+          {/* Viewport container wrapping image + overlays */}
           <div
-            ref={imgContainerRef}
-            onClick={handleContainerClick}
-            style={{
-              aspectRatio:
-                naturalDimensions.width && naturalDimensions.height
-                  ? `${naturalDimensions.width} / ${naturalDimensions.height}`
-                  : '1 / 1',
-              maxHeight: '68vh',
-            }}
-            className={`relative w-full bg-stone-950 rounded-xl overflow-hidden shadow-inner select-none border border-stone-800 ${
-              isPickingColor ? 'cursor-crosshair ring-2 ring-amber-400' : ''
-            }`}
+            className={
+              isFullscreen
+                ? 'flex-1 min-h-0 w-full flex items-center justify-center relative overflow-hidden py-1'
+                : 'w-full'
+            }
           >
+            <div
+              ref={imgContainerRef}
+              onClick={handleContainerClick}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setIsFullscreen(!isFullscreen);
+              }}
+              style={{
+                aspectRatio:
+                  naturalDimensions.width && naturalDimensions.height
+                    ? `${naturalDimensions.width} / ${naturalDimensions.height}`
+                    : '1 / 1',
+                maxHeight: isFullscreen ? '100%' : '560px',
+                maxWidth: '100%',
+                width: isFullscreen ? 'auto' : '100%',
+                height: isFullscreen ? '100%' : undefined,
+                transform: isFullscreen && zoomLevel !== 1 ? `scale(${zoomLevel})` : undefined,
+              }}
+              className={`relative bg-stone-950 rounded-xl overflow-hidden shadow-inner flex items-center justify-center select-none transition-transform duration-100 origin-center ${
+                isPickingColor ? 'cursor-crosshair ring-2 ring-amber-400' : ''
+              } ${isFullscreen ? 'shadow-2xl border border-white/20' : 'w-full border border-stone-800'}`}
+              title="双击预览窗或点击右上角按钮即可切换全屏"
+            >
+              {/* Floating Fullscreen Toggle Button in corner */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsFullscreen(!isFullscreen);
+                }}
+                className="absolute top-2.5 right-2.5 z-40 p-1.5 rounded-lg bg-black/75 hover:bg-black text-white shadow-md border border-white/25 transition-all cursor-pointer group"
+                title={isFullscreen ? '退出全屏 (ESC)' : '全屏放大显示 (亦可双击画面全屏)'}
+              >
+                {isFullscreen ? (
+                  <Minimize2 className="w-4 h-4 text-amber-400" />
+                ) : (
+                  <Maximize2 className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                )}
+              </button>
             {/* Color Picking Hint Banner */}
             {isPickingColor && (
               <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-amber-500 text-stone-950 px-3 py-1 rounded-full text-xs font-bold shadow-lg flex items-center gap-1.5 pointer-events-none animate-bounce">
@@ -996,7 +1914,126 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
               className="w-full h-full object-contain pointer-events-none"
             />
 
-            {/* Outside Dim Mask: Top */}
+            {/* MODE 1: Independent Boxes Overlay */}
+            {layoutMode === 'independent' && (
+              <div className="absolute inset-0 pointer-events-none z-20">
+                {Array.from({ length: totalCells }).map((_, idx) => {
+                  const box = currentIndependentBoxes[idx] || {
+                    x: (idx % config.cols) * (100 / config.cols),
+                    y: Math.floor(idx / config.cols) * (100 / config.rows),
+                    width: 100 / config.cols,
+                    height: 100 / config.rows,
+                  };
+                  const isSelected = idx === Math.max(0, Math.min(totalCells - 1, inspectCellIndex));
+
+                  return (
+                    <div
+                      key={`ind-box-${idx}`}
+                      className={`absolute pointer-events-auto touch-none select-none transition-shadow ${
+                        isSelected
+                          ? 'border-2 border-amber-400 bg-amber-400/20 shadow-[0_0_18px_rgba(251,191,36,0.85)] z-30 ring-2 ring-amber-400/60 cursor-move'
+                          : 'border-2 border-emerald-400/80 bg-emerald-500/10 hover:border-amber-300 hover:bg-emerald-500/20 z-20 cursor-move'
+                      }`}
+                      style={{
+                        left: `${box.x}%`,
+                        top: `${box.y}%`,
+                        width: `${box.width}%`,
+                        height: `${box.height}%`,
+                      }}
+                      onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'move')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setInspectCellIndex(idx);
+                      }}
+                    >
+                      {/* Box index label badge */}
+                      <div className="absolute top-1 left-1 flex items-center gap-1 pointer-events-none">
+                        <span
+                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded leading-none shadow-xs ${
+                            isSelected
+                              ? 'bg-amber-500 text-stone-950 ring-1 ring-amber-300'
+                              : 'bg-black/75 text-emerald-300'
+                          }`}
+                        >
+                          {(idx + 1).toString().padStart(2, '0')}
+                        </span>
+                        {isSelected && (
+                          <span className="text-[9px] font-bold bg-amber-400 text-stone-950 px-1 rounded shadow-xs">
+                            当前选中
+                          </span>
+                        )}
+                        {config.cellOverrides?.[idx] && (
+                          <span className="text-[9px] font-bold bg-emerald-500 text-white px-1 rounded shadow-xs">
+                            微调
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Size dimension readout in corner */}
+                      <div className="absolute bottom-1 right-1 pointer-events-none">
+                        <span className="text-[9px] font-mono font-medium px-1 rounded bg-black/60 text-white/80">
+                          {box.width.toFixed(1)}%×{box.height.toFixed(1)}%
+                        </span>
+                      </div>
+
+                      {/* 8 Resize Handles on selected box */}
+                      {isSelected && (
+                        <>
+                          {/* 4 Corners */}
+                          <div
+                            className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'nw')}
+                            title="拖动调整左上角"
+                          />
+                          <div
+                            className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'ne')}
+                            title="拖动调整右上角"
+                          />
+                          <div
+                            className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'se')}
+                            title="拖动调整右下角"
+                          />
+                          <div
+                            className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'sw')}
+                            title="拖动调整左下角"
+                          />
+
+                          {/* 4 Edges */}
+                          <div
+                            className="absolute -top-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'n')}
+                            title="拖动调整上边"
+                          />
+                          <div
+                            className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 's')}
+                            title="拖动调整下边"
+                          />
+                          <div
+                            className="absolute top-1/2 -left-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'w')}
+                            title="拖动调整左边"
+                          />
+                          <div
+                            className="absolute top-1/2 -right-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'e')}
+                            title="拖动调整右边"
+                          />
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* MODE 2: Connected Grid Overlay */}
+            {layoutMode === 'grid' && (
+              <>
+                {/* Outside Dim Mask: Top */}
             <div
               className="absolute left-0 top-0 right-0 bg-black/60 pointer-events-none transition-all z-10"
               style={{ height: `${cropArea.y}%` }}
@@ -1238,42 +2275,170 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 title="拉动缩放右下角"
               />
             </div>
-          </div>
-
-          {/* Quick Crop Alignment Presets */}
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs pt-1">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-stone-500 font-medium">快速裁切黑边:</span>
-              <button
-                type="button"
-                onClick={() => applyCropPreset('removeTop30')}
-                className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
-              >
-                剔除顶部 30% 黑边
-              </button>
-              <button
-                type="button"
-                onClick={() => applyCropPreset('removeTopBottom15')}
-                className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
-              >
-                剔除上下各 15%
-              </button>
-              <button
-                type="button"
-                onClick={() => applyCropPreset('center80')}
-                className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
-              >
-                居中 80% 区域
-              </button>
-              <button
-                type="button"
-                onClick={() => applyCropPreset('full')}
-                className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
-              >
-                恢复 100% 满屏
-              </button>
+              </>
+            )}
             </div>
           </div>
+
+          {/* Quick Crop Alignment Presets (when NOT fullscreen) */}
+          {!isFullscreen && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs pt-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-stone-500 font-medium">快速裁切黑边:</span>
+                <button
+                  type="button"
+                  onClick={() => applyCropPreset('removeTop30')}
+                  className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
+                >
+                  剔除顶部 30% 黑边
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyCropPreset('removeTopBottom15')}
+                  className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
+                >
+                  剔除上下各 15%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyCropPreset('center80')}
+                  className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
+                >
+                  居中 80% 区域
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyCropPreset('full')}
+                  className="px-2 py-1 rounded bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium border border-stone-200 transition-all cursor-pointer"
+                >
+                  恢复 100% 满屏
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Fullscreen Bottom Bar (when in Fullscreen mode, aligned with dynamic slicer) */}
+          {isFullscreen && (
+            <div className="px-3 py-1.5 border-t border-white/10 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 bg-stone-900/95 rounded-lg shadow-md">
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* Live matting button */}
+                {config.autoTransparent && (
+                  <button
+                    type="button"
+                    onClick={() => setShowLiveMatting(!showLiveMatting)}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer shadow-xs ${
+                      showLiveMatting
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                        : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{showLiveMatting ? '实时抠图已开' : '显示原图'}</span>
+                  </button>
+                )}
+
+                {/* Background switcher */}
+                <div className="flex items-center gap-1 bg-stone-950 p-0.5 rounded-md border border-white/10">
+                  <span className="text-[10px] text-stone-400 pl-1">底色:</span>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewBg('checkerboard')}
+                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors cursor-pointer ${
+                      previewBg === 'checkerboard' ? 'bg-stone-700 text-white font-bold' : 'text-stone-400 hover:text-stone-200'
+                    }`}
+                  >
+                    🏁 棋盘
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewBg('dark')}
+                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors cursor-pointer ${
+                      previewBg === 'dark' ? 'bg-stone-700 text-white font-bold' : 'text-stone-400 hover:text-stone-200'
+                    }`}
+                  >
+                    ⬛ 深色
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewBg('chatGray')}
+                    className={`px-1.5 py-0.5 rounded text-[10px] transition-colors cursor-pointer ${
+                      previewBg === 'chatGray' ? 'bg-stone-700 text-white font-bold' : 'text-stone-400 hover:text-stone-200'
+                    }`}
+                  >
+                    💬 聊天灰
+                  </button>
+                </div>
+
+                {/* Hold to Compare Original */}
+                {config.autoTransparent && (
+                  <button
+                    type="button"
+                    onPointerDown={() => setIsComparingOriginal(true)}
+                    onPointerUp={() => setIsComparingOriginal(false)}
+                    onPointerLeave={() => setIsComparingOriginal(false)}
+                    className="px-2 py-1 bg-stone-800 hover:bg-stone-700 text-stone-200 rounded-md text-[11px] font-medium border border-white/10 transition-colors cursor-pointer select-none flex items-center gap-1"
+                    title="按住鼠标左键临时查看未抠图的原图"
+                  >
+                    <Eye className="w-3.5 h-3.5 text-stone-400" />
+                    <span>按住对比原图</span>
+                  </button>
+                )}
+
+                <div className="text-stone-400 font-mono text-xs flex items-center gap-2">
+                  <span>原图: {naturalDimensions.width}×{naturalDimensions.height}</span>
+                  <span className="text-emerald-400 font-bold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-500/30 text-[11px]">
+                    单格: {gridCellPixelW}×{gridCellPixelH}px
+                  </span>
+                </div>
+              </div>
+
+              {/* Target cell & fine tune pills */}
+              <div className="flex items-center gap-2">
+                <span className="text-stone-400">当前选中小格:</span>
+                <span className="px-2 py-0.5 rounded bg-amber-500 text-stone-950 font-bold font-mono text-xs">
+                  第 {(Math.max(0, Math.min(totalCells - 1, inspectCellIndex)) + 1).toString().padStart(2, '0')} 格
+                </span>
+
+                {layoutMode === 'independent' && (
+                  <div className="flex items-center gap-1 ml-2">
+                    <span className="text-stone-400 mr-0.5">微调移动:</span>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('x', -0.5)}
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
+                      title="向左微调 0.5%"
+                    >
+                      ← X
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('x', 0.5)}
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
+                      title="向右微调 0.5%"
+                    >
+                      X →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('y', -0.5)}
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
+                      title="向上微调 0.5%"
+                    >
+                      ↑ Y
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleStepActiveBox('y', 0.5)}
+                      className="px-1.5 py-0.5 bg-stone-800 hover:bg-stone-700 text-stone-200 hover:text-white rounded font-mono border border-white/10 cursor-pointer text-xs"
+                      title="向下微调 0.5%"
+                    >
+                      Y ↓
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Column (5 cols): Parameter Controls & Action */}
@@ -1358,109 +2523,259 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
             </div>
           </div>
 
-          {/* Section 2: Precise Margin Sliders (Top, Bottom, Left, Right) */}
-          <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
-            <div className="flex items-center justify-between text-xs font-bold text-stone-900">
-              <span className="flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-emerald-600" />
-                <span>精细边缘边距调节 (Margin %)</span>
-              </span>
-              <button
-                type="button"
-                onClick={resetCropToFull}
-                className="text-[11px] text-stone-500 hover:text-emerald-700 underline font-normal cursor-pointer"
-              >
-                重置边距
-              </button>
+          {/* Section 2: Layout Mode Specific Controls */}
+          {layoutMode === 'independent' ? (
+            <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2.5">
+              <div className="flex items-center justify-between text-xs font-bold text-stone-900">
+                <span className="flex items-center gap-1.5">
+                  <Scan className="w-3.5 h-3.5 text-amber-600" />
+                  <span>独立小方块尺寸与位置 (第 {(inspectCellIndex + 1).toString().padStart(2, '0')} 格)</span>
+                </span>
+                <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 font-mono font-bold">
+                  {(currentIndependentBoxes[inspectCellIndex]?.width ?? (100 / config.cols)).toFixed(1)}% × {(currentIndependentBoxes[inspectCellIndex]?.height ?? (100 / config.rows)).toFixed(1)}%
+                </span>
+              </div>
+
+              <p className="text-[11px] text-stone-500">
+                各格已解绑为自由选框。可点击左侧任意小方块选中，使用手柄缩放或直接拖拽移动。
+              </p>
+
+              {/* Sliders for current box X, Y, Width, Height */}
+              {(() => {
+                const box = currentIndependentBoxes[inspectCellIndex] || {
+                  x: (inspectCellIndex % config.cols) * (100 / config.cols),
+                  y: Math.floor(inspectCellIndex / config.cols) * (100 / config.rows),
+                  width: 100 / config.cols,
+                  height: 100 / config.rows,
+                };
+                return (
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div>
+                      <div className="flex justify-between text-stone-600 mb-0.5">
+                        <span>水平坐标 (X)</span>
+                        <span className="font-mono text-amber-700 font-bold">{box.x.toFixed(1)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(10, 100 - box.width)}
+                        step="0.2"
+                        value={box.x}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 0;
+                          handleUpdateSingleIndependentBox(inspectCellIndex, { ...box, x: val });
+                        }}
+                        className="w-full accent-amber-600 cursor-pointer"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-stone-600 mb-0.5">
+                        <span>垂直坐标 (Y)</span>
+                        <span className="font-mono text-amber-700 font-bold">{box.y.toFixed(1)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={Math.max(10, 100 - box.height)}
+                        step="0.2"
+                        value={box.y}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 0;
+                          handleUpdateSingleIndependentBox(inspectCellIndex, { ...box, y: val });
+                        }}
+                        className="w-full accent-amber-600 cursor-pointer"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-stone-600 mb-0.5">
+                        <span>选框宽度 (W)</span>
+                        <span className="font-mono text-amber-700 font-bold">{box.width.toFixed(1)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="3"
+                        max={Math.min(100, 100 - box.x)}
+                        step="0.2"
+                        value={box.width}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 3;
+                          handleUpdateSingleIndependentBox(inspectCellIndex, { ...box, width: val });
+                        }}
+                        className="w-full accent-amber-600 cursor-pointer"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-stone-600 mb-0.5">
+                        <span>选框高度 (H)</span>
+                        <span className="font-mono text-amber-700 font-bold">{box.height.toFixed(1)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="3"
+                        max={Math.min(100, 100 - box.y)}
+                        step="0.2"
+                        value={box.height}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 3;
+                          handleUpdateSingleIndependentBox(inspectCellIndex, { ...box, height: val });
+                        }}
+                        className="w-full accent-amber-600 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Batch Actions for Independent Boxes */}
+              <div className="pt-2 border-t border-stone-200/70 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleUnifyBoxSizes}
+                  className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium border border-stone-300 transition-colors flex items-center gap-1 cursor-pointer"
+                  title="将当前选中小方块的宽高尺寸同步到其余所有小方块"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                  <span>统一所有方块尺寸</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetIndependentBoxesFromGrid}
+                  className="px-2.5 py-1.5 rounded-lg bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-medium border border-stone-300 transition-colors flex items-center gap-1 cursor-pointer"
+                  title="根据当前的连通网格划分重新初始化并对齐所有小方块"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>根据当前网格重新对齐</span>
+                </button>
+              </div>
+
+              {/* Cell Padding Inset */}
+              <div className="pt-2 border-t border-stone-200/70">
+                <div className="flex justify-between text-[11px] text-stone-600 mb-0.5">
+                  <span>单格内缩边距 (避免切到邻格边缘)</span>
+                  <span className="font-mono text-emerald-700 font-bold">{config.paddingInset} px</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="12"
+                  value={config.paddingInset}
+                  onChange={(e) =>
+                    onConfigChange({
+                      ...config,
+                      paddingInset: parseInt(e.target.value) || 0,
+                    })
+                  }
+                  className="w-full accent-[#07c160] cursor-pointer"
+                />
+              </div>
             </div>
-
-            <div className="grid grid-cols-2 gap-2 text-[11px]">
-              <div>
-                <div className="flex justify-between text-stone-600 mb-0.5">
-                  <span>顶部裁切 (Top)</span>
-                  <span className="font-mono text-emerald-700">{marginTop}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="60"
-                  step="0.5"
-                  value={marginTop}
-                  onChange={(e) => updateMargin('top', parseFloat(e.target.value) || 0)}
-                  className="w-full accent-[#07c160] cursor-pointer"
-                />
+          ) : (
+            <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+              <div className="flex items-center justify-between text-xs font-bold text-stone-900">
+                <span className="flex items-center gap-1.5">
+                  <Sliders className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>精细边缘边距调节 (Margin %)</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={resetCropToFull}
+                  className="text-[11px] text-stone-500 hover:text-emerald-700 underline font-normal cursor-pointer"
+                >
+                  重置边距
+                </button>
               </div>
 
-              <div>
-                <div className="flex justify-between text-stone-600 mb-0.5">
-                  <span>底部裁切 (Bottom)</span>
-                  <span className="font-mono text-emerald-700">{marginBottom}%</span>
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div>
+                  <div className="flex justify-between text-stone-600 mb-0.5">
+                    <span>顶部裁切 (Top)</span>
+                    <span className="font-mono text-emerald-700">{marginTop}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="60"
+                    step="0.5"
+                    value={marginTop}
+                    onChange={(e) => updateMargin('top', parseFloat(e.target.value) || 0)}
+                    className="w-full accent-[#07c160] cursor-pointer"
+                  />
                 </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="60"
-                  step="0.5"
-                  value={marginBottom}
-                  onChange={(e) => updateMargin('bottom', parseFloat(e.target.value) || 0)}
-                  className="w-full accent-[#07c160] cursor-pointer"
-                />
+
+                <div>
+                  <div className="flex justify-between text-stone-600 mb-0.5">
+                    <span>底部裁切 (Bottom)</span>
+                    <span className="font-mono text-emerald-700">{marginBottom}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="60"
+                    step="0.5"
+                    value={marginBottom}
+                    onChange={(e) => updateMargin('bottom', parseFloat(e.target.value) || 0)}
+                    className="w-full accent-[#07c160] cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-stone-600 mb-0.5">
+                    <span>左侧裁切 (Left)</span>
+                    <span className="font-mono text-emerald-700">{marginLeft}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="50"
+                    step="0.5"
+                    value={marginLeft}
+                    onChange={(e) => updateMargin('left', parseFloat(e.target.value) || 0)}
+                    className="w-full accent-[#07c160] cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-stone-600 mb-0.5">
+                    <span>右侧裁切 (Right)</span>
+                    <span className="font-mono text-emerald-700">{marginRight}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="50"
+                    step="0.5"
+                    value={marginRight}
+                    onChange={(e) => updateMargin('right', parseFloat(e.target.value) || 0)}
+                    className="w-full accent-[#07c160] cursor-pointer"
+                  />
+                </div>
               </div>
 
-              <div>
-                <div className="flex justify-between text-stone-600 mb-0.5">
-                  <span>左侧裁切 (Left)</span>
-                  <span className="font-mono text-emerald-700">{marginLeft}%</span>
+              {/* Cell Padding Inset */}
+              <div className="pt-2 border-t border-stone-200/70">
+                <div className="flex justify-between text-[11px] text-stone-600 mb-0.5">
+                  <span>单格内缩边距 (避免切到邻格边缘)</span>
+                  <span className="font-mono text-emerald-700 font-bold">{config.paddingInset} px</span>
                 </div>
                 <input
                   type="range"
                   min="0"
-                  max="50"
-                  step="0.5"
-                  value={marginLeft}
-                  onChange={(e) => updateMargin('left', parseFloat(e.target.value) || 0)}
-                  className="w-full accent-[#07c160] cursor-pointer"
-                />
-              </div>
-
-              <div>
-                <div className="flex justify-between text-stone-600 mb-0.5">
-                  <span>右侧裁切 (Right)</span>
-                  <span className="font-mono text-emerald-700">{marginRight}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="50"
-                  step="0.5"
-                  value={marginRight}
-                  onChange={(e) => updateMargin('right', parseFloat(e.target.value) || 0)}
+                  max="12"
+                  value={config.paddingInset}
+                  onChange={(e) =>
+                    onConfigChange({
+                      ...config,
+                      paddingInset: parseInt(e.target.value) || 0,
+                    })
+                  }
                   className="w-full accent-[#07c160] cursor-pointer"
                 />
               </div>
             </div>
-
-            {/* Cell Padding Inset */}
-            <div className="pt-2 border-t border-stone-200/70">
-              <div className="flex justify-between text-[11px] text-stone-600 mb-0.5">
-                <span>单格内缩边距 (避免切到邻格边缘)</span>
-                <span className="font-mono text-emerald-700 font-bold">{config.paddingInset} px</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="12"
-                value={config.paddingInset}
-                onChange={(e) =>
-                  onConfigChange({
-                    ...config,
-                    paddingInset: parseInt(e.target.value) || 0,
-                  })
-                }
-                className="w-full accent-[#07c160] cursor-pointer"
-              />
-            </div>
-          </div>
+          )}
 
           {/* Section 2.5: Tier 3 Single-Cell Micro-Adjustment & Offset */}
           <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2.5">
@@ -1988,6 +3303,25 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 checked={config.addWhiteOutline}
                 onChange={(e) =>
                   onConfigChange({ ...config, addWhiteOutline: e.target.checked })
+                }
+                className="w-4 h-4 rounded text-emerald-600 accent-[#07c160] cursor-pointer"
+              />
+            </div>
+
+            {/* Edge Clean Transparent Borders Toggle */}
+            <div className="flex items-center justify-between pt-1 border-t border-stone-200/70">
+              <div>
+                <label className="text-xs font-semibold text-stone-800 flex items-center gap-1">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>边缘全透明保障 (强制清除四周杂边与留白)</span>
+                </label>
+                <p className="text-[11px] text-stone-500">自动检测并消除边缘非透明边条与留白，确保符合微信表情审核规范</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={config.transparentBorders !== false}
+                onChange={(e) =>
+                  onConfigChange({ ...config, transparentBorders: e.target.checked })
                 }
                 className="w-4 h-4 rounded text-emerald-600 accent-[#07c160] cursor-pointer"
               />

@@ -120,6 +120,9 @@ export default function App() {
     addWhiteOutline: true,
     outlineWidth: 2,
     outputFormat: 'png',
+    layoutMode: 'grid',
+    lockSquare: true,
+    transparentBorders: true,
   });
   const [isImageSlicing, setIsImageSlicing] = useState(false);
   const [imageSliceProgress, setImageSliceProgress] = useState(0);

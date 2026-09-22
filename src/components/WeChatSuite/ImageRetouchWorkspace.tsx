@@ -28,8 +28,29 @@ import {
   Wand2,
   Plus,
   Minus,
+  Settings2,
+  Link2,
+  Unlink2,
+  ChevronDown,
+  X,
+  Scaling,
+  Check,
+  FileDown,
+  ArrowUpDown,
 } from 'lucide-react';
 import { RetouchTool, RetouchOptions } from '../../types';
+
+export interface ExportSizeConfig {
+  mode: 'original' | 'scale' | 'preset' | 'custom';
+  scalePercent: number; // 25, 50, 75, 100
+  preset: 'original' | '240' | '512' | '750' | '1080' | 'custom';
+  customWidth: number;
+  customHeight: number;
+  lockAspectRatio: boolean;
+  format: 'png' | 'jpeg' | 'webp';
+  quality: number; // 0.1 to 1.0 (default 0.92)
+  fillBgForJpeg: string; // default '#ffffff'
+}
 import {
   applyInpainting,
   applyRectInpaint,
@@ -110,6 +131,21 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
   // Top mode toggle: 'repair' (default inpainting watermark removal, keep background, never transparent) vs 'transparent' (optional cut-out)
   const [retouchMode, setRetouchMode] = useState<'repair' | 'transparent'>('repair');
 
+  // Export Size and Format Settings (控制下载图片大小与规格)
+  const [exportConfig, setExportConfig] = useState<ExportSizeConfig>({
+    mode: 'original',
+    scalePercent: 100,
+    preset: 'original',
+    customWidth: 0,
+    customHeight: 0,
+    lockAspectRatio: true,
+    format: 'png',
+    quality: 0.92,
+    fillBgForJpeg: '#ffffff',
+  });
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [estimatedFileSize, setEstimatedFileSize] = useState<string>('');
+
   // Fast sample check whether current canvas has transparent pixels
   const hasTransparentPixels = useMemo(() => {
     if (historyIndex < 0 || !history[historyIndex]) return false;
@@ -167,6 +203,11 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       const w = img.naturalWidth || img.width;
       const h = img.naturalHeight || img.height;
       setImageSize({ width: w, height: h });
+      setExportConfig((prev) => ({
+        ...prev,
+        customWidth: prev.mode === 'custom' && prev.customWidth ? prev.customWidth : w,
+        customHeight: prev.mode === 'custom' && prev.customHeight ? prev.customHeight : h,
+      }));
 
       // Init Main Canvas
       const canvas = mainCanvasRef.current;
@@ -920,14 +961,254 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     });
   }, [imageSize]);
 
-  // Download Output Image
-  const handleDownload = (format: 'png' | 'jpeg') => {
+  // Calculate Target Export Dimensions (分辨率控制)
+  const targetDimensions = useMemo(() => {
+    if (imageSize.width === 0 || imageSize.height === 0) return { width: 0, height: 0 };
+    if (exportConfig.mode === 'original') {
+      return { width: imageSize.width, height: imageSize.height };
+    }
+    if (exportConfig.mode === 'scale') {
+      const scale = exportConfig.scalePercent / 100;
+      return {
+        width: Math.max(1, Math.round(imageSize.width * scale)),
+        height: Math.max(1, Math.round(imageSize.height * scale)),
+      };
+    }
+    if (exportConfig.mode === 'preset') {
+      if (exportConfig.preset === '240') {
+        if (imageSize.width === imageSize.height) {
+          return { width: 240, height: 240 };
+        }
+        const ratio = imageSize.width / imageSize.height;
+        return ratio > 1
+          ? { width: 240, height: Math.max(1, Math.round(240 / ratio)) }
+          : { width: Math.max(1, Math.round(240 * ratio)), height: 240 };
+      }
+      if (exportConfig.preset === '512') {
+        if (imageSize.width === imageSize.height) {
+          return { width: 512, height: 512 };
+        }
+        const ratio = imageSize.width / imageSize.height;
+        return ratio > 1
+          ? { width: 512, height: Math.max(1, Math.round(512 / ratio)) }
+          : { width: Math.max(1, Math.round(512 * ratio)), height: 512 };
+      }
+      if (exportConfig.preset === '750') {
+        const ratio = imageSize.width / imageSize.height;
+        return ratio > 1
+          ? { width: 750, height: Math.max(1, Math.round(750 / ratio)) }
+          : { width: Math.max(1, Math.round(750 * ratio)), height: 750 };
+      }
+      if (exportConfig.preset === '1080') {
+        const ratio = imageSize.width / imageSize.height;
+        return ratio > 1
+          ? { width: 1080, height: Math.max(1, Math.round(1080 / ratio)) }
+          : { width: Math.max(1, Math.round(1080 * ratio)), height: 1080 };
+      }
+      return { width: imageSize.width, height: imageSize.height };
+    }
+    // Custom Mode
+    return {
+      width: Math.max(1, Math.min(10000, exportConfig.customWidth || imageSize.width)),
+      height: Math.max(1, Math.min(10000, exportConfig.customHeight || imageSize.height)),
+    };
+  }, [imageSize, exportConfig]);
+
+  // Handle custom width input with aspect ratio lock
+  const handleCustomWidthChange = (val: number) => {
+    const newW = Math.max(1, Math.min(10000, val));
+    if (exportConfig.lockAspectRatio && imageSize.width > 0 && imageSize.height > 0) {
+      const newH = Math.max(1, Math.round((newW / imageSize.width) * imageSize.height));
+      setExportConfig((prev) => ({
+        ...prev,
+        mode: 'custom',
+        preset: 'custom',
+        customWidth: newW,
+        customHeight: newH,
+      }));
+    } else {
+      setExportConfig((prev) => ({
+        ...prev,
+        mode: 'custom',
+        preset: 'custom',
+        customWidth: newW,
+      }));
+    }
+  };
+
+  // Handle custom height input with aspect ratio lock
+  const handleCustomHeightChange = (val: number) => {
+    const newH = Math.max(1, Math.min(10000, val));
+    if (exportConfig.lockAspectRatio && imageSize.width > 0 && imageSize.height > 0) {
+      const newW = Math.max(1, Math.round((newH / imageSize.height) * imageSize.width));
+      setExportConfig((prev) => ({
+        ...prev,
+        mode: 'custom',
+        preset: 'custom',
+        customWidth: newW,
+        customHeight: newH,
+      }));
+    } else {
+      setExportConfig((prev) => ({
+        ...prev,
+        mode: 'custom',
+        preset: 'custom',
+        customHeight: newH,
+      }));
+    }
+  };
+
+  // Swap width and height
+  const handleSwapDimensions = () => {
+    setExportConfig((prev) => ({
+      ...prev,
+      mode: 'custom',
+      preset: 'custom',
+      customWidth: targetDimensions.height,
+      customHeight: targetDimensions.width,
+    }));
+  };
+
+  // Reset to original dimensions
+  const handleResetToOriginalSize = () => {
+    setExportConfig((prev) => ({
+      ...prev,
+      mode: 'original',
+      preset: 'original',
+      scalePercent: 100,
+      customWidth: imageSize.width,
+      customHeight: imageSize.height,
+    }));
+  };
+
+  // Calculate live estimated file size
+  useEffect(() => {
+    if (!mainCanvasRef.current || targetDimensions.width === 0 || targetDimensions.height === 0) {
+      setEstimatedFileSize('');
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      try {
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = targetDimensions.width;
+        offCanvas.height = targetDimensions.height;
+        const ctx = offCanvas.getContext('2d');
+        if (!ctx || !mainCanvasRef.current) return;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        if (exportConfig.format === 'jpeg') {
+          ctx.fillStyle = exportConfig.fillBgForJpeg || '#ffffff';
+          ctx.fillRect(0, 0, offCanvas.width, offCanvas.height);
+        }
+
+        ctx.drawImage(mainCanvasRef.current, 0, 0, offCanvas.width, offCanvas.height);
+
+        const mime =
+          exportConfig.format === 'jpeg'
+            ? 'image/jpeg'
+            : exportConfig.format === 'webp'
+            ? 'image/webp'
+            : 'image/png';
+        const q = exportConfig.format === 'png' ? undefined : exportConfig.quality;
+
+        offCanvas.toBlob((blob) => {
+          if (cancelled) return;
+          if (blob) {
+            const kb = blob.size / 1024;
+            if (kb >= 1024) {
+              setEstimatedFileSize(`${(kb / 1024).toFixed(2)} MB`);
+            } else {
+              setEstimatedFileSize(`${kb.toFixed(1)} KB`);
+            }
+          }
+        }, mime, q);
+      } catch (err) {
+        console.warn('Failed to calculate estimated size:', err);
+      }
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    targetDimensions,
+    exportConfig.format,
+    exportConfig.quality,
+    exportConfig.fillBgForJpeg,
+    historyIndex,
+  ]);
+
+  // Close modal on ESC key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isExportModalOpen) {
+        setIsExportModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isExportModalOpen]);
+
+  // Download Output Image with full size and quality control
+  const handleDownload = async (overrideFormat?: 'png' | 'jpeg' | 'webp') => {
     if (!mainCanvasRef.current) return;
-    const link = document.createElement('a');
-    link.download = `retouched_clean_${Date.now()}.${format === 'png' ? 'png' : 'jpg'}`;
-    link.href = mainCanvasRef.current.toDataURL(`image/${format}`, 0.95);
-    link.click();
-    showToast?.('已导出高清修图结果！');
+    const format = overrideFormat || exportConfig.format;
+    const tw = targetDimensions.width;
+    const th = targetDimensions.height;
+
+    if (tw <= 0 || th <= 0) return;
+
+    try {
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = tw;
+      exportCanvas.height = th;
+      const ctx = exportCanvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      // For JPEG, fill transparent areas with background color (default white)
+      if (format === 'jpeg') {
+        ctx.fillStyle = exportConfig.fillBgForJpeg || '#ffffff';
+        ctx.fillRect(0, 0, tw, th);
+      }
+
+      ctx.drawImage(mainCanvasRef.current, 0, 0, tw, th);
+
+      const mime =
+        format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+      const q = format === 'png' ? undefined : exportConfig.quality;
+
+      const blob = await new Promise<Blob | null>((resolve) => {
+        exportCanvas.toBlob((b) => resolve(b), mime, q);
+      });
+
+      if (!blob) {
+        showToast?.('导出图片失败，请重试');
+        return;
+      }
+
+      const ext = format === 'jpeg' ? 'jpg' : format;
+      const link = document.createElement('a');
+      link.download = `retouched_${tw}x${th}_${Date.now()}.${ext}`;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+
+      const sizeStr =
+        blob.size >= 1024 * 1024
+          ? `${(blob.size / (1024 * 1024)).toFixed(2)} MB`
+          : `${(blob.size / 1024).toFixed(1)} KB`;
+      showToast?.(`已成功导出 ${tw}×${th} px (${sizeStr}) 图片！`);
+      setIsExportModalOpen(false);
+    } catch (err) {
+      console.error(err);
+      showToast?.('导出过程中出现异常');
+    }
   };
 
   // Forward to Static Slicer
@@ -1755,10 +2036,25 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 ))}
               </div>
 
-              {/* 尺寸标签 */}
-              <div className="font-mono text-stone-400 text-[11px] hidden md:inline shrink-0">
-                {imageSize.width} × {imageSize.height} px
-              </div>
+              {/* 尺寸与大小控制触发入口 */}
+              <button
+                type="button"
+                onClick={() => setIsExportModalOpen(true)}
+                className="group flex items-center gap-1 font-mono text-[11px] px-1.5 py-0.5 rounded bg-stone-200/60 hover:bg-pink-50 border border-stone-200/80 hover:border-pink-300 transition-colors cursor-pointer shrink-0"
+                title="点击控制导出图片大小、分辨率与压缩画质"
+              >
+                <span className="text-stone-600 group-hover:text-pink-600">
+                  {imageSize.width} × {imageSize.height} px
+                </span>
+                {targetDimensions.width > 0 &&
+                  (targetDimensions.width !== imageSize.width ||
+                    targetDimensions.height !== imageSize.height) && (
+                    <span className="text-pink-600 font-bold bg-pink-100/80 px-1 rounded text-[10px]">
+                      → 导出 {targetDimensions.width}×{targetDimensions.height}
+                    </span>
+                  )}
+                <Settings2 className="w-3 h-3 text-stone-400 group-hover:text-pink-600" />
+              </button>
             </div>
 
             {/* 右侧：缩放 + 换图 + 示例测试 */}
@@ -1953,12 +2249,44 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+              {/* 控制尺寸与导出设置按钮 */}
+              <button
+                type="button"
+                onClick={() => setIsExportModalOpen(true)}
+                className="h-6 px-2 rounded-md bg-white hover:bg-pink-50 border border-stone-300 hover:border-pink-300 text-stone-700 hover:text-pink-700 font-bold transition-all shadow-2xs cursor-pointer flex items-center gap-1.5 text-[11px] shrink-0"
+                title="设置导出图片分辨率、尺寸比例与文件大小"
+              >
+                <Scaling className="w-3 h-3 text-pink-600" />
+                <span>尺寸:</span>
+                <span className="font-mono text-pink-700">
+                  {targetDimensions.width || imageSize.width}×{targetDimensions.height || imageSize.height}
+                </span>
+                {exportConfig.mode !== 'original' && (
+                  <span className="px-1 py-0.2 rounded bg-pink-100 text-pink-700 text-[10px] font-bold">
+                    {exportConfig.mode === 'scale'
+                      ? `${exportConfig.scalePercent}%`
+                      : exportConfig.preset === '240'
+                      ? '240表情'
+                      : exportConfig.preset === '512'
+                      ? '512贴纸'
+                      : '自定'}
+                  </span>
+                )}
+                {estimatedFileSize && (
+                  <span className="font-mono text-stone-400 font-normal text-[10px] hidden sm:inline">
+                    ({estimatedFileSize})
+                  </span>
+                )}
+                <Settings2 className="w-3 h-3 text-stone-400 ml-0.5" />
+              </button>
+
               {/* Download Clean Image */}
               <div className="flex items-center rounded-md bg-white border border-stone-300 p-0.5 shadow-2xs text-[11px] h-6 shrink-0">
                 <button
                   type="button"
                   onClick={() => handleDownload('png')}
                   className="px-2 h-5 rounded hover:bg-stone-100 text-stone-700 font-bold transition-colors cursor-pointer flex items-center gap-1"
+                  title={`下载 PNG (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
                 >
                   <Download className="w-3 h-3 text-stone-500" />
                   <span>下载 PNG</span>
@@ -1967,8 +2295,17 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                   type="button"
                   onClick={() => handleDownload('jpeg')}
                   className="px-1.5 h-5 rounded hover:bg-stone-100 text-stone-700 font-medium transition-colors cursor-pointer"
+                  title={`下载 JPG (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
                 >
                   JPG
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsExportModalOpen(true)}
+                  className="px-1 h-5 rounded hover:bg-stone-100 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer border-l border-stone-200 ml-0.5"
+                  title="控制图片大小与画质选项"
+                >
+                  <ChevronDown className="w-3 h-3" />
                 </button>
               </div>
 
@@ -2011,6 +2348,548 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                   <span>送往透明化</span>
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 导出尺寸与画质控制模态框 (Export Size & Quality Control Modal) */}
+      {isExportModalOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-stone-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          onClick={() => setIsExportModalOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl border border-stone-200 shadow-2xl max-w-lg w-full max-h-[92vh] overflow-y-auto text-stone-800 flex flex-col animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100 bg-stone-50/80 rounded-t-2xl">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-pink-100 text-pink-600 flex items-center justify-center shrink-0">
+                  <Scaling className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900">控制导出图片大小与画质</h3>
+                  <p className="text-[11px] text-stone-500">
+                    调整输出像素分辨率宽高、等比例缩放与压缩文件体积
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsExportModalOpen(false)}
+                className="w-7 h-7 rounded-lg hover:bg-stone-200/70 text-stone-400 hover:text-stone-700 flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-5 space-y-5 text-xs">
+              {/* Section 1: 分辨率与尺寸规格 */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold text-stone-900 flex items-center gap-1.5">
+                    <span>1. 导出分辨率与尺寸</span>
+                  </span>
+                  <span className="text-[11px] font-mono text-stone-400">
+                    原图: {imageSize.width} × {imageSize.height} px
+                  </span>
+                </div>
+
+                {/* Preset Chips */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'original',
+                        preset: 'original',
+                        scalePercent: 100,
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'original'
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">原图 100%</div>
+                    <div className="text-[10px] font-mono text-stone-400">
+                      {imageSize.width}×{imageSize.height}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'scale',
+                        scalePercent: 75,
+                        preset: 'custom',
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'scale' && exportConfig.scalePercent === 75
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">缩放 75%</div>
+                    <div className="text-[10px] font-mono text-stone-400">
+                      {Math.round(imageSize.width * 0.75)}×{Math.round(imageSize.height * 0.75)}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'scale',
+                        scalePercent: 50,
+                        preset: 'custom',
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'scale' && exportConfig.scalePercent === 50
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">缩放 50%</div>
+                    <div className="text-[10px] font-mono text-stone-400">
+                      {Math.round(imageSize.width * 0.5)}×{Math.round(imageSize.height * 0.5)}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'preset',
+                        preset: '240',
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer relative overflow-hidden ${
+                      exportConfig.mode === 'preset' && exportConfig.preset === '240'
+                        ? 'border-emerald-500 bg-emerald-50/60 text-emerald-950 font-bold ring-1 ring-emerald-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <span className="absolute top-0 right-0 bg-emerald-600 text-white text-[8px] px-1 rounded-bl">
+                      微信
+                    </span>
+                    <div className="text-[11px]">240×240</div>
+                    <div className="text-[10px] text-emerald-700 font-medium">表情官方规范</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'preset',
+                        preset: '512',
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'preset' && exportConfig.preset === '512'
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">512×512</div>
+                    <div className="text-[10px] text-stone-400">高清贴纸推荐</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'preset',
+                        preset: '750',
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'preset' && exportConfig.preset === '750'
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">宽 750px</div>
+                    <div className="text-[10px] text-stone-400">手机屏幕标准</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'preset',
+                        preset: '1080',
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'preset' && exportConfig.preset === '1080'
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">1080×1080</div>
+                    <div className="text-[10px] text-stone-400">社交高清方图</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        mode: 'custom',
+                        preset: 'custom',
+                        customWidth: targetDimensions.width,
+                        customHeight: targetDimensions.height,
+                      }))
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-left transition-all cursor-pointer ${
+                      exportConfig.mode === 'custom'
+                        ? 'border-pink-500 bg-pink-50/60 text-pink-900 font-bold ring-1 ring-pink-500/20'
+                        : 'border-stone-200 hover:border-stone-300 text-stone-700'
+                    }`}
+                  >
+                    <div className="text-[11px]">自定义宽高</div>
+                    <div className="text-[10px] text-stone-400">自由设定输入</div>
+                  </button>
+                </div>
+
+                {/* Custom Dimension Inputs Row */}
+                <div className="bg-stone-50 rounded-xl p-3 border border-stone-200 flex flex-wrap items-center gap-2.5">
+                  <div className="flex items-center gap-1.5 flex-1 min-w-[120px]">
+                    <span className="text-stone-500 text-[11px] font-bold">宽 (W):</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={targetDimensions.width}
+                      onChange={(e) => handleCustomWidthChange(parseInt(e.target.value) || 1)}
+                      className="w-full bg-white border border-stone-300 rounded px-2 py-1 font-mono text-xs text-stone-900 focus:outline-pink-500"
+                    />
+                    <span className="text-stone-400 text-[10px]">px</span>
+                  </div>
+
+                  {/* Lock Aspect Ratio Toggle */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExportConfig((prev) => ({
+                        ...prev,
+                        lockAspectRatio: !prev.lockAspectRatio,
+                      }))
+                    }
+                    className={`px-2 py-1 rounded border flex items-center gap-1 text-[11px] cursor-pointer transition-colors ${
+                      exportConfig.lockAspectRatio
+                        ? 'bg-pink-50 border-pink-300 text-pink-700 font-bold'
+                        : 'bg-white border-stone-300 text-stone-500 hover:text-stone-700'
+                    }`}
+                    title={exportConfig.lockAspectRatio ? '宽高比已锁定（等比缩放）' : '自由拉伸比例'}
+                  >
+                    {exportConfig.lockAspectRatio ? (
+                      <Link2 className="w-3.5 h-3.5" />
+                    ) : (
+                      <Unlink2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>{exportConfig.lockAspectRatio ? '锁定比例' : '自由比例'}</span>
+                  </button>
+
+                  <div className="flex items-center gap-1.5 flex-1 min-w-[120px]">
+                    <span className="text-stone-500 text-[11px] font-bold">高 (H):</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10000}
+                      value={targetDimensions.height}
+                      onChange={(e) => handleCustomHeightChange(parseInt(e.target.value) || 1)}
+                      className="w-full bg-white border border-stone-300 rounded px-2 py-1 font-mono text-xs text-stone-900 focus:outline-pink-500"
+                    />
+                    <span className="text-stone-400 text-[10px]">px</span>
+                  </div>
+
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={handleSwapDimensions}
+                      className="p-1 rounded bg-white hover:bg-stone-100 border border-stone-300 text-stone-600 text-[10px] flex items-center gap-0.5 cursor-pointer"
+                      title="对调宽高"
+                    >
+                      <ArrowUpDown className="w-3 h-3" />
+                      <span>对调</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetToOriginalSize}
+                      className="px-2 py-1 rounded bg-white hover:bg-stone-100 border border-stone-300 text-stone-600 text-[10px] cursor-pointer"
+                      title="还原为原图宽高"
+                    >
+                      还原原图
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: 格式与体积压缩 */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold text-stone-900">2. 格式与文件体积控制</span>
+                  {estimatedFileSize && (
+                    <span className="text-[11px] font-mono text-pink-700 bg-pink-50 px-1.5 py-0.2 rounded border border-pink-200">
+                      预计体积: ~{estimatedFileSize}
+                    </span>
+                  )}
+                </div>
+
+                {/* Format Radio Tabs */}
+                <div className="grid grid-cols-3 gap-2 mb-3">
+                  {[
+                    {
+                      id: 'png',
+                      name: 'PNG 格式',
+                      desc: '无损高清，支持透明背景（微信表情包首选）',
+                    },
+                    {
+                      id: 'jpeg',
+                      name: 'JPG 格式',
+                      desc: '文件体积最小，画质可调节，不支持透明底',
+                    },
+                    {
+                      id: 'webp',
+                      name: 'WEBP 格式',
+                      desc: '新一代高效格式，支持透明底且体积超小',
+                    },
+                  ].map((fmt) => (
+                    <button
+                      key={fmt.id}
+                      type="button"
+                      onClick={() =>
+                        setExportConfig((prev) => ({
+                          ...prev,
+                          format: fmt.id as any,
+                        }))
+                      }
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        exportConfig.format === fmt.id
+                          ? 'border-pink-500 bg-pink-50/60 ring-1 ring-pink-500/20'
+                          : 'border-stone-200 hover:border-stone-300 bg-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span
+                          className={`font-bold text-xs ${
+                            exportConfig.format === fmt.id ? 'text-pink-900' : 'text-stone-800'
+                          }`}
+                        >
+                          {fmt.name}
+                        </span>
+                        {exportConfig.format === fmt.id && (
+                          <Check className="w-3.5 h-3.5 text-pink-600" />
+                        )}
+                      </div>
+                      <p className="text-[10px] text-stone-500 mt-1 leading-relaxed">
+                        {fmt.desc}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Quality Slider (for JPG or WEBP) */}
+                {(exportConfig.format === 'jpeg' || exportConfig.format === 'webp') && (
+                  <div className="bg-stone-50 rounded-xl p-3 border border-stone-200 space-y-2 mb-3">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-bold text-stone-700">压缩画质 (Quality):</span>
+                      <span className="font-mono font-bold text-pink-700">
+                        {Math.round(exportConfig.quality * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.4}
+                      max={1.0}
+                      step={0.02}
+                      value={exportConfig.quality}
+                      onChange={(e) =>
+                        setExportConfig((prev) => ({
+                          ...prev,
+                          quality: parseFloat(e.target.value),
+                        }))
+                      }
+                      className="w-full accent-pink-600 cursor-pointer"
+                    />
+                    <div className="flex items-center justify-between text-[10px] text-stone-400">
+                      <span>更小体积 (40%)</span>
+                      <div className="flex gap-1.5">
+                        {[
+                          { q: 0.7, label: '70% 紧凑' },
+                          { q: 0.85, label: '85% 推荐' },
+                          { q: 0.95, label: '95% 超清' },
+                        ].map((item) => (
+                          <button
+                            key={item.q}
+                            type="button"
+                            onClick={() =>
+                              setExportConfig((prev) => ({ ...prev, quality: item.q }))
+                            }
+                            className="px-1.5 py-0.5 rounded bg-white hover:bg-stone-200 border border-stone-200 text-stone-600 transition-colors"
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                      <span>极佳画质 (100%)</span>
+                    </div>
+
+                    {/* JPEG Background Color if canvas has transparent areas */}
+                    {exportConfig.format === 'jpeg' && (
+                      <div className="pt-2 border-t border-stone-200 flex items-center justify-between text-[11px]">
+                        <span className="text-stone-600">JPG透明底填充色:</span>
+                        <div className="flex items-center gap-1.5">
+                          {[
+                            { color: '#ffffff', label: '纯白底' },
+                            { color: '#f8fafc', label: '浅灰底' },
+                            { color: '#000000', label: '纯黑底' },
+                          ].map((item) => (
+                            <button
+                              key={item.color}
+                              type="button"
+                              onClick={() =>
+                                setExportConfig((prev) => ({
+                                  ...prev,
+                                  fillBgForJpeg: item.color,
+                                }))
+                              }
+                              className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer flex items-center gap-1 ${
+                                exportConfig.fillBgForJpeg === item.color
+                                  ? 'border-pink-500 bg-white font-bold text-pink-700'
+                                  : 'border-stone-200 bg-stone-100 text-stone-600'
+                              }`}
+                            >
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-stone-300"
+                                style={{ backgroundColor: item.color }}
+                              />
+                              <span>{item.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* WeChat Sticker 500KB Compliance Banner */}
+                <div
+                  className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
+                    estimatedFileSize && estimatedFileSize.includes('MB')
+                      ? 'bg-amber-50/70 border-amber-200 text-amber-900'
+                      : 'bg-emerald-50/60 border-emerald-200 text-emerald-950'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck
+                      className={`w-4 h-4 shrink-0 ${
+                        estimatedFileSize && estimatedFileSize.includes('MB')
+                          ? 'text-amber-600'
+                          : 'text-emerald-600'
+                      }`}
+                    />
+                    <div className="text-[11px] leading-tight">
+                      <span className="font-bold">微信静态表情平台规范：</span>
+                      <span>单张图片需 ≤ 500KB，推荐 240×240 px</span>
+                    </div>
+                  </div>
+                  {estimatedFileSize && estimatedFileSize.includes('MB') ? (
+                    <span className="px-2 py-0.5 rounded bg-amber-200/70 text-amber-800 text-[10px] font-bold shrink-0">
+                      ⚠️ 超过 500KB，建议下调分辨率
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded bg-emerald-200/70 text-emerald-800 text-[10px] font-bold shrink-0">
+                      ✓ 符合规范要求
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Section 3: 规格摘要卡片 */}
+              <div className="bg-stone-100/70 rounded-xl p-3 border border-stone-200/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                <div>
+                  <div className="text-[10px] text-stone-400">输出分辨率</div>
+                  <div className="font-mono font-bold text-stone-900 text-xs mt-0.5">
+                    {targetDimensions.width} × {targetDimensions.height}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-stone-400">等比缩放率</div>
+                  <div className="font-mono font-bold text-stone-900 text-xs mt-0.5">
+                    {imageSize.width > 0
+                      ? `${Math.round((targetDimensions.width / imageSize.width) * 100)}%`
+                      : '100%'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-stone-400">目标格式</div>
+                  <div className="font-mono font-bold text-pink-700 text-xs mt-0.5">
+                    {exportConfig.format.toUpperCase()}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-stone-400">预估文件大小</div>
+                  <div className="font-mono font-bold text-emerald-700 text-xs mt-0.5">
+                    {estimatedFileSize || '计算中...'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex items-center justify-between px-5 py-3.5 border-t border-stone-100 bg-stone-50/80 rounded-b-2xl">
+              <button
+                type="button"
+                onClick={() => setIsExportModalOpen(false)}
+                className="px-3 py-1.5 rounded-lg border border-stone-300 text-stone-600 hover:bg-stone-200/60 font-medium text-xs transition-colors cursor-pointer"
+              >
+                关闭
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDownload('png')}
+                  className="px-3 py-1.5 rounded-lg bg-stone-200/80 hover:bg-stone-300/80 text-stone-700 font-bold text-xs transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>下载 PNG</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownload('jpeg')}
+                  className="px-3 py-1.5 rounded-lg bg-stone-200/80 hover:bg-stone-300/80 text-stone-700 font-bold text-xs transition-colors cursor-pointer"
+                >
+                  下载 JPG
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownload()}
+                  className="px-4 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-700 text-white font-bold text-xs shadow-sm hover:shadow transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  <span>
+                    立即下载当前规格 ({targetDimensions.width}×{targetDimensions.height})
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

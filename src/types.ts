@@ -240,3 +240,46 @@ export interface RetouchOptions {
   whiteOutlinePreview?: boolean;// 微信 2px 白描边实时叠加预览
 }
 
+// -----------------------------------------------------------------
+// ID Photo (证件照) Types
+// -----------------------------------------------------------------
+export type IdPhotoPresetKey =
+  | '1-inch'       // 标准 1 寸 (25x35mm -> 295x413px @ 300DPI)
+  | 'small-1-inch' // 小 1 寸 (22x32mm -> 260x378px @ 300DPI)
+  | 'large-1-inch' // 大 1 寸 (33x48mm -> 390x567px @ 300DPI)
+  | '2-inch'       // 标准 2 寸 (35x49mm -> 413x579px @ 300DPI)
+  | 'small-2-inch' // 小 2 寸 / 护照 (35x45mm -> 413x531px @ 300DPI)
+  | 'large-2-inch' // 大 2 寸 (35x53mm -> 413x626px @ 300DPI)
+  | 'gwy'          // 国家公务员报名 (35x45mm, <20KB / <50KB)
+  | 'ky'           // 全国研究生入学考试 (480x640px)
+  | 'cet'          // 英语四六级考试 (240x320px)
+  | 'teacher'      // 教师资格证 (295x413px, <200KB)
+  | 'driver'       // 机动车驾驶证 (22x32mm -> 260x378px)
+  | 'custom';      // 自定义尺寸
+
+export interface IdPhotoPresetSpec {
+  key: IdPhotoPresetKey;
+  name: string;
+  category: 'common' | 'exam' | 'visa' | 'custom';
+  widthMm: number;
+  heightMm: number;
+  widthPx: number;
+  heightPx: number;
+  dpi: number;
+  description: string;
+  recommendedSizeKb?: number;
+}
+
+export type IdPhotoBgType = 'transparent' | 'color' | 'gradient';
+
+export interface IdPhotoState {
+  file: File | null;
+  originalUrl: string | null;
+  transparentUrl: string | null;
+  transparentBlob: Blob | null;
+  transparentImageData: ImageData | null;
+  isMatting: boolean;
+  mattingProgress: number;
+  mattingMessage: string;
+}
+

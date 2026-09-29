@@ -22,6 +22,7 @@ import {
   ArrowRight,
   RefreshCw,
   Image as ImageIcon,
+  UserCheck,
 } from 'lucide-react';
 import {
   GifItem,
@@ -52,6 +53,7 @@ import { GridImageSlicerControls } from './components/WeChatSuite/GridImageSlice
 import { StickerGridResults } from './components/WeChatSuite/StickerGridResults';
 import { MaterialsManager } from './components/WeChatSuite/MaterialsManager';
 import { ImageRetouchWorkspace } from './components/WeChatSuite/ImageRetouchWorkspace';
+import { IdPhotoMaker } from './components/IdPhoto/IdPhotoMaker';
 import { sliceVideoIntoStickers } from './utils/videoGridSlicer';
 import { sliceImageIntoStickers } from './utils/imageGridSlicer';
 import {
@@ -64,8 +66,8 @@ import {
 } from './utils/materialGenerator';
 
 export default function App() {
-  // Navigation state: Static Slicer, Dynamic Slicer, Consolidated Transparency & Retouch Tool
-  const [activeTab, setActiveTab] = useState<'suite_image' | 'suite_video' | 'transparency'>('suite_image');
+  // Navigation state: Static Slicer, Dynamic Slicer, Consolidated Transparency & Retouch Tool, and ID Photo Maker
+  const [activeTab, setActiveTab] = useState<'suite_image' | 'suite_video' | 'transparency' | 'id_photo'>('suite_image');
   const [transparencySubView, setTransparencySubView] = useState<'batch' | 'retouch'>('batch');
 
   // Retouch & Watermark Workspace State
@@ -1383,14 +1385,14 @@ export default function App() {
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-base font-bold text-stone-900 leading-tight">
-                    微信表情包一站式切片与全套审核物料生成器
+                    微信表情包与智能证件照多功能制作套件
                   </h1>
                   <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                    6大物料自动生成 • 100%合规
+                    表情审核物料 • 1/2寸证件照换底 • 100%本地安全
                   </span>
                 </div>
                 <p className="text-xs text-stone-500">
-                  多宫格视频切片 ➔ 240×240 GIF (&lt;500KB) ➔ 横幅/封面/图标/引导/致谢 ➔ 一键 ZIP 打包
+                  静态/动图多宫格切片 ➔ 240×240 表情 ➔ 官方物料打包 | AI 智能证件照 ➔ 1寸/2寸 ➔ 自动抠图换红蓝白底 ➔ 6寸排版冲印
                 </p>
               </div>
             </div>
@@ -1463,6 +1465,22 @@ export default function App() {
                 {retouchImageFile && (
                   <span className="w-2 h-2 rounded-full bg-pink-500 animate-pulse" title="画板有正在编辑的图片" />
                 )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('id_photo')}
+                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'id_photo'
+                    ? 'border-blue-600 text-blue-700'
+                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                }`}
+              >
+                <UserCheck className="w-4 h-4" />
+                <span>证件照制作 (1寸/2寸·AI抠图换底)</span>
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800">
+                  全新功能
+                </span>
               </button>
             </div>
 
@@ -1910,6 +1928,16 @@ export default function App() {
               </div>
             )}
           </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 4: 证件照制作 (AI ID Photo Maker & Background Replacer) */}
+        {/* ======================================================== */}
+        {activeTab === 'id_photo' && (
+          <IdPhotoMaker
+            onSendToRetouch={handleSendMediaFileToRetouch}
+            onNotification={showNotification}
+          />
         )}
       </main>
 

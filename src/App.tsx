@@ -33,6 +33,8 @@ import {
   WeChatMaterialsState,
   BannerOptions,
   IconOptions,
+  ProcessedGifResult,
+  FrameInfo,
 } from './types';
 import {
   decodeMediaFile,
@@ -156,6 +158,7 @@ export default function App() {
   // Tab 3: Batch Transparency Tool State
   const [items, setItems] = useState<GifItem[]>([]);
   const [previewBg, setPreviewBg] = useState<PreviewBgMode>('checker');
+  const [cardLayout, setCardLayout] = useState<'split' | 'grid'>('split');
   const [isProcessingAny, setIsProcessingAny] = useState(false);
   const [globalNotification, setGlobalNotification] = useState<string | null>(null);
 
@@ -885,6 +888,33 @@ export default function App() {
     );
   }, []);
 
+  const handleCompleteAiMatting = useCallback(
+    (
+      id: string,
+      result: ProcessedGifResult,
+      aiFrames: FrameInfo[],
+      updatedOptions: RemovalOptions
+    ) => {
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                options: updatedOptions,
+                status: 'done',
+                progress: 100,
+                statusMessage: 'AI 抠图完成',
+                aiTransparentFrames: aiFrames,
+                result,
+              }
+            : item
+        )
+      );
+      showNotification('✨ AI 智能一键抠图完成！透明结果已就绪，可直接下载！');
+    },
+    []
+  );
+
   const handleProcessItem = useCallback(async (id: string, asWeChat?: boolean) => {
     const currentItem = items.find((i) => i.id === id);
     if (!currentItem) return;
@@ -925,6 +955,13 @@ export default function App() {
     );
 
     try {
+      const framesForProcessing =
+        targetOptions.removalMethod === 'ai' &&
+        currentItem.aiTransparentFrames &&
+        currentItem.aiTransparentFrames.length > 0
+          ? currentItem.aiTransparentFrames
+          : currentItem.cachedFrames;
+
       const result = await processMediaItem(
         currentItem.file,
         targetOptions,
@@ -936,7 +973,7 @@ export default function App() {
           );
         },
         currentItem.cachedBuffer,
-        currentItem.cachedFrames
+        framesForProcessing
       );
 
       setItems((prev) =>
@@ -1022,6 +1059,13 @@ export default function App() {
       );
 
       try {
+        const framesForProcessing =
+          targetOptions.removalMethod === 'ai' &&
+          item.aiTransparentFrames &&
+          item.aiTransparentFrames.length > 0
+            ? item.aiTransparentFrames
+            : item.cachedFrames;
+
         const result = await processMediaItem(
           item.file,
           targetOptions,
@@ -1035,7 +1079,7 @@ export default function App() {
             );
           },
           item.cachedBuffer,
-          item.cachedFrames
+          framesForProcessing
         );
 
         setItems((prev) =>
@@ -1796,9 +1840,17 @@ export default function App() {
                       onApplyGlobalOptions={handleApplyGlobalOptions}
                       previewBg={previewBg}
                       onPreviewBgChange={setPreviewBg}
+                      cardLayout={cardLayout}
+                      onCardLayoutChange={setCardLayout}
                     />
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <div
+                      className={
+                        cardLayout === 'split'
+                          ? 'grid grid-cols-1 gap-6 max-w-5xl mx-auto'
+                          : 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6'
+                      }
+                    >
                       {items.map((item) => (
                         <GifCard
                           key={item.id}
@@ -1808,6 +1860,7 @@ export default function App() {
                           onProcessItem={handleProcessItem}
                           onDeleteItem={handleDeleteItem}
                           onSendToRetouch={(file) => handleSendMediaFileToRetouch(file, item.id)}
+                          onCompleteAiMatting={handleCompleteAiMatting}
                         />
                       ))}
                     </div>

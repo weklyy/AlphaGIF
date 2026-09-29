@@ -37,6 +37,9 @@ import {
   Unlock,
   CheckCheck,
   Square,
+  X,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import { GridConfig, GridPreset, GridCropArea, CellOverride, SlicerLayoutMode } from '../../types';
 import {
@@ -105,6 +108,8 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
   const [inspectCellIndex, setInspectCellIndex] = useState<number>(0);
   const [inspectViewMode, setInspectViewMode] = useState<'processed' | 'original' | 'split'>('processed');
   const [isPickingColor, setIsPickingColor] = useState(false);
+  const [hoverPickedColor, setHoverPickedColor] = useState<string | null>(null);
+  const [isMultiColorMode, setIsMultiColorMode] = useState<boolean>(true);
   const [cellStats, setCellStats] = useState<{
     transparentPercent: number;
     health: 'good' | 'low' | 'high';
@@ -856,6 +861,43 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     }
   };
 
+  // Active background colors list (always at least 1 color)
+  const activeBgColors = Array.isArray(config.bgColors) && config.bgColors.length > 0
+    ? config.bgColors
+    : [config.bgColor || '#ffffff'];
+
+  const addPickedColor = (newHex: string) => {
+    const hex = newHex.toLowerCase();
+    const current = activeBgColors.map((c) => c.toLowerCase());
+    const updated = current.includes(hex) ? activeBgColors : [...activeBgColors, newHex];
+    onConfigChange({
+      ...config,
+      autoTransparent: true,
+      bgColor: newHex,
+      bgColors: updated,
+    });
+  };
+
+  const removePickedColor = (targetHex: string) => {
+    const hex = targetHex.toLowerCase();
+    const current = activeBgColors.map((c) => c.toLowerCase());
+    const remaining = activeBgColors.filter((_, idx) => current[idx] !== hex);
+    const nextList = remaining.length > 0 ? remaining : ['#ffffff'];
+    onConfigChange({
+      ...config,
+      bgColor: nextList[0],
+      bgColors: nextList,
+    });
+  };
+
+  const clearPickedColors = () => {
+    onConfigChange({
+      ...config,
+      bgColor: '#ffffff',
+      bgColors: ['#ffffff'],
+    });
+  };
+
   const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isPickingColor || !videoContainerRef.current || !videoRef.current) return;
     const rect = videoContainerRef.current.getBoundingClientRect();
@@ -885,10 +927,56 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
         );
         const p = ctx.getImageData(0, 0, 1, 1).data;
         const sampledColor = rgbToHex(p[0], p[1], p[2]);
-        onConfigChange({ ...config, autoTransparent: true, bgColor: sampledColor });
+
+        if (isMultiColorMode) {
+          addPickedColor(sampledColor);
+          setAutoAlignToast({
+            message: `已吸取底色 ${sampledColor}！可继续点击不同区域加选，或点击“完成吸色”`,
+            type: 'success',
+          });
+        } else {
+          onConfigChange({
+            ...config,
+            autoTransparent: true,
+            bgColor: sampledColor,
+            bgColors: [sampledColor],
+          });
+          setIsPickingColor(false);
+        }
       }
     }
-    setIsPickingColor(false);
+  };
+
+  const handleContainerMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isPickingColor || !videoContainerRef.current || !videoRef.current) return;
+    const rect = videoContainerRef.current.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    const normX = Math.max(0, Math.min(1, clickX / rect.width));
+    const normY = Math.max(0, Math.min(1, clickY / rect.height));
+
+    const video = videoRef.current;
+    if (video.videoWidth && video.videoHeight) {
+      const sampleCanvas = document.createElement('canvas');
+      sampleCanvas.width = 1;
+      sampleCanvas.height = 1;
+      const ctx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.drawImage(
+          video,
+          normX * video.videoWidth,
+          normY * video.videoHeight,
+          1,
+          1,
+          0,
+          0,
+          1,
+          1
+        );
+        const p = ctx.getImageData(0, 0, 1, 1).data;
+        setHoverPickedColor(rgbToHex(p[0], p[1], p[2]));
+      }
+    }
   };
 
   // Real-time video frame matting renderer
@@ -937,6 +1025,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
         const processed = removeBackgroundFromFrame(rawData, {
           targetColor: config.bgColor || '#ffffff',
+          targetColors: activeBgColors,
           tolerance: config.tolerance || 20,
           contiguous: false,
           defringe: 1,
@@ -1023,6 +1112,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
           if (config.autoTransparent) {
             const cellProcessed = removeBackgroundFromFrame(cellRawData, {
               targetColor: config.bgColor || '#ffffff',
+              targetColors: activeBgColors,
               tolerance: config.tolerance || 20,
               contiguous: false,
               defringe: 1,
@@ -2101,6 +2191,8 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
             <div
               ref={videoContainerRef}
               onClick={handleContainerClick}
+              onMouseMove={handleContainerMouseMove}
+              onMouseLeave={() => setHoverPickedColor(null)}
               className={`relative bg-stone-950 rounded-xl overflow-hidden shadow-inner flex items-center justify-center select-none transition-transform duration-100 origin-center ${
                 isPickingColor ? 'cursor-crosshair ring-2 ring-amber-400' : ''
               } ${isFullscreen ? 'shadow-2xl border border-white/20' : 'w-full'}`}
@@ -2134,9 +2226,34 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               </button>
             {/* Pipette Color Picker Floating Tip */}
             {isPickingColor && (
-              <div className="absolute top-2 left-1/2 -translate-x-1/2 z-40 bg-amber-500 text-stone-950 px-3 py-1 rounded-full text-xs font-bold shadow-lg flex items-center gap-1.5 pointer-events-none animate-bounce">
-                <Pipette className="w-3.5 h-3.5" />
-                <span>请在视频画面中点击任意处吸取背景底色</span>
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-stone-900/95 text-white border border-amber-400 px-3.5 py-1.5 rounded-full text-xs font-semibold shadow-2xl flex items-center gap-2.5 backdrop-blur-xs animate-in fade-in">
+                <div className="flex items-center gap-1.5 text-amber-400">
+                  <Pipette className="w-4 h-4 animate-pulse" />
+                  <span>视频吸色中 (已同时选中 {activeBgColors.length} 处底色)</span>
+                </div>
+                {hoverPickedColor && (
+                  <div className="flex items-center gap-1 pl-2 border-l border-white/20">
+                    <span
+                      className="w-3.5 h-3.5 rounded-full border border-white/70 inline-block shadow-2xs shrink-0"
+                      style={{ backgroundColor: hoverPickedColor }}
+                    />
+                    <span className="font-mono text-[11px] text-amber-300 font-bold">{hoverPickedColor}</span>
+                  </div>
+                )}
+                <span className="text-stone-300 text-[11px] hidden sm:inline">
+                  可连续点击不同角落或阴影区域同时透明化
+                </span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsPickingColor(false);
+                    setHoverPickedColor(null);
+                  }}
+                  className="px-2.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors cursor-pointer shadow-xs pointer-events-auto ml-1"
+                >
+                  完成吸色
+                </button>
               </div>
             )}
 
@@ -3711,47 +3828,99 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
               {config.autoTransparent && (
                 <div className="space-y-3 pl-1">
-                  {/* Background Color Picker & Eyedropper */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-stone-600">
-                      <span>目标底色 (Keying Color):</span>
-                      <span className="font-mono text-xs font-bold text-stone-800">{config.bgColor.toUpperCase()}</span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <div className="relative flex items-center gap-1.5 p-1 bg-white border border-stone-200 rounded-lg shadow-2xs">
-                        <input
-                          type="color"
-                          value={config.bgColor}
-                          onChange={(e) => onConfigChange({ ...config, bgColor: e.target.value })}
-                          className="w-7 h-7 rounded cursor-pointer border-0 p-0 bg-transparent"
-                        />
-                        <input
-                          type="text"
-                          value={config.bgColor}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            if (val.startsWith('#') && (val.length === 4 || val.length === 7)) {
-                              onConfigChange({ ...config, bgColor: val });
-                            }
-                          }}
-                          className="w-16 text-xs font-mono font-bold px-1 py-0.5 border border-stone-200 rounded text-center uppercase"
-                        />
+                  {/* Background Color Picker & Eyedropper & Multi-Selection */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-stone-700 font-semibold">目标底色:</span>
+                        <span className="text-[10px] text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded font-bold border border-emerald-200">
+                          {activeBgColors.length > 1 ? `已同时选中 ${activeBgColors.length} 处` : '单处'}
+                        </span>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={handleEyeDropper}
-                        className={`flex-1 py-1.5 px-2.5 text-xs font-medium rounded-lg border transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                          isPickingColor
-                            ? 'bg-amber-500 text-stone-950 border-amber-600 shadow-xs ring-2 ring-amber-400 font-bold'
-                            : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-200 shadow-2xs'
-                        }`}
-                        title="点击后在视频画面中吸取底色"
-                      >
-                        <Pipette className="w-3.5 h-3.5 text-amber-600" />
-                        <span>{isPickingColor ? '请点击视频取色' : '画面吸色'}</span>
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleEyeDropper}
+                          className={`py-1 px-2.5 text-xs font-medium rounded-lg border transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                            isPickingColor
+                              ? 'bg-amber-500 text-stone-950 border-amber-600 shadow-xs ring-2 ring-amber-400 font-bold animate-pulse'
+                              : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300 shadow-2xs font-semibold'
+                          }`}
+                          title="点击后在视频画面中连续点击吸取多处底色"
+                        >
+                          <Pipette className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>{isPickingColor ? '吸色中 (点击画面加选)' : '画面吸色'}</span>
+                        </button>
+
+                        {activeBgColors.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={clearPickedColors}
+                            className="px-1.5 py-1 rounded text-[11px] border border-stone-200 hover:bg-stone-100 text-stone-500 hover:text-red-600 transition-colors cursor-pointer flex items-center gap-0.5"
+                            title="清空所选多重底色，恢复默认"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>重置</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Active Selected Colors Chips */}
+                    <div className="p-2 bg-stone-50/80 rounded-lg border border-stone-200/90 space-y-1.5">
+                      <div className="flex items-center justify-between text-[10px] text-stone-500">
+                        <span className="flex items-center gap-1">
+                          <span>已选扣除底色</span>
+                          <span className="text-emerald-700 font-medium">（支持多处不同底色同时透明）</span>
+                        </span>
+                        <label className="flex items-center gap-1 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={isMultiColorMode}
+                            onChange={(e) => setIsMultiColorMode(e.target.checked)}
+                            className="w-3 h-3 rounded text-emerald-600 accent-[#07c160] cursor-pointer"
+                          />
+                          <span className="text-[10px] font-medium text-stone-700">同时多选加选</span>
+                        </label>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {activeBgColors.map((color, idx) => (
+                          <div
+                            key={`${color}-${idx}`}
+                            className="inline-flex items-center gap-1.5 bg-white border border-stone-300 px-2 py-0.5 rounded-md text-xs font-mono shadow-2xs group hover:border-emerald-400 transition-all"
+                          >
+                            <span
+                              className="w-3 h-3 rounded-full border border-stone-400 shadow-2xs shrink-0"
+                              style={{ backgroundColor: color }}
+                            />
+                            <span className="text-stone-800 font-bold uppercase text-[11px]">{color}</span>
+                            {activeBgColors.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => removePickedColor(color)}
+                                className="text-stone-400 hover:text-red-600 hover:bg-red-50 rounded p-0.5 transition-colors cursor-pointer"
+                                title="移除此色"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+
+                        {/* Manual Add Color Input Swatch */}
+                        <div className="inline-flex items-center gap-1 bg-white border border-dashed border-stone-300 px-1.5 py-0.5 rounded-md text-xs hover:border-emerald-500 transition-colors">
+                          <input
+                            type="color"
+                            value={config.bgColor || '#ffffff'}
+                            onChange={(e) => addPickedColor(e.target.value)}
+                            className="w-4 h-4 rounded border-0 p-0 cursor-pointer bg-transparent"
+                            title="选择新底色加入"
+                          />
+                          <span className="text-[10px] text-stone-500">+ 手动选色</span>
+                        </div>
+                      </div>
                     </div>
 
                     {/* Quick Preset Colors */}
@@ -3763,24 +3932,40 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                         { label: '纯黑', color: '#000000' },
                         { label: '绿幕', color: '#00ff00' },
                         { label: '蓝幕', color: '#0000ff' },
-                      ].map((preset) => (
-                        <button
-                          key={preset.color}
-                          type="button"
-                          onClick={() => onConfigChange({ ...config, bgColor: preset.color })}
-                          className={`px-1.5 py-0.5 text-[10px] rounded border flex items-center gap-1 transition-all cursor-pointer ${
-                            config.bgColor.toLowerCase() === preset.color.toLowerCase()
-                              ? 'bg-emerald-50 border-emerald-500 text-emerald-800 font-bold'
-                              : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
-                          }`}
-                        >
-                          <span
-                            className="w-2 h-2 rounded-full border border-stone-300"
-                            style={{ backgroundColor: preset.color }}
-                          />
-                          <span>{preset.label}</span>
-                        </button>
-                      ))}
+                      ].map((preset) => {
+                        const isIncluded = activeBgColors.some(
+                          (ac) => ac.toLowerCase() === preset.color.toLowerCase()
+                        );
+                        return (
+                          <button
+                            key={preset.color}
+                            type="button"
+                            onClick={() => {
+                              if (isMultiColorMode) {
+                                addPickedColor(preset.color);
+                              } else {
+                                onConfigChange({
+                                  ...config,
+                                  bgColor: preset.color,
+                                  bgColors: [preset.color],
+                                });
+                              }
+                            }}
+                            className={`px-1.5 py-0.5 text-[10px] rounded border flex items-center gap-1 transition-all cursor-pointer ${
+                              isIncluded
+                                ? 'bg-emerald-50 border-emerald-500 text-emerald-800 font-bold ring-1 ring-emerald-300'
+                                : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
+                            }`}
+                          >
+                            <span
+                              className="w-2 h-2 rounded-full border border-stone-300"
+                              style={{ backgroundColor: preset.color }}
+                            />
+                            <span>{preset.label}</span>
+                            {isIncluded && <span className="text-[9px] text-emerald-600">✓</span>}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 

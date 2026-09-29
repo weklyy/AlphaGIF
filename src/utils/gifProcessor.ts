@@ -8,6 +8,7 @@ import {
   CompressionOptions,
   CompressionPreset,
 } from '../types';
+import { removeBackgroundWithAI } from './aiBackgroundRemoval';
 
 export const DEFAULT_COMPRESSION_OPTIONS: CompressionOptions = {
   enabled: true,
@@ -29,6 +30,16 @@ export const COMPRESSION_PRESETS: {
   frameStep: number;
   autoCompressUnderLimit: boolean;
 }[] = [
+  {
+    id: 'original',
+    name: '原图 (不压缩)',
+    desc: '保持原始完整画质，不进行颜色量化和缩放压缩',
+    targetSizeKb: 5000,
+    maxColors: 256,
+    scaleRatio: 1.0,
+    frameStep: 1,
+    autoCompressUnderLimit: false,
+  },
   {
     id: 'wechat-auto',
     name: '微信平台智能适配 (推荐)',
@@ -580,14 +591,56 @@ export function removeBackgroundFromFrame(
   imageData: ImageData,
   options: RemovalOptions
 ): ImageData {
-  const { targetColor, tolerance, contiguous, defringe } = options;
+  const {
+    targetColor,
+    targetColors,
+    tolerance,
+    contiguous,
+    defringe,
+    edgeBarrier = true,
+    edgeThreshold = 20,
+    protectTorsoBottom = true,
+  } = options;
   const width = imageData.width;
   const height = imageData.height;
   const totalPixels = width * height;
 
-  const target = hexToRgb(targetColor);
+  // Collect all unique target colors
+  const rawColors: string[] = [];
+  if (Array.isArray(targetColors) && targetColors.length > 0) {
+    for (const c of targetColors) {
+      if (c && typeof c === 'string') {
+        const trimmed = c.trim().toLowerCase();
+        if (trimmed && !rawColors.includes(trimmed)) {
+          rawColors.push(trimmed);
+        }
+      }
+    }
+  }
+  if (targetColor && typeof targetColor === 'string') {
+    const trimmed = targetColor.trim().toLowerCase();
+    if (trimmed && !rawColors.includes(trimmed)) {
+      rawColors.unshift(trimmed);
+    }
+  }
+  if (rawColors.length === 0) {
+    rawColors.push('#ffffff');
+  }
+
+  const targets = rawColors.map((hex) => hexToRgb(hex));
   // Maximum possible distance in RGB space is ~441.67
   const maxThreshold = (Math.max(0, Math.min(100, tolerance)) / 100) * 441.67;
+
+  // Helper: check if a pixel matches ANY of the target background colors
+  const isColorMatch = (r: number, g: number, b: number, multiplier = 1.0): boolean => {
+    const threshold = maxThreshold * multiplier;
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const dist = colorDistance(r, g, b, t.r, t.g, t.b);
+      if (dist <= threshold) return true;
+    }
+    return false;
+  };
 
   // Clone original image data
   const resultData = new ImageData(
@@ -601,14 +654,20 @@ export function removeBackgroundFromFrame(
   const isBackground = new Uint8Array(totalPixels);
 
   if (contiguous) {
-    // Flood fill starting from all 4 borders
+    // Precompute luminance array for fast edge contrast boundary checks
+    const luminance = new Float32Array(totalPixels);
+    for (let i = 0; i < totalPixels; i++) {
+      const p = i * 4;
+      luminance[i] = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
+    }
+
+    // Flood fill starting from the outer borders
     const queue: number[] = [];
     const visited = new Uint8Array(totalPixels);
 
-    const checkAndQueue = (x: number, y: number) => {
+    const checkAndQueue = (x: number, y: number, fromIdx?: number) => {
       const idx = y * width + x;
       if (visited[idx]) return;
-      visited[idx] = 1;
 
       const p = idx * 4;
       const r = data[p];
@@ -618,27 +677,57 @@ export function removeBackgroundFromFrame(
 
       if (a < 64) {
         // already transparent
+        visited[idx] = 1;
         isBackground[idx] = 1;
         queue.push(idx);
         return;
       }
 
-      const dist = colorDistance(r, g, b, target.r, target.g, target.b);
-      if (dist <= maxThreshold) {
+      // Edge barrier check: High contrast boundary blocks flood traversal into clothing/hair
+      if (edgeBarrier && fromIdx !== undefined) {
+        const lumDelta = Math.abs(luminance[fromIdx] - luminance[idx]);
+        // If there is a sharp contrast edge between pixels, block traversal!
+        if (lumDelta > edgeThreshold * 2.2) {
+          return;
+        }
+      }
+
+      if (isColorMatch(r, g, b)) {
+        visited[idx] = 1;
         isBackground[idx] = 1;
         queue.push(idx);
       }
     };
 
-    // Push top & bottom borders
+    // Push top border (always background candidate)
     for (let x = 0; x < width; x++) {
       checkAndQueue(x, 0);
-      checkAndQueue(x, height - 1);
     }
+
     // Push left & right borders
     for (let y = 0; y < height; y++) {
       checkAndQueue(0, y);
       checkAndQueue(width - 1, y);
+    }
+
+    // Bottom border: Protect torso/clothing if enabled
+    const bottomMidStart = Math.floor(width * 0.2);
+    const bottomMidEnd = Math.floor(width * 0.8);
+    for (let x = 0; x < width; x++) {
+      // In portrait photos, bottom center is the torso/clothing.
+      // If protectTorsoBottom is true, be very conservative on bottom center seeds
+      if (protectTorsoBottom && x >= bottomMidStart && x <= bottomMidEnd) {
+        const p = ((height - 1) * width + x) * 4;
+        const r = data[p];
+        const g = data[p + 1];
+        const b = data[p + 2];
+        // Only seed if it very closely matches target (tight tolerance * 0.6)
+        if (isColorMatch(r, g, b, 0.6)) {
+          checkAndQueue(x, height - 1);
+        }
+      } else {
+        checkAndQueue(x, height - 1);
+      }
     }
 
     // BFS Queue processing
@@ -648,14 +737,14 @@ export function removeBackgroundFromFrame(
       const cx = curr % width;
       const cy = Math.floor(curr / width);
 
-      // 4-way neighbors
-      if (cx > 0) checkAndQueue(cx - 1, cy);
-      if (cx < width - 1) checkAndQueue(cx + 1, cy);
-      if (cy > 0) checkAndQueue(cx, cy - 1);
-      if (cy < height - 1) checkAndQueue(cx, cy + 1);
+      // 4-way neighbors with fromIdx barrier check
+      if (cx > 0) checkAndQueue(cx - 1, cy, curr);
+      if (cx < width - 1) checkAndQueue(cx + 1, cy, curr);
+      if (cy > 0) checkAndQueue(cx, cy - 1, curr);
+      if (cy < height - 1) checkAndQueue(cx, cy + 1, curr);
     }
   } else {
-    // Global removal: any pixel within tolerance is removed
+    // Global removal: any pixel matching ANY of the target colors within tolerance is removed
     for (let i = 0; i < totalPixels; i++) {
       const p = i * 4;
       const r = data[p];
@@ -668,8 +757,7 @@ export function removeBackgroundFromFrame(
         continue;
       }
 
-      const dist = colorDistance(r, g, b, target.r, target.g, target.b);
-      if (dist <= maxThreshold) {
+      if (isColorMatch(r, g, b)) {
         isBackground[i] = 1;
       }
     }
@@ -695,9 +783,8 @@ export function removeBackgroundFromFrame(
               const r = data[p];
               const g = data[p + 1];
               const b = data[p + 2];
-              // If pixel is somewhat close to target color (within 1.5x tolerance), erode it
-              const dist = colorDistance(r, g, b, target.r, target.g, target.b);
-              if (dist <= maxThreshold * 1.5) {
+              // If pixel is somewhat close to any target color (within 1.5x tolerance), erode it
+              if (isColorMatch(r, g, b, 1.5)) {
                 isBackground[idx] = 1;
               }
             }
@@ -1378,9 +1465,13 @@ export async function processGifItem(
   file: File,
   options: RemovalOptions,
   onProgress?: (progress: number, message: string) => void,
-  cachedBuffer?: ArrayBuffer
+  cachedBuffer?: ArrayBuffer,
+  cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
-  const isWeChat = !!options.wechat?.enabled;
+  const isWeChat =
+    options.compression?.preset !== 'original' &&
+    options.compression?.enabled !== false &&
+    !!options.wechat?.enabled;
   const compression = options.compression ?? {
     enabled: true,
     preset: 'wechat-auto',
@@ -1402,8 +1493,25 @@ export async function processGifItem(
       : '正在处理背景透明化...'
   );
 
-  const processedFrames = decoded.frames.map((frame) => {
-    const transparentData = removeBackgroundFromFrame(frame.imageData, options);
+  const processedFrames = decoded.frames.map((frame, idx) => {
+    let transparentData: ImageData;
+    let frameHasAlpha = false;
+    if (cachedFrames && cachedFrames[idx]?.imageData) {
+      const d = cachedFrames[idx].imageData.data;
+      for (let p = 3; p < d.length; p += 32) {
+        if (d[p] < 128) {
+          frameHasAlpha = true;
+          break;
+        }
+      }
+    }
+
+    if (options.removalMethod === 'ai' && frameHasAlpha && cachedFrames) {
+      transparentData = cachedFrames[idx].imageData;
+    } else {
+      transparentData = removeBackgroundFromFrame(frame.imageData, options);
+    }
+
     const finalData = isWeChat
       ? renderFrameWithWeChatOptions(transparentData, options.wechat)
       : transparentData;
@@ -1485,7 +1593,10 @@ export async function processStaticImageItem(
   cachedBuffer?: ArrayBuffer,
   cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
-  const isWeChat = !!options.wechat?.enabled;
+  const isWeChat =
+    options.compression?.preset !== 'original' &&
+    options.compression?.enabled !== false &&
+    !!options.wechat?.enabled;
   const compression = options.compression ?? {
     enabled: true,
     preset: 'wechat-auto',
@@ -1513,7 +1624,30 @@ export async function processStaticImageItem(
       : '正在分析并消除背景色...'
   );
 
-  const rawTransparentData = removeBackgroundFromFrame(sourceImageData, options);
+  let rawTransparentData: ImageData;
+  if (options.removalMethod === 'ai') {
+    let cachedHasTransparency = false;
+    if (cachedFrames && cachedFrames.length > 0 && cachedFrames[0]?.imageData) {
+      const d = cachedFrames[0].imageData.data;
+      for (let p = 3; p < d.length; p += 32) {
+        if (d[p] < 128) {
+          cachedHasTransparency = true;
+          break;
+        }
+      }
+    }
+
+    if (cachedHasTransparency && cachedFrames) {
+      rawTransparentData = cachedFrames[0].imageData;
+    } else {
+      onProgress?.(35, 'AI 正在智能识别主体轮廓并剥离背景阴影...');
+      const aiRes = await removeBackgroundWithAI(file, `${file.name}-${file.size}`);
+      rawTransparentData = aiRes.imageData;
+    }
+  } else {
+    rawTransparentData = removeBackgroundFromFrame(sourceImageData, options);
+  }
+
   const processedImageData = isWeChat
     ? renderFrameWithWeChatOptions(rawTransparentData, options.wechat)
     : rawTransparentData;
@@ -1587,7 +1721,7 @@ export async function processMediaItem(
   cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
   if (isGifFile(file)) {
-    return processGifItem(file, options, onProgress, cachedBuffer);
+    return processGifItem(file, options, onProgress, cachedBuffer, cachedFrames);
   } else {
     return processStaticImageItem(file, options, onProgress, cachedBuffer, cachedFrames);
   }

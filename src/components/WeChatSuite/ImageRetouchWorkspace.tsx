@@ -37,6 +37,7 @@ import {
   Check,
   FileDown,
   ArrowUpDown,
+  RefreshCw,
 } from 'lucide-react';
 import { RetouchTool, RetouchOptions } from '../../types';
 
@@ -67,7 +68,9 @@ import {
   applyWhiteOutline,
   removeBackgroundFromFrame,
   detectBackgroundColor,
+  rgbToHex,
 } from '../../utils/gifProcessor';
+import { removeBackgroundWithAI } from '../../utils/aiBackgroundRemoval';
 
 interface ImageRetouchWorkspaceProps {
   initialFile?: File | null;
@@ -625,6 +628,28 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     oCtx.restore();
   };
 
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
+
+  // One-click AI Neural Subject Segmentation
+  const handleOneClickAiMatting = async () => {
+    if (!mainCanvasRef.current || historyIndex < 0 || isAiProcessing) return;
+    setIsAiProcessing(true);
+    showToast?.('AI 正在智能分析主体与发丝轮廓，剥离背景阴影...');
+    try {
+      const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
+      const currentData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+      const aiRes = await removeBackgroundWithAI(currentData);
+      pushHistory(aiRes.imageData);
+      clearOverlay();
+      showToast?.('✨ AI 智能抠图完成！背景与阴影已彻底清除！');
+    } catch (err: any) {
+      console.error('AI Matting failed in workspace:', err);
+      showToast?.('AI 智能抠图遇到问题: ' + (err.message || '请重试'));
+    } finally {
+      setIsAiProcessing(false);
+    }
+  };
+
   // One-click intelligent background removal
   const handleOneClickRemoveBg = () => {
     if (!mainCanvasRef.current || historyIndex < 0) return;
@@ -708,9 +733,13 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         coords.x,
         coords.y
       );
+      const hex = rgbToHex(targetRgb[0], targetRgb[1], targetRgb[2]);
+      const prevColors = options.pickedColors || [];
+      const updatedColors = prevColors.includes(hex) ? prevColors : [...prevColors, hex];
+      setOptions(prev => ({ ...prev, pickedColors: updatedColors }));
       pushHistory(resultData);
       clearOverlay();
-      showToast?.(`已吸取颜色 rgb(${targetRgb.join(',')}) 并清除为透明！`);
+      showToast?.(`已吸取颜色 rgb(${targetRgb.join(',')}) 并清除为透明！可继续点击其他区域同时消除。`);
       return;
     }
 
@@ -1804,7 +1833,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                     <span className="font-mono text-cyan-900 font-bold text-[11px] w-5 whitespace-nowrap">
                       {options.colorTolerance ?? 25}
                     </span>
-                    <label className="flex items-center gap-1 text-[11px] text-cyan-900 cursor-pointer pl-1 border-l border-cyan-200 whitespace-nowrap">
+                    <label className="flex items-center gap-1 text-[11px] text-cyan-900 cursor-pointer pl-1 border-l border-cyan-200 whitespace-nowrap" title="取消勾选后全图相同底色一并消除">
                       <input
                         type="checkbox"
                         checked={options.contiguous ?? true}
@@ -1813,6 +1842,16 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                       />
                       <span>仅连通</span>
                     </label>
+                    {options.pickedColors && options.pickedColors.length > 0 && (
+                      <div className="flex items-center gap-1 pl-1 border-l border-cyan-200">
+                        <span className="text-[10px] text-cyan-700 font-bold">已吸色({options.pickedColors.length}):</span>
+                        <div className="flex items-center gap-0.5">
+                          {options.pickedColors.map((c, idx) => (
+                            <span key={`${c}-${idx}`} className="w-2.5 h-2.5 rounded-full border border-stone-400 inline-block" style={{ backgroundColor: c }} title={c} />
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1902,12 +1941,27 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
 
               <button
                 type="button"
+                disabled={isAiProcessing}
+                onClick={handleOneClickAiMatting}
+                className="h-7 px-2.5 rounded-md bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-bold text-[11px] transition-all shadow-2xs flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap disabled:opacity-50"
+                title="一键通过 AI 神经网络精准抠出主体，彻底消除墙面阴影与杂色底"
+              >
+                {isAiProcessing ? (
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                )}
+                <span>✨ AI 智能抠图</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={handleOneClickRemoveBg}
                 className="h-7 px-2 rounded-md bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold text-[11px] transition-all shadow-2xs flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
                 title="自动探测四角背景色并清除为透明底"
               >
                 <Wand2 className="w-3 h-3 text-emerald-600" />
-                <span>一键智能去底</span>
+                <span>吸色智能去底</span>
               </button>
 
               <button

@@ -17,6 +17,8 @@ import {
   AlertTriangle,
   Scale,
   Gauge,
+  Columns,
+  LayoutGrid,
 } from 'lucide-react';
 import {
   GifItem,
@@ -39,6 +41,8 @@ interface BatchControlsProps {
   onPreviewBgChange: (mode: PreviewBgMode) => void;
   onCompressAll?: () => void;
   onCompressOversized?: () => void;
+  cardLayout?: 'split' | 'grid';
+  onCardLayoutChange?: (layout: 'split' | 'grid') => void;
 }
 
 export const BatchControls: React.FC<BatchControlsProps> = ({
@@ -52,6 +56,8 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   onPreviewBgChange,
   onCompressAll,
   onCompressOversized,
+  cardLayout = 'split',
+  onCardLayoutChange,
 }) => {
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'wechat' | 'compression' | 'general'>('wechat');
@@ -157,6 +163,21 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   };
 
   const handleSelectPreset = (preset: CompressionPreset) => {
+    if (preset === 'original') {
+      setGlobalOptions((prev) => ({
+        ...prev,
+        compression: {
+          enabled: false,
+          preset: 'original',
+          targetSizeKb: 5000,
+          maxColors: 256,
+          scaleRatio: 1.0,
+          frameStep: 1,
+          autoCompressUnderLimit: false,
+        },
+      }));
+      return;
+    }
     const found = COMPRESSION_PRESETS.find((p) => p.id === preset);
     if (found) {
       setGlobalOptions((prev) => ({
@@ -227,6 +248,25 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             <span>微信规范 & 压缩参数设置</span>
           </button>
 
+          {/* Batch AI Matting Button */}
+          <button
+            id="batch-ai-matting-btn"
+            type="button"
+            disabled={isProcessingAny || totalCount === 0}
+            onClick={() => {
+              onApplyGlobalOptions({
+                ...globalOptions,
+                removalMethod: 'ai',
+              });
+              onProcessAll(true);
+            }}
+            className="px-3.5 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            title="一键将所有图片通过 AI 神经网络智能抠图，彻底清除复杂背景与阴影"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+            <span>批量 AI 智能抠图</span>
+          </button>
+
           {/* WeChat Sticker Batch Generation Button (HIGH VISIBILITY) */}
           <button
             id="batch-generate-wechat-btn"
@@ -288,6 +328,38 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             <Download className="w-3.5 h-3.5" />
             打包下载全部 ZIP ({doneCount})
           </button>
+
+          {/* Card Layout Switcher: 左右分栏对照 vs 紧凑网格 */}
+          {onCardLayoutChange && (
+            <div className="flex items-center bg-stone-100 p-0.5 rounded-lg border border-stone-200 text-xs shadow-2xs">
+              <button
+                type="button"
+                onClick={() => onCardLayoutChange('split')}
+                className={`px-2.5 py-1 rounded-md font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                  cardLayout === 'split'
+                    ? 'bg-white text-stone-900 shadow-2xs'
+                    : 'text-stone-500 hover:text-stone-800'
+                }`}
+                title="左右分栏对照模式：左侧实时看图，右侧调参，无需上下滚动"
+              >
+                <Columns className="w-3.5 h-3.5 text-indigo-600" />
+                <span>左右对照</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onCardLayoutChange('grid')}
+                className={`px-2.5 py-1 rounded-md font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                  cardLayout === 'grid'
+                    ? 'bg-white text-stone-900 shadow-2xs'
+                    : 'text-stone-500 hover:text-stone-800'
+                }`}
+                title="紧凑多列网格模式"
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-stone-600" />
+                <span>网格</span>
+              </button>
+            </div>
+          )}
 
           {/* Clear All */}
           <button
@@ -651,7 +723,7 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
                   <Gauge className="w-3.5 h-3.5 text-amber-600" />
                   选择压缩档位与预设:
                 </span>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-2.5">
                   {COMPRESSION_PRESETS.map((preset) => {
                     const isSelected = globalOptions.compression?.preset === preset.id;
                     return (

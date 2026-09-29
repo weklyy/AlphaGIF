@@ -279,6 +279,7 @@ export async function sliceImageIntoStickers(
       if (autoTransparent) {
         imageData = removeBackgroundFromFrame(imageData, {
           targetColor: bgColor || '#ffffff',
+          targetColors: config.bgColors,
           tolerance: tolerance || 20,
           contiguous: false,
           defringe: 1,

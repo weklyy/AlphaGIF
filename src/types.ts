@@ -11,7 +11,7 @@ export interface WeChatStickerOptions {
   captionFontSize?: number; // 14 - 32px (default 22)
 }
 
-export type CompressionPreset = 'wechat-auto' | 'wechat-1mb' | 'wechat-500kb' | 'light-300kb' | 'custom';
+export type CompressionPreset = 'original' | 'wechat-auto' | 'wechat-1mb' | 'wechat-500kb' | 'light-300kb' | 'custom';
 
 export interface CompressionOptions {
   enabled: boolean; // 是否启用压缩 (默认开启)
@@ -24,10 +24,15 @@ export interface CompressionOptions {
 }
 
 export interface RemovalOptions {
+  removalMethod?: 'color' | 'ai'; // 'color' for eyedropper/chroma key, 'ai' for neural subject matting
   targetColor: string; // Hex string e.g. "#ffffff"
+  targetColors?: string[]; // Multiple target colors support (e.g. simultaneous multi-selection)
   tolerance: number; // 0 to 100
   contiguous: boolean; // Only remove from edges (flood fill)
   defringe: number; // 0 to 3 pixels erosion/defringe
+  edgeBarrier?: boolean; // 智能边缘阻隔：利用灰度梯度阻断穿透，防止容差过大误删人物/衣服 (默认开启)
+  edgeThreshold?: number; // 边缘敏感度 (10 ~ 40, 默认 20)
+  protectTorsoBottom?: boolean; // 保护底部躯干不被底边洪水填充穿透
   wechat?: WeChatStickerOptions; // WeChat Sticker formatting options
   compression?: CompressionOptions; // 微信平台体积压缩参数
 }
@@ -50,6 +55,7 @@ export interface ProcessedGifResult {
   compressionRatio?: number; // 压缩减小百分比 (e.g. 68% saved)
   passedWeChatLimit?: boolean; // 是否符合微信平台上传限制 (动图<=1000KB, 静态图<=500KB)
   compressionSummary?: string; // 压缩详情说明
+  isAiMatting?: boolean; // 是否采用 AI 智能人物主体分割
 }
 
 export type ProcessStatus = 'idle' | 'processing' | 'done' | 'error';
@@ -62,6 +68,9 @@ export interface GifItem {
   file: File;
   cachedBuffer?: ArrayBuffer;
   cachedFrames?: FrameInfo[];
+  aiTransparentFrames?: FrameInfo[]; // 缓存 AI 抠图后的透明帧数据
+  aiMattingStatus?: 'idle' | 'processing' | 'done' | 'error';
+  aiMattingMessage?: string;
   mediaType: MediaType;
   originalUrl: string;
   originalSize: number;
@@ -114,6 +123,7 @@ export interface GridConfig {
   fps: number; // 8 - 15 fps (default 10)
   autoTransparent: boolean; // remove background color
   bgColor: string; // target background color (default '#ffffff')
+  bgColors?: string[]; // Multiple target background colors for simultaneous multi-point removal
   tolerance: number; // 0 - 100
   addWhiteOutline: boolean; // 2px white outline
   outlineWidth: number; // default 2
@@ -137,6 +147,7 @@ export interface ImageGridConfig {
   paddingInset: number; // 0 to 12 px margin inside each cell to avoid bleed
   autoTransparent: boolean; // remove background color
   bgColor: string; // target background color (default '#ffffff')
+  bgColors?: string[]; // Multiple target background colors for simultaneous multi-point removal
   tolerance: number; // 0 - 100
   addWhiteOutline: boolean; // 2px white outline
   outlineWidth: number; // default 2
@@ -225,6 +236,7 @@ export interface RetouchOptions {
   autoFeather: boolean;         // 边缘平滑自适应羽化
   colorTolerance?: number;      // 吸管去底容差 (0 - 100)
   contiguous?: boolean;         // 仅清除连通边缘 (保护主体内部)
+  pickedColors?: string[];      // 多选吸色列表 (支持同时选中多种底色)
   whiteOutlinePreview?: boolean;// 微信 2px 白描边实时叠加预览
 }
 

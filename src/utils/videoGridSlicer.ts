@@ -401,6 +401,7 @@ export async function sliceVideoIntoStickers(
       if (autoTransparent) {
         imgData = removeBackgroundFromFrame(imgData, {
           targetColor: bgColor,
+          targetColors: config.bgColors,
           tolerance: tolerance || 20,
           contiguous: true,
           defringe: 1,

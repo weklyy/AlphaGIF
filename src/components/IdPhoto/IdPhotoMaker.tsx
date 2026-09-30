@@ -24,6 +24,10 @@ import {
   Scissors,
   CheckCircle2,
   AlertTriangle,
+  Zap,
+  SlidersHorizontal,
+  Layers,
+  ZoomIn,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import {
@@ -47,6 +51,16 @@ import {
 } from '../../utils/suitOverlays';
 import { DEMO_PORTRAITS, DemoPortrait } from '../../utils/demoPortraits';
 import { removeBackgroundWithAI, isAiRemovalSupported } from '../../utils/aiBackgroundRemoval';
+import {
+  HairOptimizationConfig,
+  ClarityConfig,
+  SilhouetteField,
+  DEFAULT_HAIR_CONFIG,
+  DEFAULT_CLARITY_CONFIG,
+  buildSilhouetteField,
+  createOptimizedPortraitCanvas,
+  enhanceImageClarity,
+} from '../../utils/portraitEnhancement';
 import { CameraCaptureModal } from './CameraCaptureModal';
 import { PrintLayoutModal } from './PrintLayoutModal';
 
@@ -67,8 +81,8 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const [customHeightPx, setCustomHeightPx] = useState<number>(413);
 
   // Background color state
-  const [selectedColorId, setSelectedColorId] = useState<string>('blue-classic');
-  const [customColorHex, setCustomColorHex] = useState<string>('#0066FF');
+  const [selectedColorId, setSelectedColorId] = useState<string>('red-classic');
+  const [customColorHex, setCustomColorHex] = useState<string>('#C8102E');
 
   // Portrait State
   const [portraitState, setPortraitState] = useState<IdPhotoState>({
@@ -89,12 +103,24 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const [rotation, setRotation] = useState<number>(0);
   const [flipX, setFlipX] = useState<boolean>(false);
 
-  // Image Enhancement
+  // Image Enhancement: Light & Contrast
   const [brightness, setBrightness] = useState<number>(0); // -50 to 50
   const [contrast, setContrast] = useState<number>(0); // -50 to 50
-  const [skinSmoothing, setSkinSmoothing] = useState<number>(0); // 0 to 100
-  const [edgeShift, setEdgeShift] = useState<number>(0); // -2 to 2 px
-  const [featherEdge, setFeatherEdge] = useState<number>(1); // 0 to 4 px
+
+  // 1. Hair & Neck Detail & Edge Optimization Configuration
+  const [hairConfig, setHairConfig] = useState<HairOptimizationConfig>({
+    ...DEFAULT_HAIR_CONFIG,
+  });
+
+  // 2. Synchronously Cached Optimized Canvas & Silhouette Field
+  const [optimizedCanvas, setOptimizedCanvas] = useState<HTMLCanvasElement | null>(null);
+  const silhouetteFieldRef = useRef<SilhouetteField | null>(null);
+
+  // 3. Smart Image Clarity Optimization Configuration
+  const [clarityConfig, setClarityConfig] = useState<ClarityConfig>({
+    ...DEFAULT_CLARITY_CONFIG,
+  });
+  const [isComparingOriginal, setIsComparingOriginal] = useState<boolean>(false);
 
   // Suit Attire Overlay
   const [selectedSuitId, setSelectedSuitId] = useState<string>('none');
@@ -118,6 +144,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   // Canvas Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const rawCutoutImageDataRef = useRef<ImageData | null>(null);
   const transparentImgRef = useRef<HTMLImageElement | null>(null);
 
   // Find current spec
@@ -141,7 +168,28 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
           style: 'solid',
           secondaryHex: undefined,
         }
-      : POPULAR_ID_COLORS.find((c) => c.id === selectedColorId) || POPULAR_ID_COLORS[3];
+      : POPULAR_ID_COLORS.find((c) => c.id === selectedColorId) || POPULAR_ID_COLORS[1];
+
+  // Helper to ensure we have raw ImageData from transparentImgRef if needed
+  const ensureRawImageData = useCallback((): ImageData | null => {
+    if (rawCutoutImageDataRef.current) {
+      return rawCutoutImageDataRef.current;
+    }
+    const img = transparentImgRef.current;
+    if (img && (img.naturalWidth || img.width)) {
+      const w = img.naturalWidth || img.width;
+      const h = img.naturalHeight || img.height;
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, w, h);
+      rawCutoutImageDataRef.current = data;
+      return data;
+    }
+    return null;
+  }, []);
 
   // -------------------------------------------------------------
   // File Upload & Automatic Matting Process
@@ -180,7 +228,11 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         }
       );
 
-      // Preload image element for canvas rendering
+      rawCutoutImageDataRef.current = mattingResult.imageData;
+      const field = buildSilhouetteField(mattingResult.imageData);
+      silhouetteFieldRef.current = field;
+
+      // Preload image element
       const img = new Image();
       img.crossOrigin = 'anonymous';
       await new Promise<void>((resolve, reject) => {
@@ -190,6 +242,10 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       });
       transparentImgRef.current = img;
 
+      // Immediately generate hair-optimized canvas synchronously from precomputed field
+      const optCanvas = createOptimizedPortraitCanvas(field, hairConfig);
+      setOptimizedCanvas(optCanvas);
+
       setPortraitState((prev) => ({
         ...prev,
         transparentUrl: mattingResult.url,
@@ -197,13 +253,12 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         transparentImageData: mattingResult.imageData,
         isMatting: false,
         mattingProgress: 100,
-        mattingMessage: 'AI 抠图完成！发丝细节已保留，背景已彻底透明化',
+        mattingMessage: 'AI 抠图完成！发丝细节精细提取，已去除杂色光晕',
       }));
 
-      onNotification?.('✨ AI 智能抠图成功！已完成人像提取与背景透明化');
+      onNotification?.('✨ AI 智能抠图成功！已完成人像提取与发丝颈部去白边优化');
     } catch (err: any) {
       console.error('AI Matting failed, falling back:', err);
-      // Fallback: use original image as transparentImgRef so user can still crop/frame
       const fallbackImg = new Image();
       fallbackImg.src = originalUrl;
       await new Promise<void>((resolve) => {
@@ -211,11 +266,27 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       });
       transparentImgRef.current = fallbackImg;
 
+      // Extract raw data from fallback image
+      const w = fallbackImg.naturalWidth || fallbackImg.width;
+      const h = fallbackImg.naturalHeight || fallbackImg.height;
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(fallbackImg, 0, 0);
+      const rawData = ctx.getImageData(0, 0, w, h);
+      rawCutoutImageDataRef.current = rawData;
+      const field = buildSilhouetteField(rawData);
+      silhouetteFieldRef.current = field;
+
+      const optCanvas = createOptimizedPortraitCanvas(field, hairConfig);
+      setOptimizedCanvas(optCanvas);
+
       setPortraitState((prev) => ({
         ...prev,
         isMatting: false,
         mattingProgress: 100,
-        mattingMessage: '已载入原始图像（可在上方精细修图画板进行手动抠图）',
+        mattingMessage: '已载入原始图像，已准备好边缘优化与换底',
       }));
       onNotification?.('已载入人像照片，可自由调节位置与换底');
     }
@@ -239,19 +310,59 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const handleSelectDemoPortrait = async (demo: DemoPortrait) => {
     const file = await demo.createFile();
     processImageFile(file);
-    onNotification?.(`已载入「${demo.name}」，AI 正在自动化抠图与换底...`);
+    onNotification?.(`已载入「${demo.name}」，AI 正在自动化抠图、精修发丝与超清增强...`);
   };
 
   // -------------------------------------------------------------
-  // Canvas Rendering Pipeline (Renders final ID photo)
+  // One-Click Auto Enhance (发丝精修 + 人像超清一键最佳配置)
+  // -------------------------------------------------------------
+  const handleOneClickAutoEnhance = () => {
+    const newHairConfig: HairOptimizationConfig = {
+      enabled: true,
+      deFringe: 100,
+      feather: 1.0,
+      edgeShift: -2.8, // 物理内收 2.8px，彻底切除任何残存白边
+      textureBoost: 50,
+      skinSmoothing: 65, // 65% 自然影楼级磨皮，抚平脸部粗糙与暗沉
+    };
+    setHairConfig(newHairConfig);
+    applyHairOptimization(newHairConfig);
+
+    setClarityConfig({
+      enabled: true,
+      strength: 70,
+      detailMode: 'balanced',
+      exportDpiMultiplier: 2,
+    });
+    setBrightness(4);
+    setContrast(6);
+    onNotification?.('⚡ 已一键应用智能最佳调优：物理切除白边 + 发丝去杂色 + 五官超清增强！');
+  };
+
+  // -------------------------------------------------------------
+  // Canvas Rendering Pipeline (Renders final ID photo with Multi-DPI & Clarity)
   // -------------------------------------------------------------
   const renderIdPhotoToCanvas = useCallback(
-    async (targetCanvas: HTMLCanvasElement, width: number, height: number, withGuides: boolean) => {
+    async (
+      targetCanvas: HTMLCanvasElement,
+      baseWidth: number,
+      baseHeight: number,
+      withGuides: boolean,
+      dpiScale: number = 1,
+      applyClarity: boolean = true,
+      overrideSubjectSource?: HTMLCanvasElement | HTMLImageElement | null
+    ) => {
       const ctx = targetCanvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
 
+      const width = Math.round(baseWidth * dpiScale);
+      const height = Math.round(baseHeight * dpiScale);
+
       targetCanvas.width = width;
       targetCanvas.height = height;
+
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
 
       // 1. Draw Background
       if (currentColor.type === 'transparent') {
@@ -268,14 +379,21 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         );
       }
 
-      // 2. Draw Subject Portrait (if loaded)
-      const subjectImg = transparentImgRef.current;
-      if (subjectImg) {
+      // 2. Draw Subject Portrait (with Hair & Edge Optimization)
+      // If comparing original, use raw transparent img; otherwise use optimized canvas or override
+      const subjectSource: HTMLCanvasElement | HTMLImageElement | null =
+        overrideSubjectSource !== undefined
+          ? overrideSubjectSource
+          : (!isComparingOriginal && hairConfig.enabled && optimizedCanvas
+              ? optimizedCanvas
+              : transparentImgRef.current);
+
+      if (subjectSource) {
         ctx.save();
 
         // Apply framing transforms around canvas center
-        const centerX = width / 2 + panX;
-        const centerY = height / 2 + panY;
+        const centerX = width / 2 + panX * dpiScale;
+        const centerY = height / 2 + panY * dpiScale;
         ctx.translate(centerX, centerY);
 
         if (rotation !== 0) {
@@ -293,7 +411,15 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         }
 
         // Calculate aspect-fit scale
-        const imgAspect = subjectImg.naturalWidth / subjectImg.naturalHeight;
+        const naturalW =
+          subjectSource instanceof HTMLImageElement
+            ? subjectSource.naturalWidth || subjectSource.width
+            : subjectSource.width;
+        const naturalH =
+          subjectSource instanceof HTMLImageElement
+            ? subjectSource.naturalHeight || subjectSource.height
+            : subjectSource.height;
+        const imgAspect = naturalW / naturalH;
         const canvasAspect = width / height;
         let drawW = width;
         let drawH = height;
@@ -310,7 +436,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         drawW *= zoom;
         drawH *= zoom;
 
-        ctx.drawImage(subjectImg, -drawW / 2, -drawH / 2, drawW, drawH);
+        ctx.drawImage(subjectSource, -drawW / 2, -drawH / 2, drawW, drawH);
         ctx.restore();
       }
 
@@ -318,16 +444,21 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       if (selectedSuitId !== 'none') {
         const suitImg = await getSuitImage(selectedSuitId);
         if (suitImg) {
-          drawSuitOverlay(ctx, suitImg, width, height, suitScale, suitOffsetY);
+          drawSuitOverlay(ctx, suitImg, width, height, suitScale, suitOffsetY * dpiScale);
         }
       }
 
-      // 4. Draw Standard Guidelines (if enabled for on-screen preview)
+      // 4. Apply Intelligent Smart Clarity Enhancement
+      if (applyClarity && clarityConfig.enabled && !isComparingOriginal) {
+        enhanceImageClarity(ctx, width, height, clarityConfig);
+      }
+
+      // 5. Draw Standard Guidelines (if enabled for on-screen preview)
       if (withGuides) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(59, 130, 246, 0.65)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = 'rgba(59, 130, 246, 0.75)';
+        ctx.lineWidth = Math.max(1, Math.round(dpiScale));
+        ctx.setLineDash([4 * dpiScale, 4 * dpiScale]);
 
         // Standard Top margin line (3~5mm head clearance: ~10% from top)
         const topHeadY = Math.round(height * 0.12);
@@ -358,12 +489,12 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         ctx.stroke();
 
         // Labels
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.85)';
-        ctx.font = '10px sans-serif';
+        ctx.fillStyle = 'rgba(59, 130, 246, 0.9)';
+        ctx.font = `${Math.round(10 * dpiScale)}px sans-serif`;
         ctx.textAlign = 'left';
-        ctx.fillText('头顶基准线', 8, topHeadY - 4);
-        ctx.fillText('双眼水平线', 8, eyesY - 4);
-        ctx.fillText('下巴基准线', 8, chinY - 4);
+        ctx.fillText('头顶基准线', 8 * dpiScale, topHeadY - 4 * dpiScale);
+        ctx.fillText('双眼水平线', 8 * dpiScale, eyesY - 4 * dpiScale);
+        ctx.fillText('下巴基准线', 8 * dpiScale, chinY - 4 * dpiScale);
 
         ctx.restore();
       }
@@ -377,11 +508,48 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       zoom,
       brightness,
       contrast,
+      hairConfig,
+      optimizedCanvas,
+      clarityConfig,
+      isComparingOriginal,
       selectedSuitId,
       suitScale,
       suitOffsetY,
     ]
   );
+
+  // Synchronously apply hair & edge optimization and immediately redraw the preview canvas
+  const applyHairOptimization = useCallback(
+    (hConfig: HairOptimizationConfig) => {
+      let field = silhouetteFieldRef.current;
+      if (!field) {
+        const rawData = ensureRawImageData();
+        if (!rawData) return;
+        field = buildSilhouetteField(rawData);
+        silhouetteFieldRef.current = field;
+      }
+      const canvas = createOptimizedPortraitCanvas(field, hConfig);
+      setOptimizedCanvas(canvas);
+      // Immediately draw to preview canvas for zero-delay 60fps live response
+      if (previewCanvasRef.current) {
+        renderIdPhotoToCanvas(
+          previewCanvasRef.current,
+          targetWidthPx,
+          targetHeightPx,
+          showGuidelines,
+          2,
+          true,
+          canvas
+        );
+      }
+    },
+    [ensureRawImageData, renderIdPhotoToCanvas, targetWidthPx, targetHeightPx, showGuidelines]
+  );
+
+  // Synchronously update whenever hairConfig changes
+  useEffect(() => {
+    applyHairOptimization(hairConfig);
+  }, [hairConfig, applyHairOptimization]);
 
   // Re-render preview canvas whenever settings change
   useEffect(() => {
@@ -390,10 +558,20 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         previewCanvasRef.current,
         targetWidthPx,
         targetHeightPx,
-        showGuidelines
+        showGuidelines,
+        2,
+        true
       );
     }
-  }, [renderIdPhotoToCanvas, targetWidthPx, targetHeightPx, showGuidelines, portraitState.transparentUrl]);
+  }, [
+    renderIdPhotoToCanvas,
+    targetWidthPx,
+    targetHeightPx,
+    showGuidelines,
+    portraitState.transparentUrl,
+    optimizedCanvas,
+    isComparingOriginal,
+  ]);
 
   // -------------------------------------------------------------
   // Drag & Wheel Interaction for Quick Repositioning
@@ -422,10 +600,21 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   // -------------------------------------------------------------
   // Export Handlers (Single Photo, Sizes, and Full ZIP)
   // -------------------------------------------------------------
-  const handleDownloadSinglePhoto = async () => {
-    // Generate clean canvas without guidelines
+  const handleDownloadSinglePhoto = async (overrideMultiplier?: 1 | 2 | 4) => {
+    const dpiMultiplier = overrideMultiplier || clarityConfig.exportDpiMultiplier || 2;
+    const finalW = targetWidthPx * dpiMultiplier;
+    const finalH = targetHeightPx * dpiMultiplier;
+
+    // Generate clean canvas without guidelines at requested super-resolution
     const offscreen = document.createElement('canvas');
-    await renderIdPhotoToCanvas(offscreen, targetWidthPx, targetHeightPx, false);
+    await renderIdPhotoToCanvas(
+      offscreen,
+      targetWidthPx,
+      targetHeightPx,
+      false,
+      dpiMultiplier,
+      clarityConfig.enabled
+    );
 
     const isTransparent = currentColor.type === 'transparent';
     const effectiveFormat = isTransparent ? 'png' : exportFormat;
@@ -436,66 +625,87 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       fileSizeLimitKb
     );
 
+    const dpiLabel = dpiMultiplier === 1 ? '300DPI_标准' : dpiMultiplier === 2 ? '600DPI_超清' : '1200DPI_极清';
+    const sizeNote = fileSizeLimitKb > 0 ? `_${Math.round(res.size / 1024)}KB` : '';
+
     const a = document.createElement('a');
     a.href = res.url;
-    const sizeNote = fileSizeLimitKb > 0 ? `_${Math.round(res.size / 1024)}KB` : '';
-    a.download = `证件照_${currentSpec.name}_${currentColor.name}${sizeNote}.${effectiveFormat}`;
+    a.download = `证件照_${currentSpec.name}_${currentColor.name}_${dpiLabel}${sizeNote}.${effectiveFormat}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(res.url);
 
     onNotification?.(
-      `🎉 已成功导出「${currentSpec.name}」(${Math.round(res.size / 1024)} KB)！`
+      `🎉 智能证件照已成功导出！(${finalW}×${finalH} px @ ${300 * dpiMultiplier} DPI, ${Math.round(res.size / 1024)} KB)！`
     );
   };
 
-  // Batch Export Full Set ZIP (1-inch, 2-inch, Red, Blue, White, Transparent)
+  // Batch Export Full Set ZIP (Includes both 300DPI Official Standard & 600DPI Ultra-HD)
   const handleExportFullSetZip = async () => {
     if (isExportingZip) return;
     setIsExportingZip(true);
-    onNotification?.('正在打包生成全套常用尺寸与红白蓝底色证件照...');
+    onNotification?.('正在打包生成全套官方标准 300DPI 与智能超清 600DPI 证件照...');
 
     try {
       const zip = new JSZip();
       const exportPresets = [
-        { key: '1-inch', name: '1寸标准照 (295x413)', w: 295, h: 413 },
-        { key: '2-inch', name: '2寸标准照 (413x579)', w: 413, h: 579 },
-        { key: 'small-2-inch', name: '小2寸护照 (413x531)', w: 413, h: 531 },
+        { key: '1-inch', name: '1寸标准照', w: 295, h: 413 },
+        { key: '2-inch', name: '2寸标准照', w: 413, h: 579 },
+        { key: 'small-2-inch', name: '小2寸护照', w: 413, h: 531 },
       ];
 
       const exportColors = [
-        { name: '蓝底', type: 'color', hex: '#0066FF' },
         { name: '红底', type: 'color', hex: '#C8102E' },
+        { name: '蓝底', type: 'color', hex: '#0066FF' },
         { name: '白底', type: 'color', hex: '#FFFFFF' },
         { name: '透明底', type: 'transparent', hex: 'transparent' },
       ];
 
+      const folder300 = zip.folder('1_官方标准版_300DPI');
+      const folder600 = zip.folder('2_智能超清版_600DPI_推荐冲印');
+
       const offscreen = document.createElement('canvas');
 
       for (const preset of exportPresets) {
-        const folder = zip.folder(preset.name);
+        const sub300 = folder300?.folder(`${preset.name}_${preset.w}x${preset.h}`);
+        const sub600 = folder600?.folder(`${preset.name}_${preset.w * 2}x${preset.h * 2}_超清`);
+
         for (const col of exportColors) {
+          const isTrans = col.type === 'transparent';
+          const format = isTrans ? 'image/png' : 'image/jpeg';
+          const ext = isTrans ? 'png' : 'jpg';
+
+          // 1. Generate 300 DPI version
           offscreen.width = preset.w;
           offscreen.height = preset.h;
-          const ctx = offscreen.getContext('2d')!;
-
-          if (col.type === 'transparent') {
-            ctx.clearRect(0, 0, preset.w, preset.h);
+          const ctx1 = offscreen.getContext('2d')!;
+          if (isTrans) {
+            ctx1.clearRect(0, 0, preset.w, preset.h);
           } else {
-            drawIdBackground(ctx, preset.w, preset.h, col.type, col.hex, 'solid');
+            drawIdBackground(ctx1, preset.w, preset.h, col.type, col.hex, 'solid');
           }
 
-          if (transparentImgRef.current) {
-            ctx.save();
-            const centerX = preset.w / 2 + panX;
-            const centerY = preset.h / 2 + panY;
-            ctx.translate(centerX, centerY);
-            if (rotation !== 0) ctx.rotate((rotation * Math.PI) / 180);
-            if (flipX) ctx.scale(-1, 1);
+          const subjectSource: HTMLCanvasElement | HTMLImageElement | null =
+            hairConfig.enabled && optimizedCanvas ? optimizedCanvas : transparentImgRef.current;
 
-            const img = transparentImgRef.current;
-            const imgAspect = img.naturalWidth / img.naturalHeight;
+          if (subjectSource) {
+            ctx1.save();
+            ctx1.translate(preset.w / 2 + panX, preset.h / 2 + panY);
+            if (rotation !== 0) ctx1.rotate((rotation * Math.PI) / 180);
+            if (flipX) ctx1.scale(-1, 1);
+            if (brightness !== 0 || contrast !== 0) {
+              ctx1.filter = `brightness(${100 + brightness}%) contrast(${100 + contrast}%)`;
+            }
+            const nw =
+              subjectSource instanceof HTMLImageElement
+                ? subjectSource.naturalWidth || subjectSource.width
+                : subjectSource.width;
+            const nh =
+              subjectSource instanceof HTMLImageElement
+                ? subjectSource.naturalHeight || subjectSource.height
+                : subjectSource.height;
+            const imgAspect = nw / nh;
             const canvasAspect = preset.w / preset.h;
             let drawW = preset.w;
             let drawH = preset.h;
@@ -508,25 +718,84 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
             }
             drawW *= zoom;
             drawH *= zoom;
-            ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
-            ctx.restore();
+            ctx1.drawImage(subjectSource, -drawW / 2, -drawH / 2, drawW, drawH);
+            ctx1.restore();
           }
 
           if (selectedSuitId !== 'none') {
             const suitImg = await getSuitImage(selectedSuitId);
             if (suitImg) {
-              drawSuitOverlay(ctx, suitImg, preset.w, preset.h, suitScale, suitOffsetY);
+              drawSuitOverlay(ctx1, suitImg, preset.w, preset.h, suitScale, suitOffsetY);
             }
           }
+          if (clarityConfig.enabled) {
+            enhanceImageClarity(ctx1, preset.w, preset.h, clarityConfig);
+          }
 
-          const isTrans = col.type === 'transparent';
-          const format = isTrans ? 'image/png' : 'image/jpeg';
-          const ext = isTrans ? 'png' : 'jpg';
-
-          const blob = await new Promise<Blob>((resolve) =>
-            offscreen.toBlob((b) => resolve(b!), format, 0.95)
+          const blob300 = await new Promise<Blob>((resolve) =>
+            offscreen.toBlob((b) => resolve(b!), format, 0.96)
           );
-          folder?.file(`${preset.name}_${col.name}.${ext}`, blob);
+          sub300?.file(`${preset.name}_${col.name}_300DPI.${ext}`, blob300);
+
+          // 2. Generate 600 DPI Ultra-HD version
+          const w600 = preset.w * 2;
+          const h600 = preset.h * 2;
+          offscreen.width = w600;
+          offscreen.height = h600;
+          const ctx2 = offscreen.getContext('2d')!;
+          if (isTrans) {
+            ctx2.clearRect(0, 0, w600, h600);
+          } else {
+            drawIdBackground(ctx2, w600, h600, col.type, col.hex, 'solid');
+          }
+
+          if (subjectSource) {
+            ctx2.save();
+            ctx2.translate(w600 / 2 + panX * 2, h600 / 2 + panY * 2);
+            if (rotation !== 0) ctx2.rotate((rotation * Math.PI) / 180);
+            if (flipX) ctx2.scale(-1, 1);
+            if (brightness !== 0 || contrast !== 0) {
+              ctx2.filter = `brightness(${100 + brightness}%) contrast(${100 + contrast}%)`;
+            }
+            const nw =
+              subjectSource instanceof HTMLImageElement
+                ? subjectSource.naturalWidth || subjectSource.width
+                : subjectSource.width;
+            const nh =
+              subjectSource instanceof HTMLImageElement
+                ? subjectSource.naturalHeight || subjectSource.height
+                : subjectSource.height;
+            const imgAspect = nw / nh;
+            const canvasAspect = w600 / h600;
+            let drawW = w600;
+            let drawH = h600;
+            if (imgAspect > canvasAspect) {
+              drawH = h600;
+              drawW = h600 * imgAspect;
+            } else {
+              drawW = w600;
+              drawH = w600 / imgAspect;
+            }
+            drawW *= zoom;
+            drawH *= zoom;
+            ctx2.drawImage(subjectSource, -drawW / 2, -drawH / 2, drawW, drawH);
+            ctx2.restore();
+          }
+
+          if (selectedSuitId !== 'none') {
+            const suitImg = await getSuitImage(selectedSuitId);
+            if (suitImg) {
+              drawSuitOverlay(ctx2, suitImg, w600, h600, suitScale, suitOffsetY * 2);
+            }
+          }
+          if (clarityConfig.enabled) {
+            enhanceImageClarity(ctx2, w600, h600, clarityConfig);
+          }
+
+          const blob600 = await new Promise<Blob>((resolve) =>
+            offscreen.toBlob((b) => resolve(b!), format, 0.98)
+          );
+          sub600?.file(`${preset.name}_${col.name}_600DPI_超清.${ext}`, blob600);
         }
       }
 
@@ -534,13 +803,13 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       const downloadUrl = URL.createObjectURL(zipBlob);
       const a = document.createElement('a');
       a.href = downloadUrl;
-      a.download = `证件照全套合集_1寸_2寸_红蓝白透明_${Date.now()}.zip`;
+      a.download = `证件照全套合集_含300DPI与600DPI超清_${Date.now()}.zip`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(downloadUrl);
 
-      onNotification?.('🎉 全套证件照合集 ZIP 打包下载成功！包含1寸/2寸/红白蓝全底色');
+      onNotification?.('🎉 全套证件照合集 ZIP 打包下载成功！包含 300DPI 官方版与 600DPI 智能超清版');
     } catch (err: any) {
       console.error('Failed to export full set zip:', err);
       onNotification?.('导出失败，请重试');
@@ -564,36 +833,53 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     <div className="space-y-6 animate-in fade-in duration-200">
       {/* Top Banner / Feature Intro */}
       <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 rounded-2xl p-5 text-white shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-500/30 text-blue-200 border border-blue-400/30 flex items-center gap-1">
-              <Sparkles className="w-3 h-3 text-blue-300" />
-              AI 智能人像抠图 • 300 DPI 照相馆冲印标准
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-pink-500/30 text-pink-200 border border-pink-400/30 flex items-center gap-1">
+              <Scissors className="w-3 h-3 text-pink-300" />
+              发丝与颈部深度去白边 • 边缘微收内剪
+            </span>
+            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-400/30 flex items-center gap-1">
+              <Zap className="w-3 h-3 text-amber-300" />
+              智能超清增强 (600DPI 极清)
             </span>
             <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
-              国家通用国家标准
+              国家通用标准规范
             </span>
           </div>
-          <h2 className="text-lg font-bold">证件照一键智能生成与换底套件</h2>
-          <p className="text-xs text-blue-200/80 leading-relaxed">
-            支持 1寸 / 2寸 / 护照签证 / 考研公考规格自动裁切；AI 自动精细抠发丝，一键切换透明底、红底、蓝底、白底及自选调色；提供 6寸相纸照相馆排版冲印。
+          <h2 className="text-lg font-bold">证件照一键智能生成与发丝超清优化套件</h2>
+          <p className="text-xs text-blue-200/80 leading-relaxed max-w-2xl">
+            深度优化头发与颈部边缘：采用精确距离场物理收边与去色溢算法，消除红蓝底色下的白边与阶梯锯齿；提供 300DPI 官方标准与 600DPI 双倍超清下载，解决下载图片模糊问题。
           </p>
         </div>
 
-        {/* Quick Demo Portrait Loaders */}
-        <div className="shrink-0 flex items-center gap-2 bg-white/10 p-2 rounded-xl border border-white/10 backdrop-blur-xs">
-          <span className="text-[11px] text-blue-200 font-medium pl-1">快速测试：</span>
-          {DEMO_PORTRAITS.map((demo) => (
-            <button
-              key={demo.id}
-              type="button"
-              onClick={() => handleSelectDemoPortrait(demo)}
-              disabled={portraitState.isMatting}
-              className="px-2.5 py-1 text-xs font-bold bg-white/15 hover:bg-white/25 rounded-lg border border-white/20 transition-all text-white flex items-center gap-1 cursor-pointer disabled:opacity-50"
-            >
-              <span>{demo.gender === 'male' ? '👨 男士示范' : '👩 女士示范'}</span>
-            </button>
-          ))}
+        {/* Quick Actions & Demo Portrait Loaders */}
+        <div className="shrink-0 flex flex-col sm:flex-row items-start sm:items-center gap-2">
+          {/* One click auto enhance button */}
+          <button
+            type="button"
+            onClick={handleOneClickAutoEnhance}
+            className="px-3.5 py-2 text-xs font-bold bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 rounded-xl shadow-md text-white flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+            title="一键切除白边、消除光晕杂色、提升五官清晰度"
+          >
+            <Zap className="w-3.5 h-3.5 fill-white" />
+            <span>⚡ 一键强力去白边超清</span>
+          </button>
+
+          <div className="flex items-center gap-1.5 bg-white/10 p-1.5 rounded-xl border border-white/10 backdrop-blur-xs">
+            <span className="text-[11px] text-blue-200 font-medium pl-1">快速测试：</span>
+            {DEMO_PORTRAITS.map((demo) => (
+              <button
+                key={demo.id}
+                type="button"
+                onClick={() => handleSelectDemoPortrait(demo)}
+                disabled={portraitState.isMatting}
+                className="px-2.5 py-1 text-xs font-bold bg-white/15 hover:bg-white/25 rounded-lg border border-white/20 transition-all text-white flex items-center gap-1 cursor-pointer disabled:opacity-50"
+              >
+                <span>{demo.id === 'demo-male-mature' ? '👨 自然发丝' : demo.gender === 'male' ? '👨 青年男士' : '👩 职场女士'}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -649,14 +935,14 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   <p className="text-xs font-bold text-stone-800">
                     {portraitState.file ? (
                       <span className="text-indigo-600">
-                        当前文件: {portraitState.file.name} (点击可更换)
+                        当前文件: {portraitState.file.name} (点击可更换照片)
                       </span>
                     ) : (
                       '点击或拖拽上传人像正面照片（支持 JPG/PNG/WEBP）'
                     )}
                   </p>
                   <p className="text-[11px] text-stone-400">
-                    光线均匀、面部无遮挡、正面免冠拍摄效果最佳
+                    光线均匀、正面免冠拍摄效果最佳；系统将自动精修发丝与五官细节
                   </p>
                 </div>
               </div>
@@ -668,7 +954,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 <div className="flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2 text-blue-900 font-bold">
                     <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                    <span>{portraitState.mattingMessage || 'AI 正在自动抠图中...'}</span>
+                    <span>{portraitState.mattingMessage || 'AI 正在自动抠图精修发丝中...'}</span>
                   </div>
                   <span className="font-mono text-blue-700">{portraitState.mattingProgress}%</span>
                 </div>
@@ -838,14 +1124,361 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
             </div>
           </div>
 
-          {/* Section 4: Framing, Position, Suit Attire & Beauty Controls */}
+          {/* Section 4: Hair & Neck Detail & Edge Optimization (发丝与颈部去白边精修) */}
+          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-pink-50 text-pink-600 flex items-center justify-center font-bold text-xs">
+                  <Scissors className="w-3.5 h-3.5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
+                    发丝与颈部边缘精修
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-pink-100 text-pink-700">
+                      消除头发与颈部白边
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-stone-400">
+                    针对红/蓝底色下头发顶端与颈部两侧的白色残留进行距离场物理内切与消色溢
+                  </p>
+                </div>
+              </div>
+
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hairConfig.enabled}
+                  onChange={(e) =>
+                    setHairConfig((prev) => ({ ...prev, enabled: e.target.checked }))
+                  }
+                  className="rounded text-pink-600 focus:ring-pink-500 w-4 h-4 cursor-pointer"
+                />
+                <span className="text-xs font-bold text-stone-700">开启边缘优化</span>
+              </label>
+            </div>
+
+            {/* Quick Hair & Neck Presets */}
+            <div className="space-y-1.5">
+              <span className="text-[11px] text-stone-500 font-medium">快捷去白边与发丝调优预设（点击即刻实时生效）：</span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  {
+                    name: '强力去白边 (强烈推荐)',
+                    desc: '物理内收2.8px，消除白边与面部粗糙',
+                    highlight: true,
+                    config: { deFringe: 100, feather: 1.0, edgeShift: -2.8, textureBoost: 50, skinSmoothing: 65 },
+                  },
+                  {
+                    name: '✂️ 超深切除 (顽固白边专用)',
+                    desc: '物理内收5.0px，彻底切除任何顽固白边',
+                    config: { deFringe: 100, feather: 1.2, edgeShift: -5.0, textureBoost: 40, skinSmoothing: 70 },
+                  },
+                  {
+                    name: '自然发丝 (标准)',
+                    desc: '微收1.2px，兼顾发梢细节与净边磨皮',
+                    config: { deFringe: 90, feather: 1.0, edgeShift: -1.2, textureBoost: 50, skinSmoothing: 55 },
+                  },
+                  {
+                    name: '柔和过渡',
+                    desc: '内收2.0px+大羽化平滑柔肤',
+                    config: { deFringe: 95, feather: 2.2, edgeShift: -2.0, textureBoost: 30, skinSmoothing: 65 },
+                  },
+                ].map((preset) => {
+                  const isActive =
+                    hairConfig.enabled &&
+                    hairConfig.edgeShift === preset.config.edgeShift &&
+                    hairConfig.deFringe === preset.config.deFringe;
+                  return (
+                    <button
+                      key={preset.name}
+                      type="button"
+                      onClick={() => {
+                        const newCfg: HairOptimizationConfig = {
+                          ...hairConfig,
+                          enabled: true,
+                          ...preset.config,
+                        };
+                        setHairConfig(newCfg);
+                        applyHairOptimization(newCfg);
+                        onNotification?.(`已切换至「${preset.name}」模式，白边已立即切除`);
+                      }}
+                      className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
+                        isActive
+                          ? 'bg-pink-50 border-pink-500 shadow-2xs ring-1 ring-pink-400'
+                          : preset.highlight
+                          ? 'border-pink-300 bg-pink-50/40 hover:bg-pink-50'
+                          : 'border-stone-200 bg-stone-50 hover:bg-stone-100'
+                      }`}
+                    >
+                      <div className="text-xs font-bold text-stone-900 flex items-center justify-between">
+                        <span>{preset.name}</span>
+                        {isActive && <Check className="w-3.5 h-3.5 text-pink-600" />}
+                      </div>
+                      <div className="text-[10px] text-stone-400 mt-0.5">{preset.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Detailed Sliders */}
+            <div className="space-y-3.5 pt-2 border-t border-stone-100">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                {/* 1. Edge Inward Shift (Key Slider for White Edges) */}
+                <div className="bg-pink-50/40 p-3 rounded-xl border border-pink-100 space-y-1">
+                  <div className="flex items-center justify-between text-xs text-stone-800 font-bold">
+                    <span className="flex items-center gap-1">
+                      <span>边缘物理内收剪切 (Edge Trim)</span>
+                      <span className="text-[10px] font-normal text-pink-700 bg-pink-200/60 px-1.5 py-0.2 rounded">
+                        消除白边核心
+                      </span>
+                    </span>
+                    <span className="font-mono text-pink-700 text-sm">
+                      {hairConfig.edgeShift > 0 ? `+${hairConfig.edgeShift}` : hairConfig.edgeShift} px
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="-10.0"
+                    max="2.0"
+                    step="0.2"
+                    value={hairConfig.edgeShift}
+                    onInput={(e) => {
+                      const val = Number((e.target as HTMLInputElement).value);
+                      const newCfg = { ...hairConfig, edgeShift: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newCfg = { ...hairConfig, edgeShift: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    disabled={!hairConfig.enabled}
+                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
+                  />
+                  <div className="flex justify-between text-[10px] text-stone-500 font-mono">
+                    <span>强力切除 (-10px)</span>
+                    <span>推荐 (-2.8px)</span>
+                    <span>原边 (0px)</span>
+                    <span>外扩 (+2px)</span>
+                  </div>
+                  <p className="text-[10px] text-pink-600/90 leading-tight pt-0.5">
+                    💡 往左滑动可将头发、耳朵与颈部外围残存的原图白边整圈切除，画面实时跟随变化！
+                  </p>
+                </div>
+
+                {/* 2. De-fringe */}
+                <div className="bg-stone-50 p-3 rounded-xl border border-stone-200/70 space-y-1">
+                  <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
+                    <span title="消除原图背景色在发丝和颈部边缘形成的浅色反光与光晕">
+                      发丝与颈部消色溢 (De-fringe)
+                    </span>
+                    <span className="font-mono text-pink-600 font-bold">{hairConfig.deFringe}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    value={hairConfig.deFringe}
+                    onInput={(e) => {
+                      const val = Number((e.target as HTMLInputElement).value);
+                      const newCfg = { ...hairConfig, deFringe: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newCfg = { ...hairConfig, deFringe: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    disabled={!hairConfig.enabled}
+                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
+                  />
+                  <div className="flex justify-between text-[10px] text-stone-400">
+                    <span>原样保留</span>
+                    <span>深度净边 (推荐 90%~100%)</span>
+                  </div>
+                  <p className="text-[10px] text-stone-400 leading-tight pt-0.5">
+                    将浅色边缘自动替换为真实的黑发发色与红润颈部肤色。
+                  </p>
+                </div>
+
+                {/* 3. Feathering / Anti-aliasing */}
+                <div>
+                  <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
+                    <span title="消除边缘阶梯锯齿与生硬轮廓，使发梢与颈部自然融入底色">
+                      边缘柔和羽化与抗锯齿 (Feather)
+                    </span>
+                    <span className="font-mono text-pink-600 font-bold">{hairConfig.feather} px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="3.5"
+                    step="0.1"
+                    value={hairConfig.feather}
+                    onInput={(e) => {
+                      const val = Number((e.target as HTMLInputElement).value);
+                      const newCfg = { ...hairConfig, feather: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newCfg = { ...hairConfig, feather: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    disabled={!hairConfig.enabled}
+                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
+                  />
+                  <div className="flex justify-between text-[10px] text-stone-400 mt-0.5">
+                    <span>硬边干净</span>
+                    <span>柔和过渡 (1.0px 推荐)</span>
+                  </div>
+                </div>
+
+                {/* 4. Hair Texture Boost */}
+                <div>
+                  <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
+                    <span title="增强深色头发的微发缕对比与光泽，使头发不再是一团死黑">
+                      发丝纹理立体感与光泽
+                    </span>
+                    <span className="font-mono text-pink-600 font-bold">
+                      {hairConfig.textureBoost}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    value={hairConfig.textureBoost}
+                    onInput={(e) => {
+                      const val = Number((e.target as HTMLInputElement).value);
+                      const newCfg = { ...hairConfig, textureBoost: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newCfg = { ...hairConfig, textureBoost: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    disabled={!hairConfig.enabled}
+                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
+                  />
+                  <div className="flex justify-between text-[10px] text-stone-400 mt-0.5">
+                    <span>平滑</span>
+                    <span>发缕分明 (50% 推荐)</span>
+                  </div>
+                </div>
+
+                {/* 5. Smart Facial Skin Smoothing (面部智能磨皮与自然平滑) */}
+                <div className="sm:col-span-2 bg-gradient-to-r from-amber-50/60 via-pink-50/50 to-rose-50/60 p-3.5 rounded-xl border border-pink-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between text-xs text-stone-800 font-bold">
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-pink-600" />
+                      <span>面部智能磨皮与自然平滑 (Skin Smoothing)</span>
+                      <span className="text-[10px] font-normal text-pink-700 bg-pink-100 px-2 py-0.5 rounded-full font-sans">
+                        抚平粗糙毛孔与暗沉
+                      </span>
+                    </span>
+                    <span className="font-mono text-pink-700 font-bold text-sm">
+                      {hairConfig.skinSmoothing ?? 65}%
+                    </span>
+                  </div>
+
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    value={hairConfig.skinSmoothing ?? 65}
+                    onInput={(e) => {
+                      const val = Number((e.target as HTMLInputElement).value);
+                      const newCfg = { ...hairConfig, skinSmoothing: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      const newCfg = { ...hairConfig, skinSmoothing: val };
+                      setHairConfig(newCfg);
+                      applyHairOptimization(newCfg);
+                    }}
+                    disabled={!hairConfig.enabled}
+                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
+                  />
+
+                  <div className="flex justify-between items-center text-[10px] text-stone-600 font-medium pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newCfg = { ...hairConfig, skinSmoothing: 0 };
+                        setHairConfig(newCfg);
+                        applyHairOptimization(newCfg);
+                      }}
+                      className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
+                    >
+                      关闭磨皮 (0%)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newCfg = { ...hairConfig, skinSmoothing: 35 };
+                        setHairConfig(newCfg);
+                        applyHairOptimization(newCfg);
+                      }}
+                      className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
+                    >
+                      轻微平滑 (35%)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newCfg = { ...hairConfig, skinSmoothing: 65 };
+                        setHairConfig(newCfg);
+                        applyHairOptimization(newCfg);
+                      }}
+                      className="font-bold text-pink-600 hover:text-pink-700 px-1.5 py-0.5 rounded bg-pink-100/70 cursor-pointer transition-colors"
+                    >
+                      自然影楼精修 (65% 推荐)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newCfg = { ...hairConfig, skinSmoothing: 90 };
+                        setHairConfig(newCfg);
+                        applyHairOptimization(newCfg);
+                      }}
+                      className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
+                    >
+                      强效柔肤 (90%)
+                    </button>
+                  </div>
+
+                  <p className="text-[10px] text-pink-700/80 leading-relaxed">
+                    💡 智能双边边缘保留滤波：深度抚平面部粗糙、毛孔暗沉与胡茬斑驳，精准保留双眼、鼻梁高光、嘴唇轮廓与耳朵结构的极致清晰！
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 5: Framing, Position, Suit Attire & Beauty Controls */}
           <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
-                  4
+                  5
                 </div>
-                <h3 className="text-sm font-bold text-stone-900">人像微调、正装换装与美化</h3>
+                <h3 className="text-sm font-bold text-stone-900">人像微调、正装换装与调光</h3>
               </div>
 
               <button
@@ -1047,17 +1680,17 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Live High-Definition Canvas Preview & Export (Width: 5 / 12) */}
+        {/* Right Column: Live High-Definition Canvas Preview & Smart Clarity Controls (Width: 5 / 12) */}
         <div className="lg:col-span-5 space-y-5 lg:sticky lg:top-24">
           <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
             {/* Header info */}
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-bold text-stone-900">
-                  实时预览 • {currentSpec.name}
+                <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
+                  实时超清预览 • {currentSpec.name}
                 </h3>
                 <p className="text-[11px] text-stone-500 font-mono">
-                  {targetWidthPx} × {targetHeightPx} px @ 300 DPI
+                  {targetWidthPx} × {targetHeightPx} px @ 300 DPI (冲印级精度)
                 </p>
               </div>
 
@@ -1109,11 +1742,191 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 }}
               />
 
+              {/* Top compare badge button: Hold to Compare original */}
+              <div className="absolute top-2.5 right-2.5">
+                <button
+                  type="button"
+                  onMouseDown={() => setIsComparingOriginal(true)}
+                  onMouseUp={() => setIsComparingOriginal(false)}
+                  onMouseLeave={() => setIsComparingOriginal(false)}
+                  onTouchStart={() => setIsComparingOriginal(true)}
+                  onTouchEnd={() => setIsComparingOriginal(false)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold shadow-sm transition-all flex items-center gap-1 cursor-pointer select-none ${
+                    isComparingOriginal
+                      ? 'bg-amber-500 text-white ring-2 ring-amber-300'
+                      : 'bg-black/60 hover:bg-black/75 text-white/90 backdrop-blur-xs'
+                  }`}
+                  title="按住即可查看未进行发丝去白边与清晰度增强的原始画质"
+                >
+                  <Eye className="w-3 h-3" />
+                  <span>{isComparingOriginal ? '正在显示原画质...' : '按住对比原画质'}</span>
+                </button>
+              </div>
+
               {/* Drag instruction overlay badge */}
               <div className="absolute bottom-2.5 inset-x-0 flex justify-center pointer-events-none">
                 <span className="px-2.5 py-1 rounded-full text-[10px] font-medium bg-black/60 text-white/90 backdrop-blur-xs">
-                  按住鼠标左键可拖拽平移 • 滚轮可缩放人像
+                  按住左键拖拽平移 • 滚轮缩放 • 超清去白边实时呈现
                 </span>
+              </div>
+            </div>
+
+            {/* Smart Image Clarity Controls (智能优化图片清晰度) */}
+            <div className="bg-amber-50/50 border border-amber-200/80 rounded-xl p-4 space-y-3.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-lg bg-amber-500 text-white flex items-center justify-center font-bold text-xs shadow-2xs">
+                    <Sparkles className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-stone-900 flex items-center gap-1">
+                      智能优化图片清晰度 (AI 超清重建)
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-200 text-amber-900">
+                        解决下载模糊
+                      </span>
+                    </h4>
+                    <p className="text-[10px] text-stone-500">
+                      自适应锐化眼睛、眉毛、发丝与五官轮廓，防止画面发糊
+                    </p>
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={clarityConfig.enabled}
+                    onChange={(e) =>
+                      setClarityConfig((prev) => ({ ...prev, enabled: e.target.checked }))
+                    }
+                    className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span className="text-xs font-bold text-amber-900">开启超清</span>
+                </label>
+              </div>
+
+              {/* Clarity Intensity Slider */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
+                  <span>清晰度增强强度:</span>
+                  <span className="font-mono text-amber-700 font-bold">{clarityConfig.strength}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={clarityConfig.strength}
+                  onChange={(e) =>
+                    setClarityConfig((prev) => ({ ...prev, strength: Number(e.target.value) }))
+                  }
+                  disabled={!clarityConfig.enabled}
+                  className="w-full accent-amber-600 cursor-pointer disabled:opacity-50"
+                />
+              </div>
+
+              {/* Detail Mode Selection */}
+              <div className="space-y-1.5">
+                <span className="text-[11px] text-stone-600 font-medium">五官与细节模式:</span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { id: 'balanced', label: '智能均衡', desc: '自然人像' },
+                    { id: 'features', label: '五官特清', desc: '明眸发丝' },
+                    { id: 'crisp', label: '极致锐利', desc: '照相馆原画' },
+                  ].map((mode) => {
+                    const active = clarityConfig.detailMode === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() =>
+                          setClarityConfig((prev) => ({
+                            ...prev,
+                            detailMode: mode.id as any,
+                          }))
+                        }
+                        disabled={!clarityConfig.enabled}
+                        className={`p-1.5 rounded-lg border text-center transition-all cursor-pointer ${
+                          active
+                            ? 'bg-amber-100 border-amber-500 text-amber-900 font-bold shadow-2xs'
+                            : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
+                        }`}
+                      >
+                        <div className="text-xs">{mode.label}</div>
+                        <div className="text-[9px] text-stone-400">{mode.desc}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Download Resolution & DPI Multiplier Selector */}
+              <div className="pt-2 border-t border-amber-200/60 space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-stone-800">下载图片清晰度规格:</span>
+                  <span className="text-[11px] font-mono text-amber-700 font-bold">
+                    {clarityConfig.exportDpiMultiplier === 1
+                      ? `标准 300DPI (${targetWidthPx}×${targetHeightPx})`
+                      : clarityConfig.exportDpiMultiplier === 2
+                      ? `🔥 智能超清 600DPI (${targetWidthPx * 2}×${targetHeightPx * 2})`
+                      : `💎 印刷极清 1200DPI (${targetWidthPx * 4}×${targetHeightPx * 4})`}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    {
+                      mult: 1 as const,
+                      title: '300 DPI 官方',
+                      sub: `${targetWidthPx}×${targetHeightPx}`,
+                      tag: '报名规范',
+                    },
+                    {
+                      mult: 2 as const,
+                      title: '🔥 600 DPI 超清',
+                      sub: `${targetWidthPx * 2}×${targetHeightPx * 2}`,
+                      tag: '清晰翻倍/推荐',
+                    },
+                    {
+                      mult: 4 as const,
+                      title: '1200 DPI 极清',
+                      sub: `${targetWidthPx * 4}×${targetHeightPx * 4}`,
+                      tag: '印刷原画',
+                    },
+                  ].map((res) => {
+                    const active = clarityConfig.exportDpiMultiplier === res.mult;
+                    return (
+                      <button
+                        key={res.mult}
+                        type="button"
+                        onClick={() =>
+                          setClarityConfig((prev) => ({
+                            ...prev,
+                            exportDpiMultiplier: res.mult,
+                          }))
+                        }
+                        className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                          active
+                            ? 'bg-amber-600 text-white border-amber-600 shadow-xs ring-1 ring-amber-400'
+                            : 'bg-white border-stone-200 text-stone-700 hover:border-stone-300'
+                        }`}
+                      >
+                        <div className="text-xs font-bold">{res.title}</div>
+                        <div className={`text-[10px] font-mono ${active ? 'text-amber-100' : 'text-stone-400'}`}>
+                          {res.sub}
+                        </div>
+                        <span
+                          className={`inline-block mt-0.5 text-[9px] px-1 py-0.2 rounded font-medium ${
+                            active ? 'bg-amber-700/60 text-white' : 'bg-stone-100 text-stone-500'
+                          }`}
+                        >
+                          {res.tag}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-stone-500">
+                  💡 很多网站下载的照片看起来模糊，是因为标准 1 寸 (295×413) 像素较小。选择「600DPI 智能超清」，导出分辨率翻倍，手机打开放大看发丝五官极其清晰！
+                </p>
               </div>
             </div>
 
@@ -1154,20 +1967,35 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
               </div>
               <p className="text-[11px] text-stone-400 leading-normal">
                 {fileSizeLimitKb > 0
-                  ? `💡 系统将采用二分法质量优化，严格保证文件不超过 ${fileSizeLimitKb}KB，满足公考/考研/报名系统验证！`
-                  : '💡 适合洗印与高清冲印，保留最高细节'}
+                  ? `💡 系统将采用智能二分法压缩，严格保证文件不超过 ${fileSizeLimitKb}KB，满足公考/考研/报名系统验证！`
+                  : '💡 默认无体积限制，输出最高品质与最清晰发丝细节'}
               </p>
             </div>
 
             {/* Action Buttons */}
             <div className="space-y-2.5 pt-2 border-t border-stone-100">
+              {/* Primary Download: Smart Ultra-HD Download Button */}
               <button
                 type="button"
-                onClick={handleDownloadSinglePhoto}
-                className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer active:scale-[0.99]"
+                onClick={() => handleDownloadSinglePhoto(2)}
+                className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-amber-600 via-orange-600 to-indigo-700 hover:from-amber-700 hover:to-indigo-800 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-[0.99]"
               >
-                <Download className="w-4 h-4" />
-                <span>下载当前证件照 ({currentSpec.name} • {currentColor.name})</span>
+                <Zap className="w-4 h-4 fill-amber-200 text-amber-200" />
+                <span>
+                  ⚡ 智能超清下载 (推荐 600DPI • {targetWidthPx * 2}×{targetHeightPx * 2} px)
+                </span>
+              </button>
+
+              {/* Secondary Download: Exact Selected DPI/Size */}
+              <button
+                type="button"
+                onClick={() => handleDownloadSinglePhoto()}
+                className="w-full py-2.5 px-4 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-2 border border-stone-200 transition-all cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-stone-600" />
+                <span>
+                  下载当前设定规格 ({currentSpec.name} • {currentColor.name} • {clarityConfig.exportDpiMultiplier * 300}DPI)
+                </span>
               </button>
 
               <div className="grid grid-cols-2 gap-2">
@@ -1184,10 +2012,11 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   type="button"
                   onClick={handleExportFullSetZip}
                   disabled={isExportingZip}
-                  className="py-2.5 px-3 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-xs border border-amber-300 flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  className="py-2.5 px-3 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-bold text-xs border border-indigo-300 flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  title="一键打包生成1寸/2寸/护照规格，含300DPI官方版与600DPI超清版红蓝白全底色"
                 >
-                  <FolderArchive className="w-3.5 h-3.5 text-amber-600" />
-                  <span>{isExportingZip ? '打包中...' : '全套合集 ZIP 打包'}</span>
+                  <FolderArchive className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>{isExportingZip ? '打包中...' : '全套合集 ZIP (含超清版)'}</span>
                 </button>
               </div>
 
@@ -1201,7 +2030,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   title="导入修图画板进行精细消除碎发、抹除痘痕或局部透底"
                 >
                   <Wand2 className="w-3.5 h-3.5 text-pink-600" />
-                  <span>发送至修图画板（擦除碎发/瑕疵去水印）</span>
+                  <span>发送至修图画板（擦除局部碎发/瑕疵去水印）</span>
                 </button>
               )}
             </div>
@@ -1215,7 +2044,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         onClose={() => setIsCameraOpen(false)}
         onPhotoCaptured={(file) => {
           processImageFile(file);
-          onNotification?.('📷 摄像头抓拍成功，AI 正在自动化抠图与换底...');
+          onNotification?.('📷 摄像头抓拍成功，AI 正在自动化抠图与发丝超清优化...');
         }}
       />
 

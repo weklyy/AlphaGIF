@@ -18,7 +18,7 @@ export interface DemoPortrait {
  */
 function generateDemoPortraitBlob(
   gender: 'male' | 'female',
-  style: 'young_man' | 'business_woman' | 'student'
+  style: 'young_man' | 'business_woman' | 'student' | 'mature_man'
 ): Promise<Blob> {
   const canvas = document.createElement('canvas');
   canvas.width = 600;
@@ -33,6 +33,9 @@ function generateDemoPortraitBlob(
   } else if (style === 'business_woman') {
     bgGrad.addColorStop(0, '#E2E8F0'); // beige indoor room
     bgGrad.addColorStop(1, '#CBD5E1');
+  } else if (style === 'mature_man') {
+    bgGrad.addColorStop(0, '#D1D5DB'); // light grey interior wall with soft ambient light
+    bgGrad.addColorStop(1, '#9CA3AF');
   } else {
     bgGrad.addColorStop(0, '#F1F5F9'); // campus daylight
     bgGrad.addColorStop(1, '#E2E8F0');
@@ -58,10 +61,15 @@ function generateDemoPortraitBlob(
   // 2. Draw Shoulders & Clothing
   ctx.save();
   if (gender === 'male') {
-    // Shoulders (Navy polo shirt / casual sweater)
+    // Shoulders (Navy polo shirt / black shirt for mature_man)
     const shirtGrad = ctx.createLinearGradient(100, 500, 500, 800);
-    shirtGrad.addColorStop(0, '#334155');
-    shirtGrad.addColorStop(1, '#1e293b');
+    if (style === 'mature_man') {
+      shirtGrad.addColorStop(0, '#1c1917');
+      shirtGrad.addColorStop(1, '#0c0a09');
+    } else {
+      shirtGrad.addColorStop(0, '#334155');
+      shirtGrad.addColorStop(1, '#1e293b');
+    }
     ctx.fillStyle = shirtGrad;
 
     ctx.beginPath();
@@ -73,7 +81,7 @@ function generateDemoPortraitBlob(
     ctx.fill();
 
     // Collar
-    ctx.fillStyle = '#475569';
+    ctx.fillStyle = style === 'mature_man' ? '#292524' : '#475569';
     ctx.beginPath();
     ctx.moveTo(220, 520);
     ctx.lineTo(260, 580);
@@ -294,6 +302,17 @@ function generateDemoPortraitBlob(
 }
 
 export const DEMO_PORTRAITS: DemoPortrait[] = [
+  {
+    id: 'demo-male-mature',
+    name: '示范人像：自然发丝男士 (推荐测试)',
+    gender: 'male',
+    description: '标准正面免冠、微波浪发丝与自然纹理人像，黑色衬衫，适合测试发丝精细去白边、抗锯齿与智能超清优化',
+    avatarUrl: '',
+    createFile: async () => {
+      const blob = await generateDemoPortraitBlob('male', 'mature_man');
+      return new File([blob], 'demo_portrait_mature_man.jpg', { type: 'image/jpeg' });
+    },
+  },
   {
     id: 'demo-male-business',
     name: '示范人像：青年职场男士',

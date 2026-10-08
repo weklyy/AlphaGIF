@@ -13,6 +13,7 @@ import {
   FileImage,
   Loader2,
   Paintbrush,
+  Square,
 } from 'lucide-react';
 import { SlicedStickerItem } from '../../types';
 import {
@@ -25,6 +26,8 @@ interface StickerGridResultsProps {
   onImportAllToTab2: () => void;
   onImportSingleToTab2: (sticker: SlicedStickerItem) => void;
   onSendToRetouch?: (sticker: SlicedStickerItem) => void;
+  onRemoveFrameFromStickers?: (indices?: number[]) => Promise<void> | void;
+  isRemovingFrame?: boolean;
   onSetAsCover: (index: number) => void;
   onSetAsIcon: (index: number) => void;
   onSetAsGuide: (index: number) => void;
@@ -40,6 +43,8 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
   onImportAllToTab2,
   onImportSingleToTab2,
   onSendToRetouch,
+  onRemoveFrameFromStickers,
+  isRemovingFrame = false,
   onSetAsCover,
   onSetAsIcon,
   onSetAsGuide,
@@ -110,8 +115,25 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
           </div>
         </div>
 
-        {/* Global Action: Download Zip and Import to Tab 2 */}
+        {/* Global Action: Download Zip, Remove Frames, and Import to Tab 2 */}
         <div className="flex flex-wrap items-center gap-2">
+          {onRemoveFrameFromStickers && (
+            <button
+              type="button"
+              onClick={() => onRemoveFrameFromStickers()}
+              disabled={isRemovingFrame}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-stone-950 border border-amber-600 text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95 disabled:opacity-50 cursor-pointer"
+              title="鼠标点一下，即可全部去除所有表情切片的方框与边框线，无需手动裁切！"
+            >
+              {isRemovingFrame ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-stone-950" />
+              ) : (
+                <Sparkles className="w-3.5 h-3.5 text-stone-950 fill-stone-950" />
+              )}
+              <span>⚡ 鼠标点一下·全删方框</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleExportZip}
@@ -307,6 +329,18 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                     <Download className="w-3 h-3" />
                     下载单张 ({isStatic ? 'PNG' : 'GIF'})
                   </button>
+
+                  {onRemoveFrameFromStickers && (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveFrameFromStickers([sticker.index])}
+                      title="一键去除此格的正方形黑框或彩色边框线"
+                      className="py-1 px-2 bg-amber-50 hover:bg-amber-100 text-amber-900 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-amber-300/80 cursor-pointer"
+                    >
+                      <Square className="w-3 h-3 text-amber-700 stroke-[2.5]" />
+                      去框
+                    </button>
+                  )}
 
                   {onSendToRetouch && (
                     <button

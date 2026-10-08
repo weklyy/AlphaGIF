@@ -56,6 +56,7 @@ import { ImageRetouchWorkspace } from './components/WeChatSuite/ImageRetouchWork
 import { IdPhotoMaker } from './components/IdPhoto/IdPhotoMaker';
 import { sliceVideoIntoStickers } from './utils/videoGridSlicer';
 import { sliceImageIntoStickers } from './utils/imageGridSlicer';
+import { processStickerItemFrameRemoval } from './utils/frameBorderRemover';
 import {
   generateAllWeChatMaterials,
   generateBannerMaterial,
@@ -156,6 +157,7 @@ export default function App() {
   const [imageRewardThanksIndex, setImageRewardThanksIndex] = useState(3);
   const [imageMaterials, setImageMaterials] = useState<WeChatMaterialsState | null>(null);
   const [isImageGeneratingMaterials, setIsImageGeneratingMaterials] = useState(false);
+  const [isRemovingFrameFromStickers, setIsRemovingFrameFromStickers] = useState(false);
 
   // Tab 3: Batch Transparency Tool State
   const [items, setItems] = useState<GifItem[]>([]);
@@ -571,6 +573,98 @@ export default function App() {
       } catch (err) {
         console.error(err);
       }
+    }
+  };
+
+  const handleRemoveFrameFromImageStickers = async (indices?: number[], overrideConfig?: Partial<ImageGridConfig>) => {
+    if (imageSlicedStickers.length === 0 || isRemovingFrameFromStickers) return;
+    setIsRemovingFrameFromStickers(true);
+    showNotification('正在一键去除切片方框/边框线...');
+    const effectiveConfig = { ...imageGridConfig, ...(overrideConfig || {}) };
+    try {
+      const updated = await Promise.all(
+        imageSlicedStickers.map(async (sticker) => {
+          if (indices && !indices.includes(sticker.index)) {
+            return sticker;
+          }
+          const isPureBrush = !!effectiveConfig.frameEraserMaskUrl && !effectiveConfig.removeFrameBorder;
+          return await processStickerItemFrameRemoval(sticker, {
+            mode: effectiveConfig.frameBorderMode || 'auto',
+            targetColor: effectiveConfig.frameBorderColor || '#000000',
+            targetColors: effectiveConfig.frameBorderColors,
+            tolerance: effectiveConfig.frameBorderTolerance ?? 35,
+            borderWidth: effectiveConfig.frameBorderWidth ?? 3,
+            inset: 0,
+            autoScale: false,
+            skipColorRemoval: isPureBrush,
+            eraserMaskUrl: effectiveConfig.frameEraserMaskUrl,
+          });
+        })
+      );
+      setImageSlicedStickers(updated);
+      if (imageMaterials) {
+        const generatedMaterials = await generateAllWeChatMaterials(
+          updated,
+          imageBannerOptions,
+          imageCoverIndex,
+          imageIconOptions,
+          imageRewardGuideIndex,
+          imageRewardThanksIndex
+        );
+        setImageMaterials(generatedMaterials);
+      }
+      showNotification('✨ 已成功仅去除切片方框线！文字与图像原样保留，未进行任何缩放。');
+    } catch (err) {
+      console.error('Failed to remove frame from image stickers', err);
+      showNotification('去方框处理失败，请重试');
+    } finally {
+      setIsRemovingFrameFromStickers(false);
+    }
+  };
+
+  const handleRemoveFrameFromVideoStickers = async (indices?: number[], overrideConfig?: Partial<GridConfig>) => {
+    if (slicedStickers.length === 0 || isRemovingFrameFromStickers) return;
+    setIsRemovingFrameFromStickers(true);
+    showNotification('正在一键去除动态切片方框/边框线...');
+    const effectiveConfig = { ...gridConfig, ...(overrideConfig || {}) };
+    try {
+      const updated = await Promise.all(
+        slicedStickers.map(async (sticker) => {
+          if (indices && !indices.includes(sticker.index)) {
+            return sticker;
+          }
+          const isPureBrush = !!effectiveConfig.frameEraserMaskUrl && !effectiveConfig.removeFrameBorder;
+          return await processStickerItemFrameRemoval(sticker, {
+            mode: effectiveConfig.frameBorderMode || 'auto',
+            targetColor: effectiveConfig.frameBorderColor || '#000000',
+            targetColors: effectiveConfig.frameBorderColors,
+            tolerance: effectiveConfig.frameBorderTolerance ?? 35,
+            borderWidth: effectiveConfig.frameBorderWidth ?? 3,
+            inset: 0,
+            autoScale: false,
+            skipColorRemoval: isPureBrush,
+            eraserMaskUrl: effectiveConfig.frameEraserMaskUrl,
+          });
+        })
+      );
+      setSlicedStickers(updated);
+      if (materials) {
+        const generatedMaterials = await generateAllWeChatMaterials(
+          updated,
+          bannerOptions,
+          coverIndex,
+          iconOptions,
+          rewardGuideIndex,
+          rewardThanksIndex
+        );
+        setMaterials(generatedMaterials);
+      }
+      showNotification('✨ 已成功去除动态切片的正方形黑框/彩色边框线！');
+    } catch (err) {
+      console.error('Failed to remove frame from video stickers', err);
+      showNotification('去方框处理失败，请重试');
+    } finally {
+      setIsRemovingFrameFromStickers(false);
     }
   };
 
@@ -1568,6 +1662,7 @@ export default function App() {
                   sliceProgress={sliceProgress}
                   sliceStatusText={sliceStatusText}
                   onResetVideo={handleResetVideo}
+                  onRemoveFrameFromStickers={slicedStickers.length > 0 ? handleRemoveFrameFromVideoStickers : undefined}
                 />
 
                 {/* Sliced Stickers Grid Results */}
@@ -1577,6 +1672,8 @@ export default function App() {
                     onImportAllToTab2={handleImportAllStickersToTab2}
                     onImportSingleToTab2={handleImportSingleStickerToTab2}
                     onSendToRetouch={handleSendStickerToRetouch}
+                    onRemoveFrameFromStickers={handleRemoveFrameFromVideoStickers}
+                    isRemovingFrame={isRemovingFrameFromStickers}
                     onSetAsCover={handleCoverIndexChange}
                     onSetAsIcon={(idx) => handleIconOptionsChange({ ...iconOptions, selectedStickerIndex: idx })}
                     onSetAsGuide={handleRewardGuideIndexChange}
@@ -1677,6 +1774,7 @@ export default function App() {
                   sliceProgress={imageSliceProgress}
                   sliceStatusText={imageSliceStatusText}
                   onResetImage={handleResetImage}
+                  onRemoveFrameFromStickers={imageSlicedStickers.length > 0 ? handleRemoveFrameFromImageStickers : undefined}
                 />
 
                 {/* Sliced Stickers Grid Results */}
@@ -1686,6 +1784,8 @@ export default function App() {
                     onImportAllToTab2={handleImportAllImageStickersToTab3}
                     onImportSingleToTab2={handleImportSingleImageStickerToTab3}
                     onSendToRetouch={handleSendStickerToRetouch}
+                    onRemoveFrameFromStickers={handleRemoveFrameFromImageStickers}
+                    isRemovingFrame={isRemovingFrameFromStickers}
                     onSetAsCover={handleImageCoverIndexChange}
                     onSetAsIcon={(idx) => handleImageIconOptionsChange({ ...imageIconOptions, selectedStickerIndex: idx })}
                     onSetAsGuide={handleImageRewardGuideIndexChange}

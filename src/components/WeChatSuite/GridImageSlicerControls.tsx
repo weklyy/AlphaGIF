@@ -34,6 +34,8 @@ import {
   X,
   Plus,
   Trash2,
+  Paintbrush,
+  Eraser,
 } from 'lucide-react';
 import { ImageGridConfig, GridPreset, GridCropArea, CellOverride, SlicerLayoutMode } from '../../types';
 import {
@@ -55,6 +57,12 @@ import {
   getIndependentBoxesFromGrid,
 } from '../../utils/gridGeometry';
 import { GridMagnifierLens, MagnifierData } from './GridMagnifierLens';
+import { FrameRemovalControlPanel } from './FrameRemovalControlPanel';
+import {
+  removeSquareFrameBorder,
+  sampleBorderColorAndGeometryFromClick,
+  autoDetectAtlasFrameBorder,
+} from '../../utils/frameBorderRemover';
 
 interface GridImageSlicerControlsProps {
   imageFile: File;
@@ -64,6 +72,7 @@ interface GridImageSlicerControlsProps {
   onStartSlice: (imgElement: HTMLImageElement) => void;
   onResetImage: () => void;
   onSendToRetouch?: (file: File) => void;
+  onRemoveFrameFromStickers?: (indices?: number[], overrideConfig?: Partial<ImageGridConfig>) => Promise<void> | void;
   isSlicing: boolean;
   sliceProgress: number;
   sliceStatusText: string;
@@ -77,6 +86,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
   onStartSlice,
   onResetImage,
   onSendToRetouch,
+  onRemoveFrameFromStickers,
   isSlicing,
   sliceProgress,
   sliceStatusText,
@@ -99,8 +109,23 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
   const [inspectCellIndex, setInspectCellIndex] = useState<number>(0);
   const [inspectViewMode, setInspectViewMode] = useState<'processed' | 'original' | 'split'>('processed');
   const [isPickingColor, setIsPickingColor] = useState<boolean>(false);
+  const [isPickingFrameColor, setIsPickingFrameColor] = useState<boolean>(false);
   const [hoverPickedColor, setHoverPickedColor] = useState<string | null>(null);
   const [isMultiColorMode, setIsMultiColorMode] = useState<boolean>(true);
+  // Brush Smear Frame Removal States
+  const [isBrushSmearActive, setIsBrushSmearActive] = useState<boolean>(false);
+  const [brushSize, setBrushSize] = useState<number>(16);
+  const [brushSyncAllCells, setBrushSyncAllCells] = useState<boolean>(config.frameEraserSyncAllCells ?? true);
+  const [brushLinkMode, setBrushLinkMode] = useState<'smart' | 'vertical' | 'horizontal' | 'none'>('smart');
+  const [brushHistory, setBrushHistory] = useState<string[]>([]);
+  const [brushPointerPos, setBrushPointerPos] = useState<{ x: number; y: number } | null>(null);
+  const brushCanvasRef = useRef<HTMLCanvasElement>(null);
+  const isPaintingBrushRef = useRef<boolean>(false);
+  const lastBrushPointRef = useRef<{ x: number; y: number } | null>(null);
+  const strokeStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const strokeDirectionRef = useRef<'vertical' | 'horizontal' | null>(null);
+  const strokeOriginCellRef = useRef<{ col: number; row: number } | null>(null);
+
   const [cellStats, setCellStats] = useState<{
     transparentPercent: number;
     isHealthy: 'good' | 'low' | 'high';
@@ -986,7 +1011,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
   };
 
   const handleContainerClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isPickingColor || !imgRef.current || !imgContainerRef.current) return;
+    if ((!isPickingColor && !isPickingFrameColor) || !imgRef.current || !imgContainerRef.current) return;
     const rect = imgContainerRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
@@ -1008,6 +1033,42 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
       const pixel = sCtx.getImageData(0, 0, 1, 1).data;
       const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
 
+      if (isPickingFrameColor) {
+        const sampled = sampleBorderColorAndGeometryFromClick(
+          imgRef.current,
+          normX,
+          normY,
+          config.cols,
+          config.rows,
+          cropArea
+        );
+        const existingColors = config.frameBorderColors && config.frameBorderColors.length > 0
+          ? config.frameBorderColors
+          : (config.frameBorderColor ? [config.frameBorderColor] : []);
+        const nextColors = existingColors.includes(sampled.hex) ? existingColors : [...existingColors, sampled.hex];
+
+        const nextConfig: ImageGridConfig = {
+          ...config,
+          removeFrameBorder: true,
+          frameBorderMode: 'auto',
+          frameBorderColor: sampled.hex,
+          frameBorderColors: nextColors,
+          frameBorderTolerance: Math.max(config.frameBorderTolerance || 38, sampled.suggestedTolerance),
+          frameBorderWidth: Math.min(4, Math.max(2, sampled.suggestedThickness)),
+          frameBorderInset: 0,
+          frameBorderAutoScale: false,
+        };
+        onConfigChange(nextConfig);
+        setAutoAlignToast({
+          message: `✨ 成功消除线框（识别颜色: ${sampled.hex}）！文字与原图保持原位，未进行缩放。当前已消除 ${nextColors.length} 处框线。`,
+          type: 'success',
+        });
+        if (onRemoveFrameFromStickers) {
+          onRemoveFrameFromStickers(undefined, nextConfig);
+        }
+        return;
+      }
+
       if (isMultiColorMode) {
         addPickedColor(hex);
         setAutoAlignToast({
@@ -1021,8 +1082,436 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
     }
   };
 
+  const handleOneClickDeleteAllFrames = (specifiedWidth?: number) => {
+    if (!brushCanvasRef.current) return;
+    const canvas = brushCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const nw = naturalDimensions.width || 1024;
+    const nh = naturalDimensions.height || 1024;
+    const activeCrop = cropArea || { x: 0, y: 0, width: 100, height: 100 };
+    const cropX = (activeCrop.x / 100) * nw;
+    const cropY = (activeCrop.y / 100) * nh;
+    const cropW = Math.max(10, (activeCrop.width / 100) * nw);
+    const cropH = Math.max(10, (activeCrop.height / 100) * nh);
+    const cols = config.cols || 4;
+    const rows = config.rows || 4;
+
+    const actualLineWidth = specifiedWidth ?? (brushSize > 0 ? Math.min(10, Math.max(2, brushSize)) : 4);
+
+    // Save previous state for undo
+    setBrushHistory((prev) => [...prev.slice(-19), canvas.toDataURL('image/png')]);
+
+    ctx.save();
+    ctx.lineCap = 'square';
+    ctx.lineJoin = 'miter';
+    ctx.lineWidth = actualLineWidth;
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.95)';
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.95)';
+
+    // 1. Draw outer boundary frame
+    ctx.strokeRect(cropX, cropY, cropW, cropH);
+
+    // 2. Draw all internal vertical divider lines between columns
+    const colSplits = normalizeSplits(config.colSplits, cols);
+    for (let i = 0; i < colSplits.length; i++) {
+      const vx = cropX + colSplits[i] * cropW;
+      ctx.beginPath();
+      ctx.moveTo(vx, cropY);
+      ctx.lineTo(vx, cropY + cropH);
+      ctx.stroke();
+    }
+
+    // 3. Draw all internal horizontal divider lines between rows
+    const rowSplits = normalizeSplits(config.rowSplits, rows);
+    for (let i = 0; i < rowSplits.length; i++) {
+      const hy = cropY + rowSplits[i] * cropH;
+      ctx.beginPath();
+      ctx.moveTo(cropX, hy);
+      ctx.lineTo(cropX + cropW, hy);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    const maskDataUrl = canvas.toDataURL('image/png');
+    const nextConfig: ImageGridConfig = {
+      ...config,
+      frameEraserMaskUrl: maskDataUrl,
+      frameEraserSyncAllCells: true,
+      removeFrameBorder: false, // 纯几何切除网格框线，零颜色扫描匹配，保证画作原图完全不受损！
+    };
+    onConfigChange(nextConfig);
+    renderLiveMatting();
+
+    setAutoAlignToast({
+      message: '⚡ 成功！已一键沿网格直接消除全部方框！零颜色匹配，画作原图线条与文字 100% 完好保留！',
+      type: 'success',
+    });
+
+    if (onRemoveFrameFromStickers) {
+      onRemoveFrameFromStickers(undefined, nextConfig);
+    }
+  };
+
+  const handleRemoveOneBorderColor = (hexToRemove: string) => {
+    const existingColors = config.frameBorderColors || (config.frameBorderColor ? [config.frameBorderColor] : []);
+    const nextColors = existingColors.filter((c) => c.toLowerCase() !== hexToRemove.toLowerCase());
+    const nextConfig: ImageGridConfig = {
+      ...config,
+      frameBorderColors: nextColors,
+      frameBorderColor: nextColors[nextColors.length - 1] || '#000000',
+      removeFrameBorder: nextColors.length > 0,
+    };
+    onConfigChange(nextConfig);
+    if (onRemoveFrameFromStickers && nextColors.length > 0) {
+      onRemoveFrameFromStickers(undefined, nextConfig);
+    }
+  };
+
+  const handleResetAllFrameBorders = () => {
+    if (brushCanvasRef.current) {
+      const ctx = brushCanvasRef.current.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, brushCanvasRef.current.width, brushCanvasRef.current.height);
+    }
+    setBrushHistory([]);
+    const nextConfig: ImageGridConfig = {
+      ...config,
+      removeFrameBorder: false,
+      frameBorderColors: [],
+      frameBorderColor: '#000000',
+      frameEraserMaskUrl: undefined,
+    };
+    onConfigChange(nextConfig);
+    setIsPickingFrameColor(false);
+    renderLiveMatting();
+    setAutoAlignToast({
+      message: '已重置恢复所有原始方框',
+      type: 'info',
+    });
+    if (onRemoveFrameFromStickers) {
+      onRemoveFrameFromStickers(undefined, nextConfig);
+    }
+  };
+
+  const handleStartPickFrameColor = () => {
+    setIsPickingFrameColor(true);
+    setIsPickingColor(false);
+    setIsBrushSmearActive(false);
+    setAutoAlignToast({
+      message: '🎯 鼠标点框全删模式已开启：可连续点击画面中任意方框线消除，互不影响！',
+      type: 'info',
+    });
+  };
+
+  // Keep brushCanvas in sync with natural image resolution & existing mask
+  useEffect(() => {
+    if (!brushCanvasRef.current) return;
+    const canvas = brushCanvasRef.current;
+    const nw = naturalDimensions.width || 1024;
+    const nh = naturalDimensions.height || 1024;
+    if (canvas.width !== nw || canvas.height !== nh) {
+      canvas.width = nw;
+      canvas.height = nh;
+    }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    if (config.frameEraserMaskUrl) {
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        renderLiveMatting();
+      };
+      img.src = config.frameEraserMaskUrl;
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }, [naturalDimensions.width, naturalDimensions.height, config.frameEraserMaskUrl]);
+
+  const getNaturalCoordFromPointer = (e: React.PointerEvent | React.MouseEvent) => {
+    if (!imgContainerRef.current) return null;
+    const rect = imgContainerRef.current.getBoundingClientRect();
+    const clientX = e.clientX;
+    const clientY = e.clientY;
+    const normX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const normY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    const nw = naturalDimensions.width || 1024;
+    const nh = naturalDimensions.height || 1024;
+    return {
+      x: normX * nw,
+      y: normY * nh,
+      normX,
+      normY,
+      pixelRatio: nw / Math.max(1, rect.width),
+    };
+  };
+
+  const drawBrushStroke = (
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    pixelRatio: number
+  ) => {
+    if (!brushCanvasRef.current) return;
+    const canvas = brushCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const actualLineWidth = Math.max(2, brushSize * pixelRatio);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = actualLineWidth;
+    ctx.strokeStyle = 'rgba(245, 158, 11, 0.95)';
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.95)';
+
+    const nw = naturalDimensions.width || 1024;
+    const nh = naturalDimensions.height || 1024;
+    const activeCrop = cropArea || { x: 0, y: 0, width: 100, height: 100 };
+    const cropX = (activeCrop.x / 100) * nw;
+    const cropY = (activeCrop.y / 100) * nh;
+    const cropW = Math.max(10, (activeCrop.width / 100) * nw);
+    const cropH = Math.max(10, (activeCrop.height / 100) * nh);
+    const cols = config.cols || 4;
+    const rows = config.rows || 4;
+    const cellW = cropW / cols;
+    const cellH = cropH / rows;
+
+    const isInsideCrop =
+      to.x >= cropX && to.x <= cropX + cropW && to.y >= cropY && to.y <= cropY + cropH;
+
+    // Determine current stroke direction: vertical (down/up) vs horizontal (left/right)
+    const effectiveDir =
+      brushLinkMode === 'vertical'
+        ? 'vertical'
+        : brushLinkMode === 'horizontal'
+        ? 'horizontal'
+        : strokeDirectionRef.current ||
+          (Math.abs(to.y - from.y) >= Math.abs(to.x - from.x) ? 'vertical' : 'horizontal');
+
+    if (brushSyncAllCells && brushLinkMode !== 'none' && isInsideCrop) {
+      const c =
+        strokeOriginCellRef.current?.col ??
+        Math.min(cols - 1, Math.max(0, Math.floor((to.x - cropX) / cellW)));
+      const r =
+        strokeOriginCellRef.current?.row ??
+        Math.min(rows - 1, Math.max(0, Math.floor((to.y - cropY) / cellH)));
+
+      const cellOriginX = cropX + c * cellW;
+      const cellOriginY = cropY + r * cellH;
+
+      const fromRelX = from.x - cellOriginX;
+      const fromRelY = from.y - cellOriginY;
+      const toRelX = to.x - cellOriginX;
+      const toRelY = to.y - cellOriginY;
+
+      if (effectiveDir === 'vertical') {
+        // 垂直涂抹：仅联动该垂直线所在列（同列贯穿各行 cr=0..rows-1），绝不向其他列涂抹！
+        for (let cr = 0; cr < rows; cr++) {
+          const targetCellX = cropX + c * cellW;
+          const targetCellY = cropY + cr * cellH;
+
+          ctx.beginPath();
+          ctx.moveTo(targetCellX + fromRelX, targetCellY + fromRelY);
+          ctx.lineTo(targetCellX + toRelX, targetCellY + toRelY);
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(targetCellX + toRelX, targetCellY + toRelY, actualLineWidth / 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // 水平涂抹：仅联动该水平线所在行（同行贯穿各列 cc=0..cols-1），绝不向其他行涂抹！
+        for (let cc = 0; cc < cols; cc++) {
+          const targetCellX = cropX + cc * cellW;
+          const targetCellY = cropY + r * cellH;
+
+          ctx.beginPath();
+          ctx.moveTo(targetCellX + fromRelX, targetCellY + fromRelY);
+          ctx.lineTo(targetCellX + toRelX, targetCellY + toRelY);
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.arc(targetCellX + toRelX, targetCellY + toRelY, actualLineWidth / 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(to.x, to.y, actualLineWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+
+  const handleBrushPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const coord = getNaturalCoordFromPointer(e);
+    if (!coord || !brushCanvasRef.current) return;
+
+    isPaintingBrushRef.current = true;
+    lastBrushPointRef.current = { x: coord.x, y: coord.y };
+    strokeStartPosRef.current = { x: coord.x, y: coord.y };
+    strokeDirectionRef.current = null;
+
+    const nw = naturalDimensions.width || 1024;
+    const nh = naturalDimensions.height || 1024;
+    const activeCrop = cropArea || { x: 0, y: 0, width: 100, height: 100 };
+    const cropX = (activeCrop.x / 100) * nw;
+    const cropY = (activeCrop.y / 100) * nh;
+    const cropW = Math.max(10, (activeCrop.width / 100) * nw);
+    const cropH = Math.max(10, (activeCrop.height / 100) * nh);
+    const cols = config.cols || 4;
+    const rows = config.rows || 4;
+    const cellW = cropW / cols;
+    const cellH = cropH / rows;
+
+    const startCol = Math.min(cols - 1, Math.max(0, Math.floor((coord.x - cropX) / cellW)));
+    const startRow = Math.min(rows - 1, Math.max(0, Math.floor((coord.y - cropY) / cellH)));
+    strokeOriginCellRef.current = { col: startCol, row: startRow };
+
+    setBrushHistory((prev) => [...prev.slice(-19), brushCanvasRef.current!.toDataURL('image/png')]);
+
+    drawBrushStroke({ x: coord.x, y: coord.y }, { x: coord.x, y: coord.y }, coord.pixelRatio);
+  };
+
+  const handleBrushPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!imgContainerRef.current) return;
+    const rect = imgContainerRef.current.getBoundingClientRect();
+    setBrushPointerPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+
+    if (!isPaintingBrushRef.current || !lastBrushPointRef.current) return;
+    e.preventDefault();
+    const coord = getNaturalCoordFromPointer(e);
+    if (!coord) return;
+
+    if (strokeStartPosRef.current) {
+      const totalDx = Math.abs(coord.x - strokeStartPosRef.current.x);
+      const totalDy = Math.abs(coord.y - strokeStartPosRef.current.y);
+      if (!strokeDirectionRef.current && (totalDx >= 3 || totalDy >= 3)) {
+        strokeDirectionRef.current = totalDy >= totalDx ? 'vertical' : 'horizontal';
+      }
+    }
+
+    drawBrushStroke(lastBrushPointRef.current, { x: coord.x, y: coord.y }, coord.pixelRatio);
+    lastBrushPointRef.current = { x: coord.x, y: coord.y };
+  };
+
+  const handleBrushPointerUp = () => {
+    if (!isPaintingBrushRef.current) return;
+    isPaintingBrushRef.current = false;
+    lastBrushPointRef.current = null;
+    strokeStartPosRef.current = null;
+    strokeDirectionRef.current = null;
+    strokeOriginCellRef.current = null;
+
+    if (!brushCanvasRef.current) return;
+    const maskDataUrl = brushCanvasRef.current.toDataURL('image/png');
+
+    // DO NOT force removeFrameBorder: true!
+    // Brush eraser operates purely by geometry/mask without color matching, ensuring drawing content is 100% preserved.
+    const nextConfig: ImageGridConfig = {
+      ...config,
+      frameEraserMaskUrl: maskDataUrl,
+      frameEraserSyncAllCells: brushSyncAllCells,
+    };
+    onConfigChange(nextConfig);
+
+    renderLiveMatting();
+
+    if (onRemoveFrameFromStickers) {
+      onRemoveFrameFromStickers(undefined, nextConfig);
+    }
+  };
+
+  const handleBrushUndo = () => {
+    if (brushHistory.length === 0 || !brushCanvasRef.current) return;
+    const prevHistory = [...brushHistory];
+    const lastDataUrl = prevHistory.pop()!;
+    setBrushHistory(prevHistory);
+
+    const canvas = brushCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (lastDataUrl) {
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0);
+        const nextUrl = canvas.toDataURL('image/png');
+        const nextConfig: ImageGridConfig = {
+          ...config,
+          frameEraserMaskUrl: nextUrl,
+        };
+        onConfigChange(nextConfig);
+        renderLiveMatting();
+        if (onRemoveFrameFromStickers) {
+          onRemoveFrameFromStickers(undefined, nextConfig);
+        }
+      };
+      img.src = lastDataUrl;
+    } else {
+      const nextConfig: ImageGridConfig = {
+        ...config,
+        frameEraserMaskUrl: undefined,
+      };
+      onConfigChange(nextConfig);
+      renderLiveMatting();
+      if (onRemoveFrameFromStickers) {
+        onRemoveFrameFromStickers(undefined, nextConfig);
+      }
+    }
+  };
+
+  const handleBrushClear = () => {
+    if (!brushCanvasRef.current) return;
+    const canvas = brushCanvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    setBrushHistory([]);
+    const nextConfig: ImageGridConfig = {
+      ...config,
+      frameEraserMaskUrl: undefined,
+    };
+    onConfigChange(nextConfig);
+    renderLiveMatting();
+    setAutoAlignToast({
+      message: '已清空画笔涂抹蒙版',
+      type: 'info',
+    });
+    if (onRemoveFrameFromStickers) {
+      onRemoveFrameFromStickers(undefined, nextConfig);
+    }
+  };
+
+  const handleToggleBrushSmear = () => {
+    const nextVal = !isBrushSmearActive;
+    setIsBrushSmearActive(nextVal);
+    if (nextVal) {
+      setIsPickingColor(false);
+      setIsPickingFrameColor(false);
+      setAutoAlignToast({
+        message: '🖌️ 画笔涂抹消框模式已开启：按住鼠标左键在画面线框上拖动即可擦除，支持撤销与全图同步！',
+        type: 'info',
+      });
+    } else {
+      renderLiveMatting();
+      setAutoAlignToast({
+        message: '✨ 画笔涂抹去框已完成！涂抹颜色已自动隐藏，框线已干净透明化。',
+        type: 'success',
+      });
+    }
+  };
+
   const handleContainerMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isPickingColor || !imgRef.current || !imgContainerRef.current) return;
+    if ((!isPickingColor && !isPickingFrameColor) || !imgRef.current || !imgContainerRef.current) return;
     const rect = imgContainerRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
@@ -1082,6 +1571,44 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
 
     ctx.clearRect(0, 0, targetW, targetH);
     ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+    if (config.removeFrameBorder) {
+      const cols = config.cols || 4;
+      const rows = config.rows || 4;
+      const cellW = targetW / cols;
+      const cellH = targetH / rows;
+
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cx = Math.floor(c * cellW);
+          const cy = Math.floor(r * cellH);
+          const cw = Math.min(targetW - cx, Math.ceil(cellW));
+          const ch = Math.min(targetH - cy, Math.ceil(cellH));
+
+          if (cw > 10 && ch > 10) {
+            let cellData = ctx.getImageData(cx, cy, cw, ch);
+            cellData = removeSquareFrameBorder(cellData, {
+              mode: config.frameBorderMode || 'auto',
+              targetColor: config.frameBorderColor || '#000000',
+              targetColors: config.frameBorderColors,
+              tolerance: config.frameBorderTolerance ?? 35,
+              borderWidth: config.frameBorderWidth ?? 3,
+              inset: 0,
+              autoScale: false,
+            });
+            ctx.putImageData(cellData, cx, cy);
+          }
+        }
+      }
+    }
+
+    // Apply brush eraser mask if present
+    if (config.frameEraserMaskUrl && brushCanvasRef.current) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.drawImage(brushCanvasRef.current, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
+      ctx.restore();
+    }
 
     if (config.autoTransparent) {
       let imgData = ctx.getImageData(0, 0, targetW, targetH);
@@ -1177,6 +1704,19 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
       cleanEdgeBlackBordersAndMargins(imgData, 32);
     }
 
+    // One-Click Remove Square Frame Border (black or colored frames)
+    if (config.removeFrameBorder) {
+      imgData = removeSquareFrameBorder(imgData, {
+        mode: config.frameBorderMode || 'auto',
+        targetColor: config.frameBorderColor || '#000000',
+        targetColors: config.frameBorderColors,
+        tolerance: config.frameBorderTolerance ?? 35,
+        borderWidth: config.frameBorderWidth ?? 3,
+        inset: 0,
+        autoScale: false,
+      });
+    }
+
     if (config.autoTransparent) {
       imgData = removeBackgroundFromFrame(imgData, {
         targetColor: config.bgColor || '#ffffff',
@@ -1185,6 +1725,16 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
         contiguous: false,
         defringe: 1,
       });
+    }
+
+    // Apply brush eraser mask to inspected cell if present
+    if (config.frameEraserMaskUrl && brushCanvasRef.current) {
+      ctx.putImageData(imgData, 0, 0);
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.drawImage(brushCanvasRef.current, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH);
+      ctx.restore();
+      imgData = ctx.getImageData(0, 0, 240, 240);
     }
 
     // Calculate transparent percentage
@@ -1532,13 +2082,13 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
       </div>
 
       {/* Main Workspace Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch lg:h-[calc(100vh-210px)] lg:min-h-[600px]">
         {/* Left Column (7 cols): Interactive Visual Canvas Slicer Area or Fullscreen Modal */}
         <div
           className={
             isFullscreen
               ? 'fixed inset-0 z-50 bg-stone-950 flex flex-col p-2.5 backdrop-blur-md overflow-hidden select-none text-white'
-              : 'lg:col-span-7 space-y-3'
+              : 'lg:col-span-7 lg:h-full lg:overflow-y-auto space-y-3 pr-1 lg:pr-2.5 custom-scrollbar'
           }
         >
           {/* Action Bar / Fullscreen Header */}
@@ -1700,6 +2250,67 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                     </div>
                   )}
                 </div>
+
+                {/* One-Click Frame Border Removal Tools (Fullscreen) */}
+                <button
+                  type="button"
+                  onClick={handleOneClickDeleteAllFrames}
+                  className="px-2.5 py-1 rounded-md text-xs font-bold bg-amber-500 hover:bg-amber-600 text-stone-950 border border-amber-400 flex items-center gap-1.5 transition-all cursor-pointer shrink-0 shadow-xs active:scale-95"
+                  title="鼠标点一下，即可智能识别图片中的方框并全部删除，无需手动裁切！"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-stone-950 fill-stone-950" />
+                  <span>⚡ 鼠标点一下·全删方框</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleStartPickFrameColor}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium border flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
+                    isPickingFrameColor
+                      ? 'bg-amber-400 text-stone-950 border-amber-400 font-bold shadow-xs animate-pulse'
+                      : config.removeFrameBorder
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                      : 'bg-stone-800 text-stone-300 border-white/10 hover:text-white hover:bg-stone-700'
+                  }`}
+                  title="鼠标点击画面中任意方框线，即可直接全部删除所有方框"
+                >
+                  <Pipette className="w-3.5 h-3.5 text-amber-400 stroke-[2.5]" />
+                  <span>{isPickingFrameColor ? '点击画面线框...' : '🎯 鼠标点框全删'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleToggleBrushSmear}
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium border flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
+                    isBrushSmearActive
+                      ? 'bg-amber-400 text-stone-950 border-amber-400 font-bold shadow-xs animate-pulse'
+                      : config.frameEraserMaskUrl
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 font-bold'
+                      : 'bg-stone-800 text-stone-300 border-white/10 hover:text-white hover:bg-stone-700'
+                  }`}
+                  title="按住鼠标拖动涂抹擦除残余框线与角落黑点"
+                >
+                  <Paintbrush className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{isBrushSmearActive ? '涂抹消框中...' : '🖌️ 画笔涂抹'}</span>
+                </button>
+
+                {config.removeFrameBorder && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    {config.frameBorderColors && config.frameBorderColors.length > 0 && (
+                      <span className="text-[11px] font-mono px-1.5 py-0.5 rounded bg-amber-950/70 border border-amber-500/40 text-amber-300 font-bold">
+                        已消除 {config.frameBorderColors.length} 处框线
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleResetAllFrameBorders}
+                      className="px-2 py-1 rounded-md text-[11px] text-stone-400 hover:text-white bg-stone-800 hover:bg-stone-700 border border-white/10 transition-colors cursor-pointer"
+                      title="重置恢复所有原始方框"
+                    >
+                      ↩ 恢复原框
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Right: Dimension & 1:1 indicator, View Zoom, Exit Fullscreen */}
@@ -1777,6 +2388,49 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                       <span>{showLiveMatting ? '实时抠图已开' : '显示原图'}</span>
                     </button>
                   )}
+
+                  {/* One-Click Remove Frame Action Buttons */}
+                  <button
+                    type="button"
+                    onClick={handleOneClickDeleteAllFrames}
+                    className="px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500 hover:bg-amber-600 text-stone-950 border border-amber-600 flex items-center gap-1 transition-all cursor-pointer shadow-xs active:scale-95"
+                    title="鼠标点一下，即可智能识别图片中的方框并全部删除，无需手动裁切！"
+                  >
+                    <Sparkles className="w-3 h-3 text-stone-950 fill-stone-950" />
+                    <span>⚡ 鼠标点一下·全删方框</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleStartPickFrameColor}
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium border flex items-center gap-1 transition-all cursor-pointer ${
+                      isPickingFrameColor
+                        ? 'bg-amber-400 text-stone-950 border-amber-500 font-bold shadow-xs animate-pulse'
+                        : config.removeFrameBorder
+                        ? 'bg-amber-100 text-amber-950 border-amber-400 font-bold shadow-2xs'
+                        : 'bg-stone-100 hover:bg-stone-200 text-stone-700 border-stone-200'
+                    }`}
+                    title="鼠标点击画面中任意方框线，即可直接全部删除所有方框"
+                  >
+                    <Pipette className="w-3 h-3 text-amber-700 stroke-[2.5]" />
+                    <span>{isPickingFrameColor ? '点击方框...' : '🎯 鼠标点框全删'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleBrushSmear}
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium border flex items-center gap-1 transition-all cursor-pointer ${
+                      isBrushSmearActive
+                        ? 'bg-amber-400 text-stone-950 border-amber-500 font-bold shadow-xs animate-pulse'
+                        : config.frameEraserMaskUrl
+                        ? 'bg-amber-100 text-amber-950 border-amber-400 font-bold shadow-2xs'
+                        : 'bg-stone-100 hover:bg-stone-200 text-stone-700 border-stone-200'
+                    }`}
+                    title="按住鼠标拖动涂抹擦除残余框线与角落黑点"
+                  >
+                    <Paintbrush className="w-3 h-3 text-amber-700" />
+                    <span>{isBrushSmearActive ? '涂抹中...' : '🖌️ 画笔涂抹'}</span>
+                  </button>
                 </div>
 
                 {/* Background Switcher & Hold to Compare */}
@@ -1970,7 +2624,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 transform: isFullscreen && zoomLevel !== 1 ? `scale(${zoomLevel})` : undefined,
               }}
               className={`relative bg-stone-950 rounded-xl overflow-hidden shadow-inner flex items-center justify-center select-none transition-transform duration-100 origin-center ${
-                isPickingColor ? 'cursor-crosshair ring-2 ring-amber-400' : ''
+                isPickingColor || isPickingFrameColor ? 'cursor-crosshair ring-4 ring-amber-400' : ''
               } ${isFullscreen ? 'shadow-2xl border border-white/20' : 'w-full border border-stone-800'}`}
               title="双击预览窗或点击右上角按钮即可切换全屏"
             >
@@ -1990,6 +2644,150 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                   <Maximize2 className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
                 )}
               </button>
+
+              {/* Floating One-Click Frame Removal Toolbar in preview viewport */}
+              {!isPickingFrameColor && (
+                <div
+                  className="absolute top-2.5 left-2.5 z-40 flex items-center gap-1.5 p-1 rounded-xl bg-black/85 backdrop-blur-md border border-white/25 shadow-2xl text-xs select-none max-w-[calc(100%-60px)] flex-wrap"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    onClick={handleOneClickDeleteAllFrames}
+                    className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-stone-950 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
+                    title="鼠标点一下，即可智能识别画面中的线框并全部删除，原图不缩放，文字不受影响！"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-stone-950 fill-stone-950" />
+                    <span>⚡ 鼠标点一下·全删方框</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleStartPickFrameColor}
+                    className={`px-2 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
+                      config.removeFrameBorder
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                        : 'bg-stone-800 text-stone-300 border-white/10 hover:text-white hover:bg-stone-700'
+                    }`}
+                    title="鼠标点击画面中任意方框线直接消除"
+                  >
+                    <Pipette className="w-3.5 h-3.5 text-amber-400" />
+                    <span>🎯 点框消除</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleBrushSmear}
+                    className={`px-2 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
+                      isBrushSmearActive
+                        ? 'bg-amber-400 text-stone-950 border-amber-400 font-bold shadow-xs animate-pulse'
+                        : config.frameEraserMaskUrl
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 font-bold'
+                        : 'bg-stone-800 text-stone-300 border-white/10 hover:text-white hover:bg-stone-700'
+                    }`}
+                    title="按住鼠标拖动涂抹擦除残余框线与角落黑点"
+                  >
+                    <Paintbrush className="w-3.5 h-3.5 text-amber-400" />
+                    <span>{isBrushSmearActive ? '涂抹消框中...' : '🖌️ 涂抹消框'}</span>
+                  </button>
+
+                  {config.removeFrameBorder && (
+                    <button
+                      type="button"
+                      onClick={handleResetAllFrameBorders}
+                      className="px-2 py-1 rounded-lg text-xs text-stone-400 hover:text-white bg-stone-800 hover:bg-stone-700 border border-white/10 transition-colors cursor-pointer shrink-0"
+                      title="恢复所有原始线框"
+                    >
+                      <RotateCcw className="w-3 h-3 text-stone-400" />
+                      <span>恢复</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+            {/* Frame Color Picking Hint Banner */}
+            {isPickingFrameColor && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-stone-900/95 text-white border-2 border-amber-400 px-4 py-2 rounded-2xl text-xs font-bold shadow-2xl flex flex-wrap items-center justify-center gap-2.5 backdrop-blur-md animate-in fade-in max-w-[95%]">
+                <div className="flex items-center gap-1.5 text-amber-400 shrink-0">
+                  <Square className="w-4 h-4 animate-pulse stroke-[2.5]" />
+                  <span>🎯 点框消除模式：点击任意线框即可清除</span>
+                </div>
+                {hoverPickedColor && (
+                  <div className="flex items-center gap-1.5 pl-2 border-l border-white/20 shrink-0">
+                    <span
+                      className="w-3.5 h-3.5 rounded-full border border-white/70 inline-block shadow-2xs shrink-0"
+                      style={{ backgroundColor: hoverPickedColor }}
+                    />
+                    <span className="font-mono text-[11px] text-amber-300 font-bold">{hoverPickedColor}</span>
+                  </div>
+                )}
+                {/* List of active eliminated border colors */}
+                {config.frameBorderColors && config.frameBorderColors.length > 0 && (
+                  <div className="flex items-center gap-1 pl-2 border-l border-white/20 flex-wrap">
+                    <span className="text-stone-400 text-[11px]">已消:</span>
+                    {config.frameBorderColors.map((c) => (
+                      <span
+                        key={c}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-stone-800 border border-white/20 text-[10px] font-mono text-stone-200"
+                      >
+                        <span className="w-2 h-2 rounded-full inline-block shrink-0" style={{ backgroundColor: c }} />
+                        <span>{c}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRemoveOneBorderColor(c);
+                          }}
+                          className="text-stone-400 hover:text-white hover:bg-stone-700 rounded-full w-3 h-3 flex items-center justify-center cursor-pointer"
+                          title={`恢复此颜色 ${c} 框线`}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-1.5 ml-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOneClickDeleteAllFrames();
+                    }}
+                    className="px-2 py-0.5 rounded-full bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-xs transition-colors cursor-pointer shadow-xs active:scale-95"
+                    title="一键识别并全删全图所有方框"
+                  >
+                    ⚡ 一键全删
+                  </button>
+                  {((config.frameBorderColors && config.frameBorderColors.length > 0) || config.removeFrameBorder) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleResetAllFrameBorders();
+                      }}
+                      className="px-2 py-0.5 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-300 text-xs transition-colors cursor-pointer border border-white/20"
+                      title="重置恢复原始线框"
+                    >
+                      ↩ 恢复原框
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsPickingFrameColor(false);
+                      setHoverPickedColor(null);
+                    }}
+                    className="px-2.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors cursor-pointer pointer-events-auto shadow-xs active:scale-95"
+                  >
+                    ✓ 完成消框
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Color Picking Hint Banner */}
             {isPickingColor && (
               <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-stone-900/95 text-white border border-amber-400 px-3.5 py-1.5 rounded-full text-xs font-semibold shadow-2xl flex items-center gap-2.5 backdrop-blur-xs animate-in fade-in">
@@ -2032,6 +2830,180 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
               className="w-full h-full object-contain pointer-events-none"
             />
 
+            {/* Brush Smear Floating Toolbar */}
+            {isBrushSmearActive && (
+              <div
+                className="absolute top-3 left-1/2 -translate-x-1/2 z-50 bg-stone-900/95 text-white border-2 border-amber-400 px-3.5 py-1.5 rounded-2xl text-xs font-semibold shadow-2xl flex flex-wrap items-center justify-center gap-2.5 backdrop-blur-md animate-in fade-in max-w-[95%]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center gap-1.5 text-amber-400 shrink-0">
+                  <Paintbrush className="w-4 h-4 animate-bounce" />
+                  <span className="font-bold">画笔涂抹消框中</span>
+                </div>
+
+                <div className="flex items-center gap-1.5 border-l border-white/20 pl-2 shrink-0">
+                  <span className="text-[11px] text-stone-300">粗细:</span>
+                  <input
+                    type="range"
+                    min={2}
+                    max={60}
+                    value={brushSize}
+                    onChange={(e) => setBrushSize(Number(e.target.value))}
+                    className="w-16 accent-amber-400 cursor-pointer h-1.5 bg-stone-700 rounded"
+                  />
+                  <span className="font-mono text-[11px] text-amber-300 w-6 font-bold">{brushSize}px</span>
+                </div>
+
+                <div className="hidden sm:flex items-center gap-1 border-l border-white/20 pl-2 shrink-0">
+                  {[4, 8, 16, 32].map((sz) => (
+                    <button
+                      key={sz}
+                      type="button"
+                      onClick={() => setBrushSize(sz)}
+                      className={`px-1.5 py-0.2 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                        brushSize === sz
+                          ? 'bg-amber-500 text-stone-950 font-bold'
+                          : 'bg-stone-800 text-stone-300 hover:text-white'
+                      }`}
+                    >
+                      {sz}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-1 border-l border-white/20 pl-2 shrink-0">
+                  <span className="text-[11px] text-stone-300">联动:</span>
+                  <div className="flex items-center bg-stone-800 p-0.5 rounded-md border border-white/10 text-[10px]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBrushLinkMode('smart');
+                        setBrushSyncAllCells(true);
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                        brushLinkMode === 'smart' && brushSyncAllCells
+                          ? 'bg-amber-500 text-stone-950 font-bold'
+                          : 'text-stone-300 hover:text-white'
+                      }`}
+                      title="智能同向联动：垂直涂抹仅联该垂直线，水平涂抹仅联该水平线"
+                    >
+                      🎯 同向联动
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBrushLinkMode('vertical');
+                        setBrushSyncAllCells(true);
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                        brushLinkMode === 'vertical' && brushSyncAllCells
+                          ? 'bg-amber-500 text-stone-950 font-bold'
+                          : 'text-stone-300 hover:text-white'
+                      }`}
+                      title="仅联动垂直线（垂直整列同步，绝不涂抹其他列）"
+                    >
+                      ↕️ 垂直线
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBrushLinkMode('horizontal');
+                        setBrushSyncAllCells(true);
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                        brushLinkMode === 'horizontal' && brushSyncAllCells
+                          ? 'bg-amber-500 text-stone-950 font-bold'
+                          : 'text-stone-300 hover:text-white'
+                      }`}
+                      title="仅联动水平线（水平整行同步，绝不涂抹其他行）"
+                    >
+                      ↔️ 水平线
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBrushLinkMode('none');
+                        setBrushSyncAllCells(false);
+                      }}
+                      className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                        !brushSyncAllCells || brushLinkMode === 'none'
+                          ? 'bg-amber-500 text-stone-950 font-bold'
+                          : 'text-stone-300 hover:text-white'
+                      }`}
+                      title="仅当前格独立涂抹，不联动其他线"
+                    >
+                      🔲 单格
+                    </button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleOneClickDeleteAllFrames(4)}
+                  className="px-2 py-0.5 rounded bg-amber-500/25 hover:bg-amber-500/40 text-amber-300 border border-amber-400/50 text-[11px] font-bold cursor-pointer transition-colors shrink-0"
+                  title="无需涂抹！一键直接沿网格线全删所有方框"
+                >
+                  ⚡ 一键全删
+                </button>
+
+                <div className="flex items-center gap-1 border-l border-white/20 pl-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleBrushUndo}
+                    disabled={brushHistory.length === 0}
+                    className="p-1 rounded bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-stone-200 cursor-pointer transition-colors"
+                    title="撤销上一笔涂抹"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBrushClear}
+                    className="px-2 py-0.5 rounded bg-stone-800 hover:bg-red-900 text-stone-300 hover:text-red-200 text-[11px] cursor-pointer transition-colors"
+                    title="清空所有涂抹内容"
+                  >
+                    清空
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleToggleBrushSmear}
+                    className="px-2.5 py-0.5 rounded-full bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-xs transition-colors cursor-pointer shadow-xs ml-1"
+                  >
+                    完成涂抹
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Interactive Brush Smear Canvas Layer */}
+            <canvas
+              ref={brushCanvasRef}
+              className={`absolute inset-0 w-full h-full z-35 touch-none transition-opacity ${
+                isBrushSmearActive ? 'cursor-none pointer-events-auto opacity-50' : 'hidden pointer-events-none opacity-0'
+              }`}
+              onPointerDown={isBrushSmearActive ? handleBrushPointerDown : undefined}
+              onPointerMove={isBrushSmearActive ? handleBrushPointerMove : undefined}
+              onPointerUp={isBrushSmearActive ? handleBrushPointerUp : undefined}
+              onPointerLeave={() => {
+                isPaintingBrushRef.current = false;
+                lastBrushPointRef.current = null;
+                setBrushPointerPos(null);
+              }}
+            />
+
+            {/* Brush Circle Cursor Indicator Follower */}
+            {isBrushSmearActive && brushPointerPos && (
+              <div
+                className="pointer-events-none absolute rounded-full border-2 border-amber-400 bg-amber-400/25 -translate-x-1/2 -translate-y-1/2 z-40 transition-none shadow-[0_0_10px_rgba(251,191,36,0.7)]"
+                style={{
+                  left: `${brushPointerPos.x}px`,
+                  top: `${brushPointerPos.y}px`,
+                  width: `${brushSize}px`,
+                  height: `${brushSize}px`,
+                }}
+              />
+            )}
+
             {/* MODE 1: Independent Boxes Overlay */}
             {layoutMode === 'independent' && (
               <div className="absolute inset-0 pointer-events-none z-20">
@@ -2047,7 +3019,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                   return (
                     <div
                       key={`ind-box-${idx}`}
-                      className={`absolute pointer-events-auto touch-none select-none transition-shadow ${
+                      className={`absolute touch-none select-none transition-shadow ${
+                        isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                      } ${
                         isSelected
                           ? 'border-2 border-amber-400 bg-amber-400/20 shadow-[0_0_18px_rgba(251,191,36,0.85)] z-30 ring-2 ring-amber-400/60 cursor-move'
                           : 'border-2 border-emerald-400/80 bg-emerald-500/10 hover:border-amber-300 hover:bg-emerald-500/20 z-20 cursor-move'
@@ -2058,8 +3032,8 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                         width: `${box.width}%`,
                         height: `${box.height}%`,
                       }}
-                      onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'move')}
-                      onClick={(e) => {
+                      onPointerDown={isPickingFrameColor || isPickingColor ? undefined : (e) => handleIndependentBoxPointerDown(e, idx, 'move')}
+                      onClick={isPickingFrameColor || isPickingColor ? undefined : (e) => {
                         e.stopPropagation();
                         setInspectCellIndex(idx);
                       }}
@@ -2099,44 +3073,60 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                         <>
                           {/* 4 Corners */}
                           <div
-                            className="absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            className={`absolute -top-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'nw')}
                             title="拖动调整左上角"
                           />
                           <div
-                            className="absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            className={`absolute -top-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'ne')}
                             title="拖动调整右上角"
                           />
                           <div
-                            className="absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            className={`absolute -bottom-2 -right-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nwse-resize hover:scale-125 transition-transform touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'se')}
                             title="拖动调整右下角"
                           />
                           <div
-                            className="absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform pointer-events-auto touch-none"
+                            className={`absolute -bottom-2 -left-2 w-4 h-4 bg-white border-2 border-amber-500 rounded-full shadow-md cursor-nesw-resize hover:scale-125 transition-transform touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'sw')}
                             title="拖动调整左下角"
                           />
 
                           {/* 4 Edges */}
                           <div
-                            className="absolute -top-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            className={`absolute -top-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'n')}
                             title="拖动调整上边"
                           />
                           <div
-                            className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            className={`absolute -bottom-2 left-1/2 -translate-x-1/2 w-6 h-3 bg-white border border-amber-500 rounded-full shadow-xs cursor-ns-resize hover:scale-110 flex items-center justify-center touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 's')}
                             title="拖动调整下边"
                           />
                           <div
-                            className="absolute top-1/2 -left-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            className={`absolute top-1/2 -left-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'w')}
                             title="拖动调整左边"
                           />
                           <div
-                            className="absolute top-1/2 -right-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center pointer-events-auto touch-none"
+                            className={`absolute top-1/2 -right-2 -translate-y-1/2 w-3 h-6 bg-white border border-amber-500 rounded-full shadow-xs cursor-ew-resize hover:scale-110 flex items-center justify-center touch-none ${
+                              isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                            }`}
                             onPointerDown={(e) => handleIndependentBoxPointerDown(e, idx, 'e')}
                             title="拖动调整右边"
                           />
@@ -2183,18 +3173,20 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
             {/* Draggable & Resizable Active Crop Box */}
             <div
               ref={cropBoxRef}
-              className="absolute border-2 border-emerald-400 bg-emerald-500/10 shadow-lg cursor-move z-20 touch-none select-none group"
+              className={`absolute border-2 border-emerald-400 bg-emerald-500/10 shadow-lg z-20 touch-none select-none group ${
+                isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'cursor-move'
+              }`}
               style={{
                 left: `${cropArea.x}%`,
                 top: `${cropArea.y}%`,
                 width: `${cropArea.width}%`,
                 height: `${cropArea.height}%`,
               }}
-              onPointerDown={(e) => handlePointerDown(e, 'move')}
+              onPointerDown={isPickingFrameColor || isPickingColor ? undefined : (e) => handlePointerDown(e, 'move')}
             >
               {/* Live Matting Transparency Preview Layer inside Crop Area */}
               <div className="absolute inset-0 overflow-hidden pointer-events-none rounded-xs">
-                {showLiveMatting && config.autoTransparent && !isComparingOriginal && (
+                {showLiveMatting && (config.autoTransparent || config.removeFrameBorder || !!config.frameEraserMaskUrl) && !isComparingOriginal && (
                   <div
                     className={`absolute inset-0 pointer-events-none ${
                       previewBg === 'checkerboard'
@@ -2250,7 +3242,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                             setInspectCellIndex(idx);
                           }}
                           onPointerDown={(e) => e.stopPropagation()}
-                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded leading-none backdrop-blur-2xs shadow-2xs transition-colors pointer-events-auto cursor-pointer ${
+                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded leading-none backdrop-blur-2xs shadow-2xs transition-colors cursor-pointer ${
+                            isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                          } ${
                             isSelected
                               ? 'bg-amber-500 text-stone-950 ring-1 ring-amber-300'
                               : 'bg-black/75 text-emerald-300 hover:bg-black/90 hover:text-amber-300'
@@ -2283,7 +3277,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
               {validColSplits.map((split, k) => (
                 <div
                   key={`col-split-${k}`}
-                  className="absolute top-0 bottom-0 z-30 group/split pointer-events-auto touch-none cursor-col-resize flex items-center justify-center -translate-x-1/2 select-none"
+                  className={`absolute top-0 bottom-0 z-30 group/split touch-none cursor-col-resize flex items-center justify-center -translate-x-1/2 select-none ${
+                    isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                  }`}
                   style={{
                     left: `${split * 100}%`,
                     width: '18px',
@@ -2308,7 +3304,9 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
               {validRowSplits.map((split, j) => (
                 <div
                   key={`row-split-${j}`}
-                  className="absolute left-0 right-0 z-30 group/split pointer-events-auto touch-none cursor-row-resize flex items-center justify-center -translate-y-1/2 select-none"
+                  className={`absolute left-0 right-0 z-30 group/split touch-none cursor-row-resize flex items-center justify-center -translate-y-1/2 select-none ${
+                    isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                  }`}
                   style={{
                     top: `${split * 100}%`,
                     height: '18px',
@@ -2331,64 +3329,88 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
 
               {/* 4 Draggable Boundary Edge Bars for effortless margin adjustments */}
               <div
-                className="absolute -top-1.5 left-2 right-2 h-3.5 cursor-ns-resize z-40 pointer-events-auto touch-none"
+                className={`absolute -top-1.5 left-2 right-2 h-3.5 cursor-ns-resize z-40 touch-none ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'n')}
                 title="拖动调整顶部边距 (Top Margin)"
               />
               <div
-                className="absolute -bottom-1.5 left-2 right-2 h-3.5 cursor-ns-resize z-40 pointer-events-auto touch-none"
+                className={`absolute -bottom-1.5 left-2 right-2 h-3.5 cursor-ns-resize z-40 touch-none ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 's')}
                 title="拖动调整底部边距 (Bottom Margin)"
               />
               <div
-                className="absolute -left-1.5 top-2 bottom-2 w-3.5 cursor-ew-resize z-40 pointer-events-auto touch-none"
+                className={`absolute -left-1.5 top-2 bottom-2 w-3.5 cursor-ew-resize z-40 touch-none ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'w')}
                 title="拖动调整左侧边距 (Left Margin)"
               />
               <div
-                className="absolute -right-1.5 top-2 bottom-2 w-3.5 cursor-ew-resize z-40 pointer-events-auto touch-none"
+                className={`absolute -right-1.5 top-2 bottom-2 w-3.5 cursor-ew-resize z-40 touch-none ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'e')}
                 title="拖动调整右侧边距 (Right Margin)"
               />
 
               {/* 8 Distinct Resize Handles (4 Corners + 4 Edge Midpoints) */}
               <div
-                className="absolute top-0 left-0 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nwse-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute top-0 left-0 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nwse-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'nw')}
                 title="拉动缩放左上角"
               />
               <div
-                className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ns-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ns-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'n')}
                 title="拉动缩放顶部边缘"
               />
               <div
-                className="absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nesw-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nesw-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'ne')}
                 title="拉动缩放右上角"
               />
               <div
-                className="absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ew-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ew-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'w')}
                 title="拉动缩放左侧边缘"
               />
               <div
-                className="absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ew-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ew-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'e')}
                 title="拉动缩放右侧边缘"
               />
               <div
-                className="absolute bottom-0 left-0 -translate-x-1/2 translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nesw-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute bottom-0 left-0 -translate-x-1/2 translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nesw-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'sw')}
                 title="拉动缩放左下角"
               />
               <div
-                className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ns-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-ns-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 's')}
                 title="拉动缩放底部边缘"
               />
               <div
-                className="absolute bottom-0 right-0 translate-x-1/2 translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nwse-resize hover:scale-125 hover:bg-emerald-50 transition-transform pointer-events-auto touch-none before:absolute before:-inset-2.5 before:content-['']"
+                className={`absolute bottom-0 right-0 translate-x-1/2 translate-y-1/2 w-4 h-4 bg-white border-2 border-emerald-600 rounded-full shadow-lg z-50 cursor-nwse-resize hover:scale-125 hover:bg-emerald-50 transition-transform touch-none before:absolute before:-inset-2.5 before:content-[''] ${
+                  isPickingFrameColor || isPickingColor ? 'pointer-events-none' : 'pointer-events-auto'
+                }`}
                 onPointerDown={(e) => handlePointerDown(e, 'se')}
                 title="拉动缩放右下角"
               />
@@ -2560,7 +3582,7 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
         </div>
 
         {/* Right Column (5 cols): Parameter Controls & Action */}
-        <div className="lg:col-span-5 space-y-4">
+        <div className="lg:col-span-5 lg:h-full lg:overflow-y-auto space-y-4 pr-1 lg:pr-2.5 custom-scrollbar">
           {/* Section 1: Grid Presets */}
           <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2.5">
             <div className="flex items-center justify-between">
@@ -3069,6 +4091,25 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
             </div>
           </div>
 
+          {/* New Section: One-Click Remove Square Frame (Black/Colored Frame Removal) */}
+          <FrameRemovalControlPanel
+            settings={config}
+            onChange={(updated) => onConfigChange({ ...config, ...updated })}
+            onPickColorFromScreen={handleStartPickFrameColor}
+            onOneClickAutoDelete={handleOneClickDeleteAllFrames}
+            isPickingColor={isPickingFrameColor}
+            onToggleBrushSmear={handleToggleBrushSmear}
+            isBrushSmearActive={isBrushSmearActive}
+            brushSize={brushSize}
+            onBrushSizeChange={setBrushSize}
+            syncAllCells={brushSyncAllCells}
+            onSyncAllCellsChange={setBrushSyncAllCells}
+            onUndoBrush={handleBrushUndo}
+            onClearBrush={handleBrushClear}
+            canUndoBrush={brushHistory.length > 0}
+            hasBrushMask={!!config.frameEraserMaskUrl}
+          />
+
           {/* Section 3: Transparency & White Outline & Format */}
           <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-3">
             <div className="flex items-center justify-between text-xs font-bold text-stone-900">
@@ -3492,6 +4533,36 @@ export const GridImageSlicerControls: React.FC<GridImageSlicerControlsProps> = (
                 </div>
               </div>
             )}
+
+            {/* One-Click Frame Border Removal Panel */}
+            <FrameRemovalControlPanel
+              settings={{
+                removeFrameBorder: config.removeFrameBorder,
+                frameBorderMode: config.frameBorderMode,
+                frameBorderColor: config.frameBorderColor,
+                frameBorderColors: config.frameBorderColors,
+                frameBorderTolerance: config.frameBorderTolerance,
+                frameBorderWidth: config.frameBorderWidth,
+                frameBorderInset: config.frameBorderInset,
+                frameBorderAutoScale: config.frameBorderAutoScale,
+                frameEraserMaskUrl: config.frameEraserMaskUrl,
+                frameEraserSyncAllCells: config.frameEraserSyncAllCells,
+              }}
+              onChange={(updated) => onConfigChange({ ...config, ...updated })}
+              onPickColorFromScreen={handleStartPickFrameColor}
+              onOneClickAutoDelete={handleOneClickDeleteAllFrames}
+              isPickingColor={isPickingFrameColor}
+              onToggleBrushSmear={handleToggleBrushSmear}
+              isBrushSmearActive={isBrushSmearActive}
+              brushSize={brushSize}
+              onBrushSizeChange={setBrushSize}
+              syncAllCells={brushSyncAllCells}
+              onSyncAllCellsChange={setBrushSyncAllCells}
+              onUndoBrush={handleBrushUndo}
+              onClearBrush={handleBrushClear}
+              canUndoBrush={brushHistory.length > 0}
+              hasBrushMask={!!config.frameEraserMaskUrl}
+            />
 
             {/* 2px White Outline Toggle */}
             <div className="flex items-center justify-between pt-1 border-t border-stone-200/70">

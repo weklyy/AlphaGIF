@@ -3,6 +3,7 @@ import { GridConfig, SlicedStickerItem } from '../types';
 import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
 import { autoCenterAndScaleSubject } from './imageInpainting';
+import { removeSquareFrameBorder } from './frameBorderRemover';
 
 // Generate a demo 16-grid animated video file (4x4)
 export async function generateDemo16GridVideo(): Promise<{ file: File; duration: number }> {
@@ -328,6 +329,21 @@ export async function sliceVideoIntoStickers(
   // Frame delay in milliseconds for the output animation
   const frameDelayMs = Math.round((1 / targetFps) * 1000);
 
+  // Load brush eraser mask image if present
+  let eraserMaskImg: HTMLImageElement | null = null;
+  if (config.frameEraserMaskUrl) {
+    try {
+      eraserMaskImg = new Image();
+      await new Promise<void>((resolve) => {
+        eraserMaskImg!.onload = () => resolve();
+        eraserMaskImg!.onerror = () => resolve();
+        eraserMaskImg!.src = config.frameEraserMaskUrl!;
+      });
+    } catch {
+      eraserMaskImg = null;
+    }
+  }
+
   // Seek and extract each time slice
   for (let timeIdx = 0; timeIdx < sampleTimes.length; timeIdx++) {
     const time = sampleTimes[timeIdx];
@@ -396,6 +412,28 @@ export async function sliceVideoIntoStickers(
       // Clean unselected margins & edge black bars so unpainted padding and video letterboxing
       // are completely transparent, while keeping 100% of internal content intact without keying ("内容保持原图完整不扣图")
       imgData = cleanEdgeBlackBordersAndMargins(imgData, 32);
+
+      // One-Click Remove Square Frame (black frame or other color frames)
+      if (config.removeFrameBorder) {
+        imgData = removeSquareFrameBorder(imgData, {
+          mode: config.frameBorderMode || 'auto',
+          targetColor: config.frameBorderColor || '#000000',
+          targetColors: config.frameBorderColors,
+          tolerance: config.frameBorderTolerance ?? 35,
+          borderWidth: config.frameBorderWidth ?? 3,
+          inset: 0,
+          autoScale: false,
+        });
+      }
+
+      // Apply brush eraser mask if present
+      if (eraserMaskImg) {
+        sampleCtx.putImageData(imgData, 0, 0);
+        sampleCtx.globalCompositeOperation = 'destination-out';
+        sampleCtx.drawImage(eraserMaskImg, sx, sy, sw, sh, dx, dy, dw, dh);
+        sampleCtx.globalCompositeOperation = 'source-over';
+        imgData = sampleCtx.getImageData(0, 0, 240, 240);
+      }
 
       // Apply background transparency if enabled
       if (autoTransparent) {
@@ -533,6 +571,8 @@ export async function sliceVideoIntoStickers(
       col: item.col,
       blob,
       url,
+      rawBlob: blob,
+      rawUrl: url,
       size: blob.size,
       width: 240,
       height: 240,

@@ -9,6 +9,7 @@ import {
   CompressionPreset,
 } from '../types';
 import { removeBackgroundWithAI } from './aiBackgroundRemoval';
+import { removeSquareFrameBorder } from './frameBorderRemover';
 
 export const DEFAULT_COMPRESSION_OPTIONS: CompressionOptions = {
   enabled: true,
@@ -823,24 +824,33 @@ export function cleanEdgeBlackBordersAndMargins(
 
   // 1. Any pixel with alpha <= 64 is already unpainted margin/padding
   // 2. We flood from the outer boundary pixels: top row, bottom row, left col, right col
+  // CRITICAL: NEVER flood near-black pixels into drawing interiors (lines, eyes, text)!
+  // Near-black edge trimming is strictly restricted to outer perimeter (max 2px depth)
   const isBackground = new Uint8Array(totalPixels);
   const queue: number[] = [];
 
-  const isNearBlackOrTransparent = (idx: number) => {
+  const isBoundaryPixel = (x: number, y: number) => {
+    return x <= 1 || x >= width - 2 || y <= 1 || y >= height - 2;
+  };
+
+  const isNearBlackOrTransparent = (idx: number, x: number, y: number) => {
     const p = idx * 4;
     const a = data[p + 3];
     if (a <= 64) return true; // Already transparent/unpainted
-    const r = data[p];
-    const g = data[p + 1];
-    const b = data[p + 2];
-    // Near-black threshold check
-    return r <= maxBlackThreshold && g <= maxBlackThreshold && b <= maxBlackThreshold;
+    // Only check black color on the outer 1-2px edge line; NEVER penetrate into drawing
+    if (isBoundaryPixel(x, y)) {
+      const r = data[p];
+      const g = data[p + 1];
+      const b = data[p + 2];
+      return r <= maxBlackThreshold && g <= maxBlackThreshold && b <= maxBlackThreshold;
+    }
+    return false;
   };
 
   const checkAndQueue = (x: number, y: number) => {
     const idx = y * width + x;
     if (isBackground[idx] === 1) return;
-    if (isNearBlackOrTransparent(idx)) {
+    if (isNearBlackOrTransparent(idx, x, y)) {
       isBackground[idx] = 1;
       queue.push(idx);
     }
@@ -1512,6 +1522,17 @@ export async function processGifItem(
       transparentData = removeBackgroundFromFrame(frame.imageData, options);
     }
 
+    if (options.removeFrameBorder) {
+      transparentData = removeSquareFrameBorder(transparentData, {
+        mode: options.frameBorderMode || 'auto',
+        targetColor: options.frameBorderColor || '#000000',
+        tolerance: options.frameBorderTolerance ?? 35,
+        borderWidth: options.frameBorderWidth ?? 3,
+        inset: 0,
+        autoScale: false,
+      });
+    }
+
     const finalData = isWeChat
       ? renderFrameWithWeChatOptions(transparentData, options.wechat)
       : transparentData;
@@ -1646,6 +1667,17 @@ export async function processStaticImageItem(
     }
   } else {
     rawTransparentData = removeBackgroundFromFrame(sourceImageData, options);
+  }
+
+  if (options.removeFrameBorder) {
+    rawTransparentData = removeSquareFrameBorder(rawTransparentData, {
+      mode: options.frameBorderMode || 'auto',
+      targetColor: options.frameBorderColor || '#000000',
+      tolerance: options.frameBorderTolerance ?? 35,
+      borderWidth: options.frameBorderWidth ?? 3,
+      inset: 0,
+      autoScale: false,
+    });
   }
 
   const processedImageData = isWeChat

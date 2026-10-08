@@ -3,6 +3,7 @@ import { ImageGridConfig, SlicedStickerItem } from '../types';
 import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
 import { autoCenterAndScaleSubject } from './imageInpainting';
+import { removeSquareFrameBorder } from './frameBorderRemover';
 
 /**
  * Generate a high-resolution 16-grid (4x4) static emoji spritesheet demo image
@@ -216,6 +217,21 @@ export async function sliceImageIntoStickers(
     cellCanvas.height = 240;
     const cellCtx = cellCanvas.getContext('2d', { willReadFrequently: true })!;
 
+    // Load brush eraser mask image if present
+    let eraserMaskImg: HTMLImageElement | null = null;
+    if (config.frameEraserMaskUrl) {
+      try {
+        eraserMaskImg = new Image();
+        await new Promise<void>((resolve) => {
+          eraserMaskImg!.onload = () => resolve();
+          eraserMaskImg!.onerror = () => resolve();
+          eraserMaskImg!.src = config.frameEraserMaskUrl!;
+        });
+      } catch {
+        eraserMaskImg = null;
+      }
+    }
+
     for (let index = 0; index < totalCells; index++) {
       const col = index % cols;
       const row = Math.floor(index / cols);
@@ -273,6 +289,28 @@ export async function sliceImageIntoStickers(
       // Clean unselected margins & edge black bars so unpainted padding is completely transparent
       if (transparentBorders !== false) {
         imageData = cleanEdgeBlackBordersAndMargins(imageData, 32);
+      }
+
+      // One-Click Remove Square Frame (black frame or other color frames)
+      if (config.removeFrameBorder) {
+        imageData = removeSquareFrameBorder(imageData, {
+          mode: config.frameBorderMode || 'auto',
+          targetColor: config.frameBorderColor || '#000000',
+          targetColors: config.frameBorderColors,
+          tolerance: config.frameBorderTolerance ?? 35,
+          borderWidth: config.frameBorderWidth ?? 3,
+          inset: 0,
+          autoScale: false,
+        });
+      }
+
+      // Apply brush eraser mask if present
+      if (eraserMaskImg) {
+        cellCtx.putImageData(imageData, 0, 0);
+        cellCtx.globalCompositeOperation = 'destination-out';
+        cellCtx.drawImage(eraserMaskImg, srcX, srcY, srcW, srcH, dstX, dstY, dstW, dstH);
+        cellCtx.globalCompositeOperation = 'source-over';
+        imageData = cellCtx.getImageData(0, 0, 240, 240);
       }
 
       // Remove background if requested
@@ -383,6 +421,8 @@ export async function sliceImageIntoStickers(
         col,
         blob,
         url: stickerUrl,
+        rawBlob: blob,
+        rawUrl: stickerUrl,
         size: blob.size,
         width: 240,
         height: 240,

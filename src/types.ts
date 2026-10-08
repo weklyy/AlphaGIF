@@ -33,6 +33,14 @@ export interface RemovalOptions {
   edgeBarrier?: boolean; // 智能边缘阻隔：利用灰度梯度阻断穿透，防止容差过大误删人物/衣服 (默认开启)
   edgeThreshold?: number; // 边缘敏感度 (10 ~ 40, 默认 20)
   protectTorsoBottom?: boolean; // 保护底部躯干不被底边洪水填充穿透
+  removeFrameBorder?: boolean; // 一键去除正方形黑框/彩色框线
+  frameBorderMode?: 'auto' | 'black' | 'color' | 'inset'; // 去框模式: auto=智能全自动, black=去黑框, color=去彩色框, inset=内缩切除
+  frameBorderColor?: string; // 框线目标颜色 (默认 '#000000')
+  frameBorderColors?: string[]; // 累计已消除的多处/多种框线颜色 (支持连续点击点选，互不覆盖)
+  frameBorderTolerance?: number; // 框线容差 0 - 100 (默认 35)
+  frameBorderWidth?: number; // 框线消除厚度 1 - 12px (默认 3)
+  frameBorderInset?: number; // 边缘安全内缩切除 0 - 8px (默认 2)
+  frameBorderAutoScale?: boolean; // 是否自动裁剪至内框并自适应填充 240x240 (默认 true)
   wechat?: WeChatStickerOptions; // WeChat Sticker formatting options
   compression?: CompressionOptions; // 微信平台体积压缩参数
 }
@@ -132,6 +140,16 @@ export interface GridConfig {
   loopMode?: 'normal' | 'boomerang' | 'crossfade'; // AI 动图循环模式: normal=常规, boomerang=往返首尾丝滑, crossfade=交叉淡入
   smartAutoCenter?: boolean; // AI 主体智能检测并居中对齐 (解决 AI 多宫格偏心忽大忽小)
   subjectScaleTarget?: number; // AI 主体画面占比 (例如 0.82 即 82%，保留微信安全边距)
+  removeFrameBorder?: boolean; // 一键去除正方形黑框/彩色框线 (默认可选开启)
+  frameBorderMode?: 'auto' | 'black' | 'color' | 'inset'; // 去框模式: auto=智能全自动, black=去黑框, color=去彩色框, inset=内缩切除
+  frameBorderColor?: string; // 框线目标颜色 (默认 '#000000')
+  frameBorderColors?: string[]; // 累计已消除的多处/多种框线颜色 (支持连续点击点选，互不覆盖)
+  frameBorderTolerance?: number; // 框线容差 0 - 100 (默认 35)
+  frameBorderWidth?: number; // 框线消除厚度 1 - 12px (默认 3)
+  frameBorderInset?: number; // 边缘安全内缩切除 0 - 8px (默认 2)
+  frameBorderAutoScale?: boolean; // 是否自动裁剪至内框并自适应填充 240x240 (默认 true)
+  frameEraserMaskUrl?: string; // 画笔涂抹消框蒙版 (PNG DataURL，非透明像素表示已抹除)
+  frameEraserSyncAllCells?: boolean; // 涂抹消框是否同步应用至全图所有格子 (默认 true)
 }
 
 export interface ImageGridConfig {
@@ -156,6 +174,16 @@ export interface ImageGridConfig {
   transparentBorders?: boolean; // Ensure all unselected/padded border areas output as transparent (default true)
   smartAutoCenter?: boolean; // AI 主体智能检测并居中对齐 (解决 AI 九宫格/16格偏心忽大忽小)
   subjectScaleTarget?: number; // AI 主体画面占比 (默认 0.82 即 82%)
+  removeFrameBorder?: boolean; // 一键去除正方形黑框/彩色框线
+  frameBorderMode?: 'auto' | 'black' | 'color' | 'inset'; // 去框模式: auto=智能全自动, black=去黑框, color=去彩色框, inset=内缩切除
+  frameBorderColor?: string; // 框线目标颜色 (默认 '#000000')
+  frameBorderColors?: string[]; // 累计已消除的多处/多种框线颜色 (支持连续点击点选，互不覆盖)
+  frameBorderTolerance?: number; // 框线容差 0 - 100 (默认 35)
+  frameBorderWidth?: number; // 框线消除厚度 1 - 12px (默认 3)
+  frameBorderInset?: number; // 边缘安全内缩切除 0 - 8px (默认 2)
+  frameBorderAutoScale?: boolean; // 是否自动裁剪至内框并自适应填充 240x240 (默认 true)
+  frameEraserMaskUrl?: string; // 画笔涂抹消框蒙版 (PNG DataURL，非透明像素表示已抹除)
+  frameEraserSyncAllCells?: boolean; // 涂抹消框是否同步应用至全图所有格子 (默认 true)
 }
 
 export interface SlicedStickerItem {
@@ -165,6 +193,8 @@ export interface SlicedStickerItem {
   col: number;
   blob: Blob;
   url: string;
+  rawBlob?: Blob; // 原始未处理切片备份 (去框/去底叠加时防止还原或多次重复剪裁退化)
+  rawUrl?: string;
   size: number;
   width: number;
   height: number;

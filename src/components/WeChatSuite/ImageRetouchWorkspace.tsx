@@ -75,6 +75,7 @@ import {
   detectBackgroundColor,
   rgbToHex,
 } from '../../utils/gifProcessor';
+import { removeSquareFrameBorder } from '../../utils/frameBorderRemover';
 import { removeBackgroundWithAI } from '../../utils/aiBackgroundRemoval';
 
 interface ImageRetouchWorkspaceProps {
@@ -768,6 +769,23 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     pushHistory(result);
     clearOverlay();
     showToast?.('已叠加微信官方标准 2px 保护白描边！');
+  };
+
+  // One-click remove square black frame or colored border line
+  const handleOneClickRemoveFrame = () => {
+    if (!mainCanvasRef.current || historyIndex < 0) return;
+    const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
+    const currentData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+
+    const result = removeSquareFrameBorder(currentData, {
+      mode: 'auto',
+      borderWidth: 3,
+      inset: 2,
+      autoScale: false,
+    });
+    pushHistory(result);
+    clearOverlay();
+    showToast?.('✨ 正方形黑框/彩色边框线已一键识别消除！');
   };
 
   // Sync / Send current clean image to batch transparency list
@@ -2262,6 +2280,16 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
               >
                 <Wand2 className="w-3 h-3 text-emerald-600" />
                 <span>吸色智能去底</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleOneClickRemoveFrame}
+                className="h-7 px-2.5 rounded-md bg-amber-500 hover:bg-amber-600 text-stone-950 font-bold text-[11px] transition-all shadow-2xs flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                title="一键识别并清除图片四周的正方形黑框或彩色边框线"
+              >
+                <Square className="w-3.5 h-3.5 text-stone-950 stroke-[2.5]" />
+                <span>一键去方框</span>
               </button>
 
               <button

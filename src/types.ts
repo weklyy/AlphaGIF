@@ -217,6 +217,7 @@ export type RetouchTool =
   | 'brush-remove'      // 智能涂抹消除 (纹理修复)
   | 'rect-remove'       // 矩形圈选消除 (纹理修复)
   | 'lasso-remove'      // 自由套索圈选消除 (纹理修复)
+  | 'clone-stamp'       // 仿制图章 (取样仿制纹理与图案)
   | 'brush-transparent' // 涂抹擦除透底 (直接消抹为透明)
   | 'brush-restore'     // 消除透底 / 涂抹恢复原图 (将透明底恢复为不透明原图)
   | 'rect-transparent'  // 矩形框选清除透底 (直接消抹为透明)
@@ -238,6 +239,10 @@ export interface RetouchOptions {
   contiguous?: boolean;         // 仅清除连通边缘 (保护主体内部)
   pickedColors?: string[];      // 多选吸色列表 (支持同时选中多种底色)
   whiteOutlinePreview?: boolean;// 微信 2px 白描边实时叠加预览
+  cloneStampSize?: number;      // 仿制图章粗细 2px ~ 120px
+  cloneStampFeather?: number;   // 仿制图章羽化柔边 0% ~ 100%
+  cloneStampOpacity?: number;   // 仿制图章不透明度 10% ~ 100%
+  cloneStampAligned?: boolean;  // 仿制图章连续对齐模式 (true=相对位移对齐)
 }
 
 // -----------------------------------------------------------------

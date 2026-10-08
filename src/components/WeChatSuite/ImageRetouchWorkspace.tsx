@@ -38,6 +38,9 @@ import {
   FileDown,
   ArrowUpDown,
   RefreshCw,
+  Stamp,
+  Target,
+  Crosshair,
 } from 'lucide-react';
 import { RetouchTool, RetouchOptions } from '../../types';
 
@@ -63,6 +66,8 @@ import {
   applyEyedropperTransparent,
   applyRestoreOriginal,
   applyRemoveAllTransparency,
+  applyCloneStampDab,
+  applyCloneStampSegment,
 } from '../../utils/imageInpainting';
 import {
   applyWhiteOutline,
@@ -117,7 +122,19 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     colorTolerance: 25,
     contiguous: true,
     whiteOutlinePreview: false,
+    cloneStampSize: 24,
+    cloneStampFeather: 30,
+    cloneStampOpacity: 100,
+    cloneStampAligned: true,
   });
+
+  // Clone Stamp State (仿制图案图章取样与涂抹)
+  const [cloneSource, setCloneSource] = useState<{ x: number; y: number } | null>(null);
+  const [isAltPressed, setIsAltPressed] = useState<boolean>(false);
+  const cloneSnapshotRef = useRef<ImageData | null>(null);
+  const cloneOffsetRef = useRef<{ x: number; y: number } | null>(null);
+  const isCloningRef = useRef<boolean>(false);
+  const cloneLiveSourceRef = useRef<{ x: number; y: number } | null>(null);
 
   // Auto inpaint immediately upon releasing mouse brush
   const [autoInpaintOnRelease, setAutoInpaintOnRelease] = useState<boolean>(true);
@@ -296,11 +313,15 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     }
   };
 
-  // Keyboard Shortcuts (Space for Pan, Ctrl+Z, Ctrl+Y, B, R, M, E)
+  // Keyboard Shortcuts (Space for Pan, Ctrl+Z, Ctrl+Y, B, R, M, E, S, Alt for Stamp)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't intercept when typing in inputs
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
+
+      if (e.key === 'Alt') {
+        setIsAltPressed(true);
+      }
 
       if (e.code === 'Space') {
         setSpacePressed(true);
@@ -316,6 +337,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         handleRedo();
       } else if (e.key === 'b' || e.key === 'B') {
         setOptions((prev) => ({ ...prev, tool: 'brush-remove' }));
+      } else if (e.key === 's' || e.key === 'S') {
+        setOptions((prev) => ({ ...prev, tool: 'clone-stamp' }));
       } else if (e.key === 'r' || e.key === 'R') {
         setOptions((prev) => ({ ...prev, tool: 'rect-remove' }));
       } else if (e.key === 'm' || e.key === 'M') {
@@ -331,13 +354,23 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       if (e.code === 'Space') {
         setSpacePressed(false);
       }
+      if (e.key === 'Alt') {
+        setIsAltPressed(false);
+      }
+    };
+
+    const handleWindowBlur = () => {
+      setIsAltPressed(false);
+      setSpacePressed(false);
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
     };
   }, [historyIndex, history]);
 
@@ -457,6 +490,62 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       oCtx.setLineDash([4 / zoom, 4 / zoom]);
       oCtx.strokeRect(marqueeRect.x, marqueeRect.y, marqueeRect.width, marqueeRect.height);
       oCtx.restore();
+    }
+
+    // Draw Clone Stamp Source Reticle & Moving Sampling Crosshair
+    if (options.tool === 'clone-stamp' || isAltPressed) {
+      if (cloneLiveSourceRef.current) {
+        // Actively dragging/painting with clone stamp: show moving source point
+        const sx = cloneLiveSourceRef.current.x;
+        const sy = cloneLiveSourceRef.current.y;
+        const r = (options.cloneStampSize ?? 24) / 2;
+        oCtx.save();
+        oCtx.strokeStyle = '#f43f5e';
+        oCtx.lineWidth = 1.5 / zoom;
+        oCtx.setLineDash([3 / zoom, 3 / zoom]);
+        oCtx.beginPath();
+        oCtx.arc(sx, sy, r, 0, Math.PI * 2);
+        oCtx.stroke();
+
+        oCtx.setLineDash([]);
+        oCtx.strokeStyle = '#ffffff';
+        oCtx.lineWidth = 2 / zoom;
+        oCtx.beginPath();
+        oCtx.moveTo(sx - r * 0.7, sy);
+        oCtx.lineTo(sx + r * 0.7, sy);
+        oCtx.moveTo(sx, sy - r * 0.7);
+        oCtx.lineTo(sx, sy + r * 0.7);
+        oCtx.stroke();
+        oCtx.restore();
+      } else if (cloneSource) {
+        // Resting source anchor marker
+        const sx = cloneSource.x;
+        const sy = cloneSource.y;
+        const r = (options.cloneStampSize ?? 24) / 2;
+        oCtx.save();
+        oCtx.strokeStyle = '#e11d48';
+        oCtx.lineWidth = 1.5 / zoom;
+        oCtx.setLineDash([4 / zoom, 3 / zoom]);
+        oCtx.beginPath();
+        oCtx.arc(sx, sy, r, 0, Math.PI * 2);
+        oCtx.stroke();
+
+        // Inner target reticle
+        oCtx.setLineDash([]);
+        oCtx.strokeStyle = '#ffffff';
+        oCtx.lineWidth = 2 / zoom;
+        oCtx.beginPath();
+        oCtx.moveTo(sx - 7 / zoom, sy);
+        oCtx.lineTo(sx + 7 / zoom, sy);
+        oCtx.moveTo(sx, sy - 7 / zoom);
+        oCtx.lineTo(sx, sy + 7 / zoom);
+        oCtx.stroke();
+
+        oCtx.fillStyle = '#e11d48';
+        oCtx.font = `bold ${Math.max(9, Math.round(11 / zoom))}px sans-serif`;
+        oCtx.fillText('采样源', sx + r + 4 / zoom, sy + 4 / zoom);
+        oCtx.restore();
+      }
     }
   };
 
@@ -743,6 +832,67 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       return;
     }
 
+    // Clone Stamp Tool or Alt-key direct painting/sampling
+    const isAlt = e.altKey || isAltPressed;
+    const isCloneMode = options.tool === 'clone-stamp' || (options.tool === 'brush-remove' && isAlt);
+
+    if (isCloneMode) {
+      if (isAlt) {
+        // User clicks with Alt: set sample source
+        setCloneSource(coords);
+        cloneOffsetRef.current = null;
+        renderOverlay();
+        showToast?.(`已设置仿制取样源 (${coords.x}, ${coords.y})，松开 Alt 即可在目标位置涂抹仿制！`);
+        return;
+      }
+
+      // Start clone stamping
+      let srcPoint = cloneSource;
+      if (!srcPoint) {
+        srcPoint = {
+          x: Math.max(0, Math.min(imageSize.width - 1, coords.x - 30)),
+          y: Math.max(0, Math.min(imageSize.height - 1, coords.y)),
+        };
+        setCloneSource(srcPoint);
+        showToast?.('已自动为您就近设置采样源，按住 Alt 键点击可随时重选采样源！');
+      }
+
+      if (!options.cloneStampAligned || !cloneOffsetRef.current) {
+        cloneOffsetRef.current = {
+          x: srcPoint.x - coords.x,
+          y: srcPoint.y - coords.y,
+        };
+      }
+
+      isCloningRef.current = true;
+      isDrawingRef.current = true;
+      setIsDrawing(true);
+      lastCoordRef.current = coords;
+
+      const canvas = mainCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+        cloneSnapshotRef.current = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+        const liveData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+        applyCloneStampDab(
+          liveData,
+          cloneSnapshotRef.current,
+          coords,
+          cloneOffsetRef.current,
+          (options.cloneStampSize ?? 24) / 2,
+          options.cloneStampFeather ?? 30,
+          options.cloneStampOpacity ?? 100
+        );
+        ctx.putImageData(liveData, 0, 0);
+        cloneLiveSourceRef.current = {
+          x: coords.x + cloneOffsetRef.current.x,
+          y: coords.y + cloneOffsetRef.current.y,
+        };
+        renderOverlay();
+      }
+      return;
+    }
+
     const isBrushTool = [
       'brush-remove',
       'brush-transparent',
@@ -812,6 +962,29 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       const h = Math.abs(coords.y - sy);
       setMarqueeRect({ x: minX, y: minY, width: w, height: h });
       renderOverlay();
+    } else if (isCloningRef.current && cloneSnapshotRef.current && cloneOffsetRef.current) {
+      const canvas = mainCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+        const liveData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+        applyCloneStampSegment(
+          liveData,
+          cloneSnapshotRef.current,
+          lastCoordRef.current,
+          coords,
+          cloneOffsetRef.current,
+          (options.cloneStampSize ?? 24) / 2,
+          options.cloneStampFeather ?? 30,
+          options.cloneStampOpacity ?? 100
+        );
+        ctx.putImageData(liveData, 0, 0);
+        lastCoordRef.current = coords;
+        cloneLiveSourceRef.current = {
+          x: coords.x + cloneOffsetRef.current.x,
+          y: coords.y + cloneOffsetRef.current.y,
+        };
+        renderOverlay();
+      }
     } else if (isDrawingRef.current && options.tool === 'lasso-remove') {
       lassoPointsRef.current.push(coords);
       const mCanvas = maskCanvasRef.current;
@@ -882,6 +1055,21 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       } else {
         clearOverlay();
       }
+      return;
+    }
+
+    if (isCloningRef.current) {
+      isCloningRef.current = false;
+      isDrawingRef.current = false;
+      setIsDrawing(false);
+      cloneLiveSourceRef.current = null;
+      const canvas = mainCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+        const finalData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+        pushHistory(finalData);
+      }
+      renderOverlay();
       return;
     }
 
@@ -1610,6 +1798,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 <div className="flex items-center gap-0.5 bg-stone-100 p-0.5 rounded-lg border border-stone-200/80 shrink-0">
                   {[
                     { id: 'brush-remove', label: '涂抹', icon: Paintbrush, key: 'B', color: 'text-pink-600' },
+                    { id: 'clone-stamp', label: '仿制图章', icon: Stamp, key: 'S', color: 'text-rose-600' },
                     { id: 'rect-remove', label: '矩形', icon: Square, key: 'R', color: 'text-indigo-600' },
                     { id: 'lasso-remove', label: '套索', icon: Lasso, key: 'L', color: 'text-purple-600' },
                     { id: 'mosaic', label: '打码', icon: Grid, key: 'M', color: 'text-amber-600' },
@@ -1739,6 +1928,117 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                         <Sparkles className="w-2.5 h-2.5" />
                         <span>消除选区</span>
                       </button>
+                    )}
+                  </div>
+                )}
+
+                {/* 仿制图章参数栏 (Alt取样与连续仿制) */}
+                {options.tool === 'clone-stamp' && (
+                  <div className="flex items-center gap-1.5 bg-rose-50/70 h-7 px-2 rounded-md border border-rose-200 shrink-0">
+                    <span className="text-rose-800 text-[11px] whitespace-nowrap pl-0.5">粗细:</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOptions((prev) => ({ ...prev, cloneStampSize: Math.max(2, (prev.cloneStampSize ?? 24) - 2) }))
+                      }
+                      className="w-5 h-5 rounded hover:bg-rose-100 text-rose-700 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                      title="减小粗细 (快捷键: [ )"
+                      aria-label="减小粗细"
+                    >
+                      <Minus className="w-3 h-3" />
+                    </button>
+                    <input
+                      type="range"
+                      min="2"
+                      max="120"
+                      value={options.cloneStampSize ?? 24}
+                      onChange={(e) =>
+                        setOptions((prev) => ({ ...prev, cloneStampSize: parseInt(e.target.value) || 24 }))
+                      }
+                      className="w-16 accent-rose-600 cursor-pointer h-1.5"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOptions((prev) => ({ ...prev, cloneStampSize: Math.min(120, (prev.cloneStampSize ?? 24) + 2) }))
+                      }
+                      className="w-5 h-5 rounded hover:bg-rose-100 text-rose-700 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                      title="增大粗细 (快捷键: ] )"
+                      aria-label="增大粗细"
+                    >
+                      <Plus className="w-3 h-3" />
+                    </button>
+                    <div className="flex items-center font-mono text-rose-900 font-bold text-[11px]">
+                      <input
+                        type="number"
+                        min="2"
+                        max="120"
+                        value={options.cloneStampSize ?? 24}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value);
+                          if (!isNaN(v)) {
+                            setOptions((prev) => ({ ...prev, cloneStampSize: Math.max(2, Math.min(120, v)) }));
+                          }
+                        }}
+                        className="w-6 text-right bg-transparent hover:bg-rose-100/60 focus:bg-white focus:ring-1 focus:ring-rose-500 rounded text-[11px] p-0 focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      />
+                      <span className="text-[10px] text-rose-600 ml-0.5">px</span>
+                    </div>
+
+                    <div className="h-4 w-px bg-rose-200 mx-0.5 shrink-0" />
+
+                    <span className="text-rose-800 text-[11px] whitespace-nowrap">羽化:</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={options.cloneStampFeather ?? 30}
+                      onChange={(e) =>
+                        setOptions((prev) => ({ ...prev, cloneStampFeather: parseInt(e.target.value) || 0 }))
+                      }
+                      className="w-14 accent-rose-600 cursor-pointer h-1.5"
+                      title={`柔边羽化: ${options.cloneStampFeather ?? 30}% (边缘过渡柔和度)`}
+                    />
+                    <span className="font-mono text-rose-900 font-bold text-[11px] w-6 whitespace-nowrap">
+                      {options.cloneStampFeather ?? 30}%
+                    </span>
+
+                    <div className="h-4 w-px bg-rose-200 mx-0.5 shrink-0" />
+
+                    <label className="flex items-center gap-1 text-[11px] text-rose-900 cursor-pointer whitespace-nowrap" title="保持采样源与目标笔刷相对位移对齐">
+                      <input
+                        type="checkbox"
+                        checked={options.cloneStampAligned ?? true}
+                        onChange={(e) => setOptions((prev) => ({ ...prev, cloneStampAligned: e.target.checked }))}
+                        className="rounded text-rose-600 scale-90"
+                      />
+                      <span>对齐</span>
+                    </label>
+
+                    <div className="h-4 w-px bg-rose-200 mx-0.5 shrink-0" />
+
+                    {cloneSource ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] bg-rose-100 text-rose-900 px-1.5 py-0.5 rounded font-mono font-bold flex items-center gap-0.5">
+                          <Target className="w-2.5 h-2.5 text-rose-700" />
+                          <span>源点({cloneSource.x},{cloneSource.y})</span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCloneSource(null);
+                            cloneOffsetRef.current = null;
+                            showToast?.('请按住 Alt 键在画面中点击选取新的采样源');
+                          }}
+                          className="text-[10px] text-rose-700 hover:text-rose-900 underline cursor-pointer"
+                        >
+                          重选
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-[10px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-bold animate-pulse">
+                        按住 Alt 键点击选取采样源
+                      </span>
                     )}
                   </div>
                 )}
@@ -2199,7 +2499,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
               cursor:
                 isPanning || spacePressed || options.tool === 'pan'
                   ? 'grab'
-                  : ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic'].includes(options.tool)
+                  : ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic', 'clone-stamp'].includes(options.tool)
                   ? 'none'
                   : 'crosshair',
             }}
@@ -2211,24 +2511,34 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 isMouseOverCanvas &&
                 !isPanning &&
                 !spacePressed &&
-                ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic'].includes(options.tool)
+                ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic', 'clone-stamp'].includes(options.tool)
                   ? 'block'
                   : 'hidden'
               }`}
               style={{
-                width: `${Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.brushSize) * zoom))}px`,
-                height: `${Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.brushSize) * zoom))}px`,
+                width: `${Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.tool === 'clone-stamp' ? (options.cloneStampSize ?? 24) : options.brushSize) * zoom))}px`,
+                height: `${Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.tool === 'clone-stamp' ? (options.cloneStampSize ?? 24) : options.brushSize) * zoom))}px`,
                 willChange: 'transform',
               }}
             >
-              {/* Center precision cross-point dot */}
-              <div className="w-1.5 h-1.5 rounded-full bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.9)]" />
+              {/* Center precision cross-point dot or Alt-key sampling reticle */}
+              {isAltPressed ? (
+                <div className="w-2.5 h-2.5 rounded-full bg-rose-600 ring-2 ring-white flex items-center justify-center shadow-md animate-pulse">
+                  <div className="w-1 h-1 rounded-full bg-white" />
+                </div>
+              ) : (
+                <div className="w-1.5 h-1.5 rounded-full bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.9)]" />
+              )}
 
               {/* Tool label indicator if cursor circle is large */}
-              {Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.brushSize) * zoom)) > 42 && (
+              {Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.tool === 'clone-stamp' ? (options.cloneStampSize ?? 24) : options.brushSize) * zoom)) > 42 && (
                 <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-stone-900/85 text-[10px] font-mono font-bold text-white shadow-sm whitespace-nowrap pointer-events-none">
-                  {options.tool === 'eraser'
+                  {isAltPressed
+                    ? '点击取样 (Alt)'
+                    : options.tool === 'eraser'
                     ? `橡皮 ${options.eraserSize}px`
+                    : options.tool === 'clone-stamp'
+                    ? `仿制图章 ${options.cloneStampSize ?? 24}px`
                     : options.tool === 'brush-transparent'
                     ? `透底 ${options.brushSize}px`
                     : options.tool === 'brush-restore'

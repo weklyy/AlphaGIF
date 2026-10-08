@@ -61,6 +61,15 @@ export function applyInpainting(
 
   if (maskCount === 0) return result;
 
+  // Check if image has transparency (e.g. PNG sticker on transparent background)
+  let hasTransparency = false;
+  for (let i = 3; i < totalPixels * 4; i += 4 * 16) {
+    if (src[i] < 240) {
+      hasTransparency = true;
+      break;
+    }
+  }
+
   const bboxW = maxX - minX + 1;
   const bboxH = maxY - minY + 1;
   const bboxDim = Math.max(bboxW, bboxH);
@@ -114,12 +123,14 @@ export function applyInpainting(
     r: number;
     g: number;
     b: number;
+    a: number;
   }
 
   const boundaryPixels: BoundaryPixel[] = [];
   let sumR = 0;
   let sumG = 0;
   let sumB = 0;
+  let opaqueWeight = 0;
 
   for (let y = bMinY; y <= bMaxY; y++) {
     const row = y * width;
@@ -144,13 +155,20 @@ export function applyInpainting(
 
         if (isNearMask) {
           const p = idx * 4;
+          const a = src[p + 3];
           const r = src[p];
           const g = src[p + 1];
           const b = src[p + 2];
-          boundaryPixels.push({ x, y, r, g, b });
-          sumR += r;
-          sumG += g;
-          sumB += b;
+          boundaryPixels.push({ x, y, r, g, b, a });
+          // Only opaque or semi-opaque pixels contribute to color mean and variance!
+          // NEVER treat transparent (alpha < 20) as black (0,0,0)!
+          if (a >= 20) {
+            const w = a / 255;
+            sumR += r * w;
+            sumG += g * w;
+            sumB += b * w;
+            opaqueWeight += w;
+          }
         }
       }
     }
@@ -158,22 +176,26 @@ export function applyInpainting(
 
   if (boundaryPixels.length === 0) return result;
 
-  const meanR = sumR / boundaryPixels.length;
-  const meanG = sumG / boundaryPixels.length;
-  const meanB = sumB / boundaryPixels.length;
+  const meanR = opaqueWeight > 0 ? sumR / opaqueWeight : 255;
+  const meanG = opaqueWeight > 0 ? sumG / opaqueWeight : 255;
+  const meanB = opaqueWeight > 0 ? sumB / opaqueWeight : 255;
 
   let varR = 0;
   let varG = 0;
   let varB = 0;
+  let opaqueCount = 0;
   for (let i = 0; i < boundaryPixels.length; i++) {
     const bp = boundaryPixels[i];
-    varR += (bp.r - meanR) ** 2;
-    varG += (bp.g - meanG) ** 2;
-    varB += (bp.b - meanB) ** 2;
+    if (bp.a >= 20) {
+      varR += (bp.r - meanR) ** 2;
+      varG += (bp.g - meanG) ** 2;
+      varB += (bp.b - meanB) ** 2;
+      opaqueCount++;
+    }
   }
-  const stdR = Math.sqrt(varR / boundaryPixels.length);
-  const stdG = Math.sqrt(varG / boundaryPixels.length);
-  const stdB = Math.sqrt(varB / boundaryPixels.length);
+  const stdR = opaqueCount > 0 ? Math.sqrt(varR / opaqueCount) : 0;
+  const stdG = opaqueCount > 0 ? Math.sqrt(varG / opaqueCount) : 0;
+  const stdB = opaqueCount > 0 ? Math.sqrt(varB / opaqueCount) : 0;
   const stdTotal = (stdR + stdG + stdB) / 3;
 
   // 4. Multi-Directional Harmonic Ray-Casting Field Initialization
@@ -191,6 +213,7 @@ export function applyInpainting(
   const initR = new Float32Array(localSize);
   const initG = new Float32Array(localSize);
   const initB = new Float32Array(localSize);
+  const initA = new Float32Array(localSize);
   const isMaskedLocal = new Uint8Array(localSize);
 
   const toLocalIdx = (gx: number, gy: number) => (gy - dMinY) * localW + (gx - dMinX);
@@ -204,10 +227,12 @@ export function applyInpainting(
       if (dilatedMask[idx] > 0) {
         isMaskedLocal[lIdx] = 1;
 
-        let wSum = 0;
+        let wColorSum = 0;
+        let wAlphaSum = 0;
         let rAcc = 0;
         let gAcc = 0;
         let bAcc = 0;
+        let aAcc = 0;
 
         for (let d = 0; d < 8; d++) {
           const [dx, dy] = rayDirs[d];
@@ -233,28 +258,40 @@ export function applyInpainting(
             const hp = (hitY * width + hitX) * 4;
             const dist = Math.hypot(hitX - x, hitY - y);
             const w = 1 / (Math.pow(dist, 1.35) + 0.2);
-            rAcc += src[hp] * w;
-            gAcc += src[hp + 1] * w;
-            bAcc += src[hp + 2] * w;
-            wSum += w;
+            const a = src[hp + 3];
+
+            aAcc += a * w;
+            wAlphaSum += w;
+
+            // Only accumulate color from pixels that actually have color (a >= 20)
+            if (a >= 20) {
+              const colorW = w * (a / 255);
+              rAcc += src[hp] * colorW;
+              gAcc += src[hp + 1] * colorW;
+              bAcc += src[hp + 2] * colorW;
+              wColorSum += colorW;
+            }
           }
         }
 
-        if (wSum > 0) {
-          initR[lIdx] = rAcc / wSum;
-          initG[lIdx] = gAcc / wSum;
-          initB[lIdx] = bAcc / wSum;
+        if (wColorSum > 0) {
+          initR[lIdx] = rAcc / wColorSum;
+          initG[lIdx] = gAcc / wColorSum;
+          initB[lIdx] = bAcc / wColorSum;
         } else {
           initR[lIdx] = meanR;
           initG[lIdx] = meanG;
           initB[lIdx] = meanB;
         }
+
+        initA[lIdx] = wAlphaSum > 0 ? aAcc / wAlphaSum : 255;
       } else {
         isMaskedLocal[lIdx] = 0;
         const p = idx * 4;
         initR[lIdx] = src[p];
         initG[lIdx] = src[p + 1];
         initB[lIdx] = src[p + 2];
+        initA[lIdx] = src[p + 3];
       }
     }
   }
@@ -277,10 +314,12 @@ export function applyInpainting(
         const avgR = (initR[leftIdx] + initR[rightIdx] + initR[topIdx] + initR[btmIdx]) * 0.25;
         const avgG = (initG[leftIdx] + initG[rightIdx] + initG[topIdx] + initG[btmIdx]) * 0.25;
         const avgB = (initB[leftIdx] + initB[rightIdx] + initB[topIdx] + initB[btmIdx]) * 0.25;
+        const avgA = (initA[leftIdx] + initA[rightIdx] + initA[topIdx] + initA[btmIdx]) * 0.25;
 
         initR[lIdx] += omega * (avgR - initR[lIdx]);
         initG[lIdx] += omega * (avgG - initG[lIdx]);
         initB[lIdx] += omega * (avgB - initB[lIdx]);
+        initA[lIdx] += omega * (avgA - initA[lIdx]);
       }
     }
   }
@@ -288,7 +327,7 @@ export function applyInpainting(
   // 6. Structure-Preserving Exemplar Texture Synthesis
   // If the boundary has visible illustration grain, paper texture, or brush marks (stdTotal > 1.2),
   // we add authentic high-frequency coherent grain to match surrounding texture so it never looks like blurry plastic.
-  const hasTexture = stdTotal > 1.2 && boundaryPixels.length > 10;
+  const hasTexture = stdTotal > 1.2 && opaqueCount > 10;
   const grainStrength = hasTexture ? Math.min(1.0, stdTotal / 12) : 0;
 
   // 7. Write Result with Hermite Smooth Edge Blending
@@ -320,15 +359,37 @@ export function applyInpainting(
         b += texB;
       }
 
-      // 1-pixel boundary feathering with clean image to prevent any edge artifact
       const p = idx * 4;
-      const hasCleanNeighbor =
-        (x > 0 && dilatedMask[idx - 1] === 0) ||
-        (x < width - 1 && dilatedMask[idx + 1] === 0) ||
-        (y > 0 && dilatedMask[idx - width] === 0) ||
-        (y < height - 1 && dilatedMask[idx + width] === 0);
+      const origAlpha = src[p + 3];
 
-      if (hasCleanNeighbor) {
+      // CRITICAL FIX: If image has transparency (e.g. egg tart on checkerboard),
+      // original transparent pixels outside the object (origAlpha < 15) must REMAIN TRANSPARENT.
+      // They must NEVER be forced to opaque 255 or blended into black smudges!
+      let targetAlpha = 255;
+      if (hasTransparency) {
+        if (origAlpha < 15) {
+          targetAlpha = 0;
+        } else {
+          targetAlpha = Math.min(255, Math.max(origAlpha, Math.round(initA[lIdx])));
+        }
+      }
+
+      if (targetAlpha < 15) {
+        data[p] = 0;
+        data[p + 1] = 0;
+        data[p + 2] = 0;
+        data[p + 3] = 0;
+        continue;
+      }
+
+      // 1-pixel boundary feathering with clean image to prevent any edge artifact
+      const hasCleanNeighbor =
+        (x > 0 && dilatedMask[idx - 1] === 0 && src[(idx - 1) * 4 + 3] >= 20) ||
+        (x < width - 1 && dilatedMask[idx + 1] === 0 && src[(idx + 1) * 4 + 3] >= 20) ||
+        (y > 0 && dilatedMask[idx - width] === 0 && src[(idx - width) * 4 + 3] >= 20) ||
+        (y < height - 1 && dilatedMask[idx + width] === 0 && src[(idx + width) * 4 + 3] >= 20);
+
+      if (hasCleanNeighbor && origAlpha >= 20) {
         data[p] = Math.max(0, Math.min(255, Math.round(src[p] * 0.35 + r * 0.65)));
         data[p + 1] = Math.max(0, Math.min(255, Math.round(src[p + 1] * 0.35 + g * 0.65)));
         data[p + 2] = Math.max(0, Math.min(255, Math.round(src[p + 2] * 0.35 + b * 0.65)));
@@ -338,8 +399,7 @@ export function applyInpainting(
         data[p + 2] = Math.max(0, Math.min(255, Math.round(b)));
       }
 
-      // Solid opacity strictly guaranteed (never transparent, never punctures holes)
-      data[p + 3] = 255;
+      data[p + 3] = targetAlpha;
     }
   }
 
@@ -413,20 +473,71 @@ export function applyRectInpaint(
   const c01 = getPixel(leftX, bottomY);
   const c11 = getPixel(rightX, bottomY);
 
+  let hasTransparency = false;
+  for (let i = 3; i < width * height * 4; i += 4 * 16) {
+    if (sourceData.data[i] < 240) {
+      hasTransparency = true;
+      break;
+    }
+  }
+
+  // Calculate average color of opaque border pixels so transparent border pixels don't drag color into black
+  let bR = 0, bG = 0, bB = 0, bCount = 0;
+  const countOpaque = (pix: [number, number, number, number]) => {
+    if (pix[3] >= 20) {
+      bR += pix[0];
+      bG += pix[1];
+      bB += pix[2];
+      bCount++;
+    }
+  };
+  topRow.forEach(countOpaque);
+  bottomRow.forEach(countOpaque);
+  leftCol.forEach(countOpaque);
+  rightCol.forEach(countOpaque);
+  const avgOpaque: [number, number, number, number] = [
+    bCount > 0 ? Math.round(bR / bCount) : 255,
+    bCount > 0 ? Math.round(bG / bCount) : 255,
+    bCount > 0 ? Math.round(bB / bCount) : 255,
+    255,
+  ];
+
+  const sanitizePix = (pix: [number, number, number, number]): [number, number, number, number] => {
+    if (pix[3] < 20) {
+      return [avgOpaque[0], avgOpaque[1], avgOpaque[2], 0];
+    }
+    return pix;
+  };
+
+  const sc00 = sanitizePix(c00);
+  const sc10 = sanitizePix(c10);
+  const sc01 = sanitizePix(c01);
+  const sc11 = sanitizePix(c11);
+
   // Fill every pixel in the rectangle using Coons patch gradient interpolation
   for (let y = ry; y < ry + rh; y++) {
     const v = rh > 1 ? (y - ry) / (rh - 1) : 0.5;
     const colIdx = y - ry;
-    const lPix = leftCol[colIdx] || c00;
-    const rPix = rightCol[colIdx] || c10;
+    const lPix = sanitizePix(leftCol[colIdx] || c00);
+    const rPix = sanitizePix(rightCol[colIdx] || c10);
 
     for (let x = rx; x < rx + rw; x++) {
+      const p = (y * width + x) * 4;
+      const origAlpha = sourceData.data[p + 3];
+
+      // If original pixel was transparent background outside object, keep it 100% transparent!
+      if (hasTransparency && origAlpha < 15) {
+        data[p] = 0;
+        data[p + 1] = 0;
+        data[p + 2] = 0;
+        data[p + 3] = 0;
+        continue;
+      }
+
       const u = rw > 1 ? (x - rx) / (rw - 1) : 0.5;
       const rowIdx = x - rx;
-      const tPix = topRow[rowIdx] || c00;
-      const bPix = bottomRow[rowIdx] || c01;
-
-      const p = (y * width + x) * 4;
+      const tPix = sanitizePix(topRow[rowIdx] || c00);
+      const bPix = sanitizePix(bottomRow[rowIdx] || c01);
 
       for (let c = 0; c < 3; c++) {
         let val: number;
@@ -437,10 +548,10 @@ export function applyRectInpaint(
           const horiz = (1 - u) * lPix[c] + u * rPix[c];
           const vert = (1 - v) * tPix[c] + v * bPix[c];
           const corner =
-            (1 - u) * (1 - v) * c00[c] +
-            u * (1 - v) * c10[c] +
-            (1 - u) * v * c01[c] +
-            u * v * c11[c];
+            (1 - u) * (1 - v) * sc00[c] +
+            u * (1 - v) * sc10[c] +
+            (1 - u) * v * sc01[c] +
+            u * v * sc11[c];
           val = horiz + vert - corner;
         } else if (hasTop && hasBottom) {
           val = (1 - v) * tPix[c] + v * bPix[c];
@@ -458,17 +569,18 @@ export function applyRectInpaint(
 
         data[p + c] = Math.max(0, Math.min(255, Math.round(val)));
       }
-      // Guaranteed solid opacity (never transparent, never punctures holes)
-      data[p + 3] = 255;
+      data[p + 3] = hasTransparency ? Math.max(15, origAlpha) : 255;
     }
   }
 
   // Smooth the boundary seam (1-2px band) to ensure zero visible seams
   for (let y = ry; y < ry + rh; y++) {
     for (let x = rx; x < rx + rw; x++) {
+      const p = (y * width + x) * 4;
+      if (data[p + 3] < 15) continue;
+
       const isEdge = x === rx || x === rx + rw - 1 || y === ry || y === ry + rh - 1;
       if (isEdge) {
-        const p = (y * width + x) * 4;
         let sumR = 0;
         let sumG = 0;
         let sumB = 0;
@@ -480,23 +592,123 @@ export function applyRectInpaint(
             const nx = x + dx;
             if (nx < 0 || nx >= width) continue;
             const np = (ny * width + nx) * 4;
-            sumR += data[np];
-            sumG += data[np + 1];
-            sumB += data[np + 2];
-            count++;
+            if (data[np + 3] >= 15) {
+              sumR += data[np];
+              sumG += data[np + 1];
+              sumB += data[np + 2];
+              count++;
+            }
           }
         }
         if (count > 0) {
           data[p] = Math.round((data[p] + sumR / count) / 2);
           data[p + 1] = Math.round((data[p + 1] + sumG / count) / 2);
           data[p + 2] = Math.round((data[p + 2] + sumB / count) / 2);
-          data[p + 3] = 255;
         }
       }
     }
   }
 
   return result;
+}
+
+/**
+ * High-performance Clone Stamp Dab (仿制图章单点采样涂抹)
+ * Soft-feathered circular stamp copying pixels from source to destination.
+ */
+export function applyCloneStampDab(
+  targetData: ImageData,
+  sourceSnapshot: ImageData,
+  destPos: { x: number; y: number },
+  sourceOffset: { x: number; y: number }, // sourcePos = destPos + sourceOffset
+  brushRadius: number,
+  feather: number = 30, // 0 to 100
+  opacity: number = 100 // 10 to 100
+): void {
+  const width = targetData.width;
+  const height = targetData.height;
+  const data = targetData.data;
+  const src = sourceSnapshot.data;
+
+  const r = Math.max(1, Math.round(brushRadius));
+  const featherRatio = Math.max(0, Math.min(1, feather / 100));
+  const innerR = r * (1 - featherRatio);
+  const opacityRatio = Math.max(0.01, Math.min(1.0, opacity / 100));
+
+  const minX = Math.max(0, Math.floor(destPos.x - r));
+  const maxX = Math.min(width - 1, Math.ceil(destPos.x + r));
+  const minY = Math.max(0, Math.floor(destPos.y - r));
+  const maxY = Math.min(height - 1, Math.ceil(destPos.y + r));
+
+  for (let dy = minY; dy <= maxY; dy++) {
+    const distY = dy - destPos.y;
+    for (let dx = minX; dx <= maxX; dx++) {
+      const distX = dx - destPos.x;
+      const dist = Math.hypot(distX, distY);
+      if (dist > r) continue;
+
+      let weight = 1.0;
+      if (dist > innerR) {
+        const t = (r - dist) / (r - innerR + 0.001);
+        weight = t * t * (3 - 2 * t);
+      }
+      const blend = weight * opacityRatio;
+      if (blend <= 0) continue;
+
+      const sx = Math.round(dx + sourceOffset.x);
+      const sy = Math.round(dy + sourceOffset.y);
+      if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+
+      const dp = (dy * width + dx) * 4;
+      const sp = (sy * width + sx) * 4;
+
+      const srcR = src[sp];
+      const srcG = src[sp + 1];
+      const srcB = src[sp + 2];
+      const srcA = src[sp + 3];
+
+      const destA = data[dp + 3];
+
+      // Alpha compositing
+      data[dp] = Math.round(data[dp] * (1 - blend) + srcR * blend);
+      data[dp + 1] = Math.round(data[dp + 1] * (1 - blend) + srcG * blend);
+      data[dp + 2] = Math.round(data[dp + 2] * (1 - blend) + srcB * blend);
+      data[dp + 3] = Math.round(destA * (1 - blend) + srcA * blend);
+    }
+  }
+}
+
+/**
+ * High-performance Clone Stamp Continuous Stroke Segment (仿制图章连续平滑笔画插值)
+ */
+export function applyCloneStampSegment(
+  targetData: ImageData,
+  sourceSnapshot: ImageData,
+  fromDest: { x: number; y: number },
+  toDest: { x: number; y: number },
+  sourceOffset: { x: number; y: number },
+  brushRadius: number,
+  feather: number = 30,
+  opacity: number = 100
+): void {
+  const dist = Math.hypot(toDest.x - fromDest.x, toDest.y - fromDest.y);
+  const step = Math.max(1, Math.floor(brushRadius * 0.25));
+  const numSteps = Math.max(1, Math.ceil(dist / step));
+
+  for (let i = 0; i <= numSteps; i++) {
+    const t = i / numSteps;
+    const px = Math.round(fromDest.x + (toDest.x - fromDest.x) * t);
+    const py = Math.round(fromDest.y + (toDest.y - fromDest.y) * t);
+    applyCloneStampDab(
+      targetData,
+      sourceSnapshot,
+      { x: px, y: py },
+      sourceOffset,
+      brushRadius,
+      feather,
+      opacity
+    );
+  }
 }
 
 /**

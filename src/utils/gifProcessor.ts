@@ -1122,6 +1122,34 @@ export function renderFramePipeline(
       wechat.captionFontSize ||
       (targetW >= 240 ? 22 : Math.max(14, Math.round(targetW / 10)));
 
+    // If requested, erase the original bottom/top text area before rendering new caption
+    if (wechat.eraseOriginalBottomText) {
+      const clearH = Math.min(Math.round(fontSize * 1.8), Math.round(targetH * 0.28));
+      const clearY = wechat.captionPosition === 'top' ? 0 : targetH - clearH;
+      const data = currentImageData.data;
+
+      // Sample whether background at this area is largely transparent or solid
+      let transparentCount = 0;
+      let sampleCount = 0;
+      for (let x = 0; x < targetW; x += 4) {
+        const idx = ((clearY + Math.floor(clearH / 2)) * targetW + x) * 4;
+        if (data[idx + 3] < 128) transparentCount++;
+        sampleCount++;
+      }
+      const isTransparentBg = sampleCount > 0 && transparentCount / sampleCount > 0.35;
+
+      if (isTransparentBg) {
+        ctx.clearRect(0, clearY, targetW, clearH);
+      } else {
+        // Sample border/corner color
+        const cornerIdx = 0;
+        ctx.fillStyle = `rgb(${data[cornerIdx]},${data[cornerIdx + 1]},${data[cornerIdx + 2]})`;
+        ctx.fillRect(0, clearY, targetW, clearH);
+      }
+      currentImageData = ctx.getImageData(0, 0, targetW, targetH);
+      ctx.putImageData(currentImageData, 0, 0);
+    }
+
     ctx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
     ctx.textAlign = 'center';
     ctx.lineJoin = 'round';

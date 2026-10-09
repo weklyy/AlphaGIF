@@ -1420,6 +1420,33 @@ export const GifCard: React.FC<GifCardProps> = ({
                         </button>
                       ))}
                     </div>
+
+                    {/* Auto erase bottom text option */}
+                    <div className="pt-1.5 border-t border-emerald-100 space-y-1.5">
+                      <label className="flex items-center gap-1.5 text-[11px] text-stone-700 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={item.options.wechat?.eraseOriginalBottomText ?? false}
+                          onChange={(e) => updateWeChatSetting('eraseOriginalBottomText', e.target.checked)}
+                          className="rounded text-[#07c160] focus:ring-[#07c160] w-3.5 h-3.5"
+                        />
+                        <span className="font-bold text-amber-800">
+                          自动擦除原图底部旧文字区（防新旧文字重叠）
+                        </span>
+                      </label>
+
+                      {onSendToRetouch && (
+                        <button
+                          type="button"
+                          onClick={() => onSendToRetouch(item.file)}
+                          className="w-full py-1.5 px-2 bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
+                          title="进入画板：可逐帧用矩形或涂抹消除错误文字，并重新打字"
+                        >
+                          <Paintbrush className="w-3.5 h-3.5 text-pink-600" />
+                          <span>🎨 进入修图画板：自由擦除旧文字并重新打字</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

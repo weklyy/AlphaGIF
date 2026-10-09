@@ -9,6 +9,7 @@ export interface WeChatStickerOptions {
   captionColor?: string; // default '#ffffff'
   captionStrokeColor?: string; // default '#000000'
   captionFontSize?: number; // 14 - 32px (default 22)
+  eraseOriginalBottomText?: boolean; // 自动擦除原图底部旧文字区（防旧字重叠）
 }
 
 export type CompressionPreset = 'original' | 'wechat-auto' | 'wechat-1mb' | 'wechat-500kb' | 'light-300kb' | 'custom';
@@ -264,6 +265,7 @@ export type RetouchTool =
   | 'brush-restore'     // 消除透底 / 涂抹恢复原图 (将透明底恢复为不透明原图)
   | 'rect-transparent'  // 矩形框选清除透底 (直接消抹为透明)
   | 'color-transparent' // 吸管点除去背景 (直接消抹为透明)
+  | 'text'              // 表情包配字/重新打字 (自定义文字、字号、颜色、粗黑描边)
   | 'mosaic'            // 像素马赛克打码
   | 'blur'              // 柔和毛玻璃模糊打码
   | 'eraser'            // 选区橡皮擦 (修正涂抹蒙版)
@@ -285,6 +287,15 @@ export interface RetouchOptions {
   cloneStampFeather?: number;   // 仿制图章羽化柔边 0% ~ 100%
   cloneStampOpacity?: number;   // 仿制图章不透明度 10% ~ 100%
   cloneStampAligned?: boolean;  // 仿制图章连续对齐模式 (true=相对位移对齐)
+  // Text Tool options
+  textString?: string;          // 当前输入的文字内容
+  textFontSize?: number;        // 文字大小 (14 - 48px)
+  textColor?: string;           // 文字颜色 (默认 '#ffffff')
+  textStrokeColor?: string;     // 文字描边颜色 (默认 '#000000')
+  textStrokeWidth?: number;     // 描边粗细 (0 - 6px)
+  textPosition?: 'bottom' | 'top' | 'custom'; // 文字位置
+  textCustomX?: number;         // 自定义 X 坐标
+  textCustomY?: number;         // 自定义 Y 坐标
 }
 
 // -----------------------------------------------------------------

@@ -46,6 +46,7 @@ import {
   Film,
   ChevronLeft,
   ChevronRight,
+  Type,
 } from 'lucide-react';
 import { RetouchTool, RetouchOptions, FrameInfo } from '../../types';
 
@@ -135,6 +136,12 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     cloneStampFeather: 30,
     cloneStampOpacity: 100,
     cloneStampAligned: true,
+    textString: '收到',
+    textFontSize: 22,
+    textColor: '#ffffff',
+    textStrokeColor: '#000000',
+    textStrokeWidth: 3,
+    textPosition: 'bottom',
   });
 
   // Clone Stamp State (仿制图案图章取样与涂抹)
@@ -708,6 +715,64 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         oCtx.restore();
       }
     }
+
+    // Draw Text Tool Live Preview
+    if (options.tool === 'text') {
+      const text = options.textString || '收到';
+      const fontSize = options.textFontSize ?? 22;
+      const strokeWidth = options.textStrokeWidth ?? 3;
+      const strokeColor = options.textStrokeColor ?? '#000000';
+      const textColor = options.textColor ?? '#ffffff';
+      const position = options.textPosition ?? 'bottom';
+      const textX =
+        position === 'custom' && options.textCustomX !== undefined
+          ? options.textCustomX
+          : imageSize.width / 2;
+      const textY =
+        position === 'custom' && options.textCustomY !== undefined
+          ? options.textCustomY
+          : position === 'top'
+          ? fontSize + 8
+          : imageSize.height - 10;
+
+      oCtx.save();
+      oCtx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
+      oCtx.textAlign = 'center';
+      oCtx.lineJoin = 'round';
+      oCtx.miterLimit = 2;
+
+      // Outer stroke
+      if (strokeWidth > 0) {
+        oCtx.lineWidth = strokeWidth * 2;
+        oCtx.strokeStyle = strokeColor;
+        oCtx.strokeText(text, textX, textY);
+      }
+
+      // Inner text fill
+      oCtx.fillStyle = textColor;
+      oCtx.fillText(text, textX, textY);
+
+      // Dashed bounding box indicating drag/clickable
+      const metrics = oCtx.measureText(text);
+      const textW = metrics.width + 16;
+      const textH = fontSize + 8;
+      oCtx.strokeStyle = '#3b82f6';
+      oCtx.lineWidth = 1.5 / zoom;
+      oCtx.setLineDash([4 / zoom, 4 / zoom]);
+      oCtx.strokeRect(textX - textW / 2, textY - fontSize, textW, textH);
+
+      // Instruction pill
+      oCtx.setLineDash([]);
+      oCtx.fillStyle = '#2563eb';
+      oCtx.beginPath();
+      oCtx.roundRect(textX - 44, textY - fontSize - 18, 88, 16, 4);
+      oCtx.fill();
+      oCtx.fillStyle = '#ffffff';
+      oCtx.font = 'bold 10px sans-serif';
+      oCtx.fillText('点击画布重定位', textX, textY - fontSize - 6);
+
+      oCtx.restore();
+    }
   };
 
   // Execute inpaint or transparent erasure on current mask
@@ -732,33 +797,148 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
 
     if (!hasMaskPixels) return;
 
-    let repairedData: ImageData;
-    if (options.tool === 'brush-transparent') {
-      repairedData = applyTransparentErasure(currentData, maskArray);
-      pushHistory(repairedData);
-      clearOverlay();
-      showToast?.('涂抹擦除完成！所划选区域已转为 100% 透明底');
-      return;
-    } else if (options.tool === 'brush-restore') {
-      if (!originalImageDataRef.current) return;
-      repairedData = applyRestoreOriginal(currentData, originalImageDataRef.current, maskArray);
-      pushHistory(repairedData);
-      clearOverlay();
-      showToast?.('已消除透底！恢复划选区域为原图不透明内容');
-      return;
-    } else if (options.tool === 'mosaic' || (options.tool === 'brush-remove' && options.mosaicStyle === 'blur')) {
-      if (options.mosaicStyle === 'blur') {
-        repairedData = applyBlur(currentData, maskArray, options.blurRadius);
+    const processSingleFrame = (sourceData: ImageData): ImageData => {
+      if (options.tool === 'brush-transparent') {
+        return applyTransparentErasure(sourceData, maskArray);
+      } else if (options.tool === 'brush-restore') {
+        if (!originalImageDataRef.current) return sourceData;
+        return applyRestoreOriginal(sourceData, originalImageDataRef.current, maskArray);
+      } else if (options.tool === 'mosaic' || (options.tool === 'brush-remove' && options.mosaicStyle === 'blur')) {
+        if (options.mosaicStyle === 'blur') {
+          return applyBlur(sourceData, maskArray, options.blurRadius);
+        } else {
+          return applyMosaic(sourceData, maskArray, options.mosaicSize);
+        }
       } else {
-        repairedData = applyMosaic(currentData, maskArray, options.mosaicSize);
+        return applyInpainting(sourceData, maskArray);
       }
-    } else {
-      repairedData = applyInpainting(currentData, maskArray);
+    };
+
+    const repairedData = processSingleFrame(currentData);
+
+    // Synchronize to ALL GIF frames if multi-frame GIF is loaded and option is checked
+    if (isGif && applyToAllFrames && gifFrames.length > 1) {
+      const updatedFrames = gifFrames.map((f, idx) => {
+        if (idx === currentFrameIdx) return { ...f, imageData: repairedData };
+        return { ...f, imageData: processSingleFrame(f.imageData) };
+      });
+      setGifFrames(updatedFrames);
+      pushHistory(repairedData);
+      clearOverlay();
+      showToast?.(`已将消除操作同步应用至全部 ${gifFrames.length} 帧！`);
+      return;
     }
 
     pushHistory(repairedData);
     clearOverlay();
     showToast?.('消除完成！已智能融合周围纹理');
+  };
+
+  // Helper to burn styled text onto an ImageData frame
+  const renderTextOnFrame = (
+    srcData: ImageData,
+    text: string,
+    fontSize: number,
+    textColor: string,
+    strokeColor: string,
+    strokeWidth: number,
+    position: 'bottom' | 'top' | 'custom',
+    customX?: number,
+    customY?: number
+  ): ImageData => {
+    const w = srcData.width;
+    const h = srcData.height;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d')!;
+    ctx.putImageData(srcData, 0, 0);
+
+    ctx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+
+    let textX = w / 2;
+    let textY = h - 10;
+    if (position === 'top') {
+      textY = fontSize + 8;
+    } else if (position === 'custom' && customX !== undefined && customY !== undefined) {
+      textX = customX;
+      textY = customY;
+    }
+
+    if (strokeWidth > 0) {
+      ctx.lineWidth = strokeWidth * 2;
+      ctx.strokeStyle = strokeColor;
+      ctx.strokeText(text, textX, textY);
+    }
+
+    ctx.fillStyle = textColor;
+    ctx.fillText(text, textX, textY);
+
+    return ctx.getImageData(0, 0, w, h);
+  };
+
+  // Apply new custom text onto the current image or across all GIF frames
+  const handleApplyText = () => {
+    const text = (options.textString || '').trim();
+    if (!text) {
+      showToast?.('请输入要添加的文字内容');
+      return;
+    }
+    if (!mainCanvasRef.current || historyIndex < 0) return;
+    const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
+    const currentData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+
+    const fontSize = options.textFontSize ?? 22;
+    const textColor = options.textColor ?? '#ffffff';
+    const strokeColor = options.textStrokeColor ?? '#000000';
+    const strokeWidth = options.textStrokeWidth ?? 3;
+    const position = options.textPosition ?? 'bottom';
+    const customX = options.textCustomX;
+    const customY = options.textCustomY;
+
+    const newCurrent = renderTextOnFrame(
+      currentData,
+      text,
+      fontSize,
+      textColor,
+      strokeColor,
+      strokeWidth,
+      position,
+      customX,
+      customY
+    );
+
+    if (isGif && applyToAllFrames && gifFrames.length > 1) {
+      const updatedFrames = gifFrames.map((f, idx) => {
+        if (idx === currentFrameIdx) return { ...f, imageData: newCurrent };
+        return {
+          ...f,
+          imageData: renderTextOnFrame(
+            f.imageData,
+            text,
+            fontSize,
+            textColor,
+            strokeColor,
+            strokeWidth,
+            position,
+            customX,
+            customY
+          ),
+        };
+      });
+      setGifFrames(updatedFrames);
+      pushHistory(newCurrent);
+      clearOverlay();
+      showToast?.(`🎉 已将新文字「${text}」重新打上并烙印至全部 ${gifFrames.length} 帧！`);
+      return;
+    }
+
+    pushHistory(newCurrent);
+    clearOverlay();
+    showToast?.(`🎉 已将新文字「${text}」烙印写入画面！`);
   };
 
   // One-click eliminate all transparency in current image (restore original or fill white)
@@ -1047,6 +1227,18 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       return;
     }
 
+    // Text tool click reposition
+    if (options.tool === 'text') {
+      setOptions((prev) => ({
+        ...prev,
+        textPosition: 'custom',
+        textCustomX: coords.x,
+        textCustomY: coords.y,
+      }));
+      renderOverlay();
+      return;
+    }
+
     // Clone Stamp Tool or Alt-key direct painting/sampling
     const isAlt = e.altKey || isAltPressed;
     const isCloneMode = options.tool === 'clone-stamp' || (options.tool === 'brush-remove' && isAlt);
@@ -1235,38 +1427,55 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
         const currentData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
 
-        let resultData: ImageData;
-        if (options.tool === 'rect-transparent') {
-          resultData = applyRectTransparent(currentData, marqueeRect);
-          pushHistory(resultData);
-          clearOverlay();
-          showToast?.('已将所选矩形框区域清除为 100% 透明底！');
-        } else if (options.tool === 'mosaic') {
-          const mask = new Uint8Array(imageSize.width * imageSize.height);
-          const rx = Math.round(marqueeRect.x);
-          const ry = Math.round(marqueeRect.y);
-          const rw = Math.round(marqueeRect.width);
-          const rh = Math.round(marqueeRect.height);
-          for (let y = ry; y < ry + rh; y++) {
-            for (let x = rx; x < rx + rw; x++) {
-              mask[y * imageSize.width + x] = 255;
+        const processRectOnFrame = (src: ImageData): ImageData => {
+          if (options.tool === 'rect-transparent') {
+            return applyRectTransparent(src, marqueeRect);
+          } else if (options.tool === 'mosaic') {
+            const mask = new Uint8Array(imageSize.width * imageSize.height);
+            const rx = Math.round(marqueeRect.x);
+            const ry = Math.round(marqueeRect.y);
+            const rw = Math.round(marqueeRect.width);
+            const rh = Math.round(marqueeRect.height);
+            for (let y = ry; y < ry + rh; y++) {
+              for (let x = rx; x < rx + rw; x++) {
+                mask[y * imageSize.width + x] = 255;
+              }
             }
-          }
-          if (options.mosaicStyle === 'blur') {
-            resultData = applyBlur(currentData, mask, options.blurRadius);
+            if (options.mosaicStyle === 'blur') {
+              return applyBlur(src, mask, options.blurRadius);
+            } else {
+              return applyMosaic(src, mask, options.mosaicSize);
+            }
           } else {
-            resultData = applyMosaic(currentData, mask, options.mosaicSize);
+            return applyRectInpaint(src, marqueeRect);
           }
+        };
+
+        const resultData = processRectOnFrame(currentData);
+
+        if (isGif && applyToAllFrames && gifFrames.length > 1) {
+          const updatedFrames = gifFrames.map((f, idx) => {
+            if (idx === currentFrameIdx) return { ...f, imageData: resultData };
+            return { ...f, imageData: processRectOnFrame(f.imageData) };
+          });
+          setGifFrames(updatedFrames);
           pushHistory(resultData);
           clearOverlay();
-          showToast?.('已圈选并应用马赛克！');
-        } else {
-          // Rect Inpaint
-          resultData = applyRectInpaint(currentData, marqueeRect);
-          pushHistory(resultData);
-          clearOverlay();
-          showToast?.('已圈选并智能去除水印！');
+          showToast?.(
+            options.tool === 'rect-transparent'
+              ? `已将框选区域同步清除为透明底至全部 ${gifFrames.length} 帧！`
+              : `已将框选去除水印/错误文字同步应用至全部 ${gifFrames.length} 帧！`
+          );
+          return;
         }
+
+        pushHistory(resultData);
+        clearOverlay();
+        showToast?.(
+          options.tool === 'rect-transparent'
+            ? '已将所选矩形框区域清除为 100% 透明底！'
+            : '已圈选并智能去除水印/文字！'
+        );
       } else {
         clearOverlay();
       }
@@ -2098,6 +2307,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                     { id: 'rect-remove', label: '矩形', icon: Square, key: 'R', color: 'text-indigo-600' },
                     { id: 'lasso-remove', label: '套索', icon: Lasso, key: 'L', color: 'text-purple-600' },
                     { id: 'mosaic', label: '打码', icon: Grid, key: 'M', color: 'text-amber-600' },
+                    { id: 'text', label: '文字改字', icon: Type, key: 'T', color: 'text-blue-600' },
                     { id: 'eraser', label: '修选区', icon: RotateCcw, key: 'E', color: 'text-stone-600' },
                     { id: 'pan', label: '抓手', icon: Hand, key: 'H', color: 'text-emerald-600' },
                   ].map((t) => {
@@ -2517,6 +2727,97 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                   <span className="text-[11px] text-stone-500 whitespace-nowrap hidden lg:inline">
                     画圈套索瑕疵，松手自动修复
                   </span>
+                )}
+
+                {/* 文字配字参数栏 */}
+                {options.tool === 'text' && (
+                  <div className="flex items-center gap-1.5 bg-blue-50/90 h-7 px-2 rounded-md border border-blue-200 shrink-0">
+                    <span className="text-blue-900 text-[11px] font-bold whitespace-nowrap flex items-center gap-0.5">
+                      <Type className="w-3 h-3 text-blue-600" />
+                      <span>文字:</span>
+                    </span>
+                    <input
+                      type="text"
+                      value={options.textString ?? ''}
+                      placeholder="输入文字（如：收到）"
+                      onChange={(e) => {
+                        setOptions((prev) => ({ ...prev, textString: e.target.value }));
+                        renderOverlay();
+                      }}
+                      className="w-20 sm:w-28 text-xs bg-white border border-blue-200 rounded px-1.5 py-0.5 focus:ring-1 focus:ring-blue-500 font-bold text-stone-800"
+                    />
+
+                    {/* 常用预设快捷字 */}
+                    <div className="hidden sm:flex items-center gap-1">
+                      {['收到', '哈哈', '无语', '点赞', '好的'].map((w) => (
+                        <button
+                          key={w}
+                          type="button"
+                          onClick={() => {
+                            setOptions((prev) => ({ ...prev, textString: w }));
+                            renderOverlay();
+                          }}
+                          className="px-1.5 py-0.2 rounded text-[10px] bg-white hover:bg-blue-100 text-blue-900 font-medium border border-blue-200 transition-colors cursor-pointer"
+                        >
+                          {w}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="h-4 w-px bg-blue-200 mx-0.5 shrink-0" />
+
+                    {/* 位置选择 */}
+                    <div className="flex items-center gap-0.5 text-[11px]">
+                      {[
+                        { id: 'bottom', label: '底部' },
+                        { id: 'top', label: '顶部' },
+                      ].map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            setOptions((prev) => ({ ...prev, textPosition: p.id as 'bottom' | 'top' }));
+                            renderOverlay();
+                          }}
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors cursor-pointer ${
+                            options.textPosition === p.id
+                              ? 'bg-blue-600 text-white font-bold'
+                              : 'bg-white text-stone-600 hover:bg-blue-100/60'
+                          }`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* 字号滑块 */}
+                    <div className="flex items-center gap-1 font-mono text-[11px] text-blue-900">
+                      <span className="text-[10px] text-stone-500">字号:</span>
+                      <input
+                        type="range"
+                        min="14"
+                        max="48"
+                        value={options.textFontSize ?? 22}
+                        onChange={(e) => {
+                          setOptions((prev) => ({ ...prev, textFontSize: parseInt(e.target.value) || 22 }));
+                          renderOverlay();
+                        }}
+                        className="w-12 sm:w-16 accent-blue-600 cursor-pointer h-1.5"
+                      />
+                      <span className="text-[10px] font-bold">{options.textFontSize ?? 22}px</span>
+                    </div>
+
+                    {/* 提交烙印按钮 */}
+                    <button
+                      type="button"
+                      onClick={handleApplyText}
+                      className="h-5.5 px-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-[11px] rounded flex items-center gap-1 shadow-2xs transition-colors cursor-pointer shrink-0 ml-1"
+                      title="将当前文字直接烙印写入画面（如果处于 GIF 模式，将同步烙印至所有帧）"
+                    >
+                      <Check className="w-3 h-3 text-white" />
+                      <span>写入{isGif && applyToAllFrames ? `全部${gifFrames.length}帧` : '当前图'}</span>
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

@@ -57,6 +57,7 @@ import { IdPhotoMaker } from './components/IdPhoto/IdPhotoMaker';
 import { sliceVideoIntoStickers } from './utils/videoGridSlicer';
 import { sliceImageIntoStickers } from './utils/imageGridSlicer';
 import { processStickerItemFrameRemoval } from './utils/frameBorderRemover';
+import { calculateCellBounds } from './utils/gridGeometry';
 import {
   generateAllWeChatMaterials,
   generateBannerMaterial,
@@ -582,12 +583,41 @@ export default function App() {
     showNotification('正在一键去除切片方框/边框线...');
     const effectiveConfig = { ...imageGridConfig, ...(overrideConfig || {}) };
     try {
+      const cols = effectiveConfig.cols || 4;
+      const rows = effectiveConfig.rows || 4;
+      const imgW = 1024;
+      const imgH = 1024;
+      const cropX = ((effectiveConfig.cropArea?.x ?? 0) / 100) * imgW;
+      const cropY = ((effectiveConfig.cropArea?.y ?? 0) / 100) * imgH;
+      const cropW = ((effectiveConfig.cropArea?.width ?? 100) / 100) * imgW;
+      const cropH = ((effectiveConfig.cropArea?.height ?? 100) / 100) * imgH;
+
       const updated = await Promise.all(
         imageSlicedStickers.map(async (sticker) => {
           if (indices && !indices.includes(sticker.index)) {
             return sticker;
           }
-          const isPureBrush = !!effectiveConfig.frameEraserMaskUrl && !effectiveConfig.removeFrameBorder;
+          const isPureBrush = !!effectiveConfig.frameEraserMaskUrl;
+          const bounds = calculateCellBounds({
+            cropX,
+            cropY,
+            cropW,
+            cropH,
+            cols,
+            rows,
+            col: sticker.col,
+            row: sticker.row,
+            cellIndex: sticker.index - 1,
+            layoutMode: effectiveConfig.layoutMode,
+            independentBox: effectiveConfig.independentBoxes?.[sticker.index - 1],
+            colSplits: effectiveConfig.colSplits,
+            rowSplits: effectiveConfig.rowSplits,
+            cellOverride: effectiveConfig.cellOverrides?.[sticker.index - 1],
+            paddingInset: effectiveConfig.paddingInset || 0,
+            sourceWidth: imgW,
+            sourceHeight: imgH,
+          });
+
           return await processStickerItemFrameRemoval(sticker, {
             mode: effectiveConfig.frameBorderMode || 'auto',
             targetColor: effectiveConfig.frameBorderColor || '#000000',
@@ -598,6 +628,12 @@ export default function App() {
             autoScale: false,
             skipColorRemoval: isPureBrush,
             eraserMaskUrl: effectiveConfig.frameEraserMaskUrl,
+            cellBounds: {
+              srcX: bounds.sx,
+              srcY: bounds.sy,
+              srcW: bounds.sw,
+              srcH: bounds.sh,
+            },
           });
         })
       );
@@ -613,7 +649,7 @@ export default function App() {
         );
         setImageMaterials(generatedMaterials);
       }
-      showNotification('✨ 已成功仅去除切片方框线！文字与图像原样保留，未进行任何缩放。');
+      showNotification('✨ 已成功去除切片方框线！文字与图像原样保留，未进行任何缩放。');
     } catch (err) {
       console.error('Failed to remove frame from image stickers', err);
       showNotification('去方框处理失败，请重试');
@@ -628,12 +664,41 @@ export default function App() {
     showNotification('正在一键去除动态切片方框/边框线...');
     const effectiveConfig = { ...gridConfig, ...(overrideConfig || {}) };
     try {
+      const cols = effectiveConfig.cols || 4;
+      const rows = effectiveConfig.rows || 4;
+      const vidW = 960;
+      const vidH = 960;
+      const cropX = ((effectiveConfig.cropArea?.x ?? 0) / 100) * vidW;
+      const cropY = ((effectiveConfig.cropArea?.y ?? 0) / 100) * vidH;
+      const cropW = ((effectiveConfig.cropArea?.width ?? 100) / 100) * vidW;
+      const cropH = ((effectiveConfig.cropArea?.height ?? 100) / 100) * vidH;
+
       const updated = await Promise.all(
         slicedStickers.map(async (sticker) => {
           if (indices && !indices.includes(sticker.index)) {
             return sticker;
           }
-          const isPureBrush = !!effectiveConfig.frameEraserMaskUrl && !effectiveConfig.removeFrameBorder;
+          const isPureBrush = !!effectiveConfig.frameEraserMaskUrl;
+          const bounds = calculateCellBounds({
+            cropX,
+            cropY,
+            cropW,
+            cropH,
+            cols,
+            rows,
+            col: sticker.col,
+            row: sticker.row,
+            cellIndex: sticker.index - 1,
+            layoutMode: effectiveConfig.layoutMode,
+            independentBox: effectiveConfig.independentBoxes?.[sticker.index - 1],
+            colSplits: effectiveConfig.colSplits,
+            rowSplits: effectiveConfig.rowSplits,
+            cellOverride: effectiveConfig.cellOverrides?.[sticker.index - 1],
+            paddingInset: effectiveConfig.paddingInset || 0,
+            sourceWidth: vidW,
+            sourceHeight: vidH,
+          });
+
           return await processStickerItemFrameRemoval(sticker, {
             mode: effectiveConfig.frameBorderMode || 'auto',
             targetColor: effectiveConfig.frameBorderColor || '#000000',
@@ -644,6 +709,12 @@ export default function App() {
             autoScale: false,
             skipColorRemoval: isPureBrush,
             eraserMaskUrl: effectiveConfig.frameEraserMaskUrl,
+            cellBounds: {
+              srcX: bounds.sx,
+              srcY: bounds.sy,
+              srcW: bounds.sw,
+              srcH: bounds.sh,
+            },
           });
         })
       );
@@ -774,13 +845,14 @@ export default function App() {
   };
 
   const handleSendStickerToRetouch = (s: SlicedStickerItem) => {
-    const isGif = s.name.endsWith('.gif');
-    const file = new File([s.blob], s.name, { type: isGif ? 'image/gif' : 'image/png' });
+    const isGif = s.name.toLowerCase().endsWith('.gif') || s.blob.type === 'image/gif' || s.frameCount > 1;
+    const finalName = isGif && !s.name.toLowerCase().endsWith('.gif') ? `${s.name}.gif` : s.name;
+    const file = new File([s.blob], finalName, { type: isGif ? 'image/gif' : 'image/png' });
     setRetouchImageFile(file);
     setActiveRetouchItemId(null);
     setTransparencySubView('retouch');
     setActiveTab('transparency');
-    showNotification(`已将表情「${s.name}」导入背景透明化工具的精细修图与透底画板！`);
+    showNotification(`已将表情「${finalName}」导入背景透明化工具的精细修图与透底画板！`);
   };
 
   const handleSendMediaFileToRetouch = (file: File, itemId?: string) => {
@@ -797,13 +869,15 @@ export default function App() {
   const handleImportAllStickersToTab2 = () => {
     if (slicedStickers.length === 0) return;
     const newItems: GifItem[] = slicedStickers.map((s) => {
-      const file = new File([s.blob], s.name, { type: 'image/gif' });
+      const isGif = s.name.toLowerCase().endsWith('.gif') || s.blob.type === 'image/gif' || s.frameCount > 1;
+      const finalName = isGif && !s.name.toLowerCase().endsWith('.gif') ? `${s.name}.gif` : s.name;
+      const file = new File([s.blob], finalName, { type: isGif ? 'image/gif' : 'image/png' });
       const url = URL.createObjectURL(file);
-      return {
+      const item: GifItem = {
         id: `wechat_${s.index}_${Date.now()}`,
-        name: s.name,
+        name: finalName,
         file,
-        mediaType: 'gif',
+        mediaType: isGif ? 'gif' : 'image',
         originalUrl: url,
         originalSize: s.size,
         width: s.width,
@@ -837,10 +911,16 @@ export default function App() {
           frameCount: s.frameCount,
           width: s.width,
           height: s.height,
-          format: 'gif',
+          format: isGif ? 'gif' : 'png',
           isWeChatSticker: true,
         },
       };
+
+      file.arrayBuffer().then((buf) => {
+        item.cachedBuffer = buf;
+      });
+
+      return item;
     });
 
     setItems((prev) => [...prev, ...newItems]);
@@ -849,13 +929,15 @@ export default function App() {
   };
 
   const handleImportSingleStickerToTab2 = (s: SlicedStickerItem) => {
-    const file = new File([s.blob], s.name, { type: 'image/gif' });
+    const isGif = s.name.toLowerCase().endsWith('.gif') || s.blob.type === 'image/gif' || s.frameCount > 1;
+    const finalName = isGif && !s.name.toLowerCase().endsWith('.gif') ? `${s.name}.gif` : s.name;
+    const file = new File([s.blob], finalName, { type: isGif ? 'image/gif' : 'image/png' });
     const url = URL.createObjectURL(file);
     const item: GifItem = {
       id: `wechat_${s.index}_${Date.now()}`,
-      name: s.name,
+      name: finalName,
       file,
-      mediaType: 'gif',
+      mediaType: isGif ? 'gif' : 'image',
       originalUrl: url,
       originalSize: s.size,
       width: s.width,
@@ -889,10 +971,14 @@ export default function App() {
         frameCount: s.frameCount,
         width: s.width,
         height: s.height,
-        format: 'gif',
+        format: isGif ? 'gif' : 'png',
         isWeChatSticker: true,
       },
     };
+
+    file.arrayBuffer().then((buf) => {
+      item.cachedBuffer = buf;
+    });
 
     setItems((prev) => [...prev, item]);
     setActiveTab('transparency');

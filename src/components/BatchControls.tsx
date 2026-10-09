@@ -19,6 +19,10 @@ import {
   Gauge,
   Columns,
   LayoutGrid,
+  Scaling,
+  Maximize2,
+  ArrowRight,
+  Settings2,
 } from 'lucide-react';
 import {
   GifItem,
@@ -27,6 +31,7 @@ import {
   WeChatStickerOptions,
   CompressionOptions,
   CompressionPreset,
+  ArbitrarySizeOptions,
 } from '../types';
 import { COMPRESSION_PRESETS } from '../utils/gifProcessor';
 
@@ -60,13 +65,33 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   onCardLayoutChange,
 }) => {
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'wechat' | 'compression' | 'general'>('wechat');
+  const [settingsTab, setSettingsTab] = useState<'removal' | 'size' | 'wechat' | 'compression'>('removal');
 
   const [globalOptions, setGlobalOptions] = useState<RemovalOptions>({
+    enableRemoval: true,
     targetColor: '#ffffff',
     tolerance: 15,
     contiguous: true,
     defringe: 1,
+    edgeBarrier: true,
+    edgeThreshold: 20,
+    protectTorsoBottom: true,
+    removeFrameBorder: false,
+    frameBorderMode: 'auto',
+    frameBorderColor: '#000000',
+    frameBorderTolerance: 35,
+    frameBorderWidth: 3,
+    frameBorderInset: 2,
+    frameBorderAutoScale: true,
+    sizeConfig: {
+      enabled: false,
+      mode: 'original',
+      scalePercent: 100,
+      customWidth: 512,
+      customHeight: 512,
+      lockAspectRatio: true,
+      fitMode: 'contain',
+    },
     wechat: {
       enabled: true,
       standardSize: '240',
@@ -118,6 +143,26 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
   ];
 
   const quickCaptions = ['收到', '好的', '哈哈', '点赞', '谢谢老板', '告辞', '哭死', '无语'];
+
+  const updateSizeConfigOption = <K extends keyof ArbitrarySizeOptions>(
+    key: K,
+    value: ArbitrarySizeOptions[K]
+  ) => {
+    setGlobalOptions((prev) => ({
+      ...prev,
+      sizeConfig: {
+        enabled: true,
+        mode: 'custom',
+        scalePercent: 100,
+        customWidth: 512,
+        customHeight: 512,
+        lockAspectRatio: true,
+        fitMode: 'contain',
+        ...prev.sizeConfig,
+        [key]: value,
+      },
+    }));
+  };
 
   const updateWeChatOption = <K extends keyof WeChatStickerOptions>(
     key: K,
@@ -238,33 +283,37 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             id="toggle-global-settings-btn"
             type="button"
             onClick={() => setShowGlobalSettings(!showGlobalSettings)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors flex items-center gap-1.5 ${
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors flex items-center gap-1.5 cursor-pointer ${
               showGlobalSettings
-                ? 'bg-emerald-50 border-emerald-300 text-emerald-800 shadow-2xs'
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-800 shadow-2xs ring-1 ring-emerald-300'
                 : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
             }`}
           >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-[#07c160]" />
-            <span>微信规范 & 压缩参数设置</span>
+            <SlidersHorizontal className="w-3.5 h-3.5 text-indigo-600" />
+            <span>参数配置 & 协同流水线</span>
+            <span className="text-[10px] px-1 py-0.2 bg-stone-100 text-stone-500 rounded font-mono">
+              “和”生效
+            </span>
           </button>
 
-          {/* Batch AI Matting Button */}
+          {/* Batch Process with Current Combined Options (AND relationship) - PRIMARY BUTTON */}
           <button
-            id="batch-ai-matting-btn"
+            id="batch-process-all-pipeline-btn"
             type="button"
             disabled={isProcessingAny || totalCount === 0}
             onClick={() => {
-              onApplyGlobalOptions({
-                ...globalOptions,
-                removalMethod: 'ai',
-              });
-              onProcessAll(true);
+              onApplyGlobalOptions(globalOptions);
+              onProcessAll(undefined);
             }}
-            className="px-3.5 py-1.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-            title="一键将所有图片通过 AI 神经网络智能抠图，彻底清除复杂背景与阴影"
+            className="px-4 py-1.5 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-700 hover:via-purple-700 hover:to-pink-700 text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.01] cursor-pointer"
+            title="按当前全部勾选的设置标签（抠图 + 任意尺寸 + 微信规范 + 体积压缩）批量执行协同生成"
           >
-            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-            <span>批量 AI 智能抠图</span>
+            {isProcessingAny ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+            )}
+            <span>按当前设置批量生成/导出</span>
           </button>
 
           {/* WeChat Sticker Batch Generation Button (HIGH VISIBILITY) */}
@@ -272,16 +321,48 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             id="batch-generate-wechat-btn"
             type="button"
             disabled={isProcessingAny || totalCount === 0}
-            onClick={() => onProcessAll(true)}
-            className="px-4 py-1.5 bg-[#07c160] hover:bg-[#06ad56] text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.01]"
+            onClick={() => {
+              const wechatOpts: RemovalOptions = {
+                ...globalOptions,
+                enableRemoval: true,
+                wechat: {
+                  ...globalOptions.wechat,
+                  enabled: true,
+                  standardSize: '240',
+                  addWhiteOutline: true,
+                },
+                compression: {
+                  ...globalOptions.compression,
+                  enabled: true,
+                  preset: 'wechat-auto',
+                  targetSizeKb: 1000,
+                  autoCompressUnderLimit: true,
+                },
+              };
+              onApplyGlobalOptions(wechatOpts);
+              onProcessAll(true);
+            }}
+            className="px-3.5 py-1.5 bg-[#07c160] hover:bg-[#06ad56] text-white text-xs font-bold rounded-lg shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:scale-[1.01] cursor-pointer"
             title="一键将队列中全部图片/动图按微信规范（240x240/白色描边/智能压缩<1MB）生成微信表情包"
           >
-            {isProcessingAny ? (
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <Smile className="w-3.5 h-3.5" />
-            )}
-            批量生成微信表情包
+            <Smile className="w-3.5 h-3.5" />
+            <span>一键生成微信标准表情包</span>
+          </button>
+
+          {/* Arbitrary Size Export Shortcut */}
+          <button
+            id="batch-arbitrary-size-btn"
+            type="button"
+            disabled={isProcessingAny || totalCount === 0}
+            onClick={() => {
+              setShowGlobalSettings(true);
+              setSettingsTab('size');
+            }}
+            className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
+            title="自定义任意尺寸规格（512×512、1080×1080、等比缩放、自定义像素）"
+          >
+            <Scaling className="w-3.5 h-3.5" />
+            <span>自定任意尺寸</span>
           </button>
 
           {/* Batch Compress to WeChat Limit */}
@@ -296,11 +377,11 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
                 onProcessAll(true);
               }
             }}
-            className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
             title="应用智能压缩设置，针对超大文件自动降采样或缩放，确保体积完全符合微信平台上传限制"
           >
             <Zap className="w-3.5 h-3.5 fill-current" />
-            智能达标压缩
+            <span>智能达标压缩</span>
           </button>
 
           {/* Standard Process All Button */}
@@ -309,11 +390,11 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             type="button"
             disabled={isProcessingAny || totalCount === 0}
             onClick={() => onProcessAll(false)}
-            className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium rounded-lg shadow-2xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-stone-700 hover:bg-stone-800 text-white text-xs font-medium rounded-lg shadow-2xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
             title="仅抠除背景，保留原始尺寸"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            常规去底
+            <span>常规去底</span>
           </button>
 
           {/* Download All as ZIP */}
@@ -322,11 +403,11 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             type="button"
             disabled={doneCount === 0}
             onClick={() => onDownloadAllZip()}
-            className="px-3.5 py-1.5 bg-stone-800 hover:bg-stone-900 text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
-            title="下载所有处理好的文件打包 ZIP"
+            className="px-3.5 py-1.5 bg-stone-900 hover:bg-black text-white text-xs font-semibold rounded-lg shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
+            title="下载所有处理好的文件打包 ZIP (支持动态 GIF 及任意格式尺寸)"
           >
             <Download className="w-3.5 h-3.5" />
-            打包下载全部 ZIP ({doneCount})
+            <span>打包下载全部 ZIP ({doneCount})</span>
           </button>
 
           {/* Card Layout Switcher: 左右分栏对照 vs 紧凑网格 */}
@@ -496,54 +577,163 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
         </span>
       </div>
 
-      {/* Expandable Settings Box (With WeChat Sticker Tab + General Tab) */}
+      {/* Expandable Settings Box (AND Pipeline: Removal + Arbitrary Size + WeChat Specs + Compression) */}
       {showGlobalSettings && (
-        <div className="p-4 rounded-xl bg-stone-50 border border-emerald-200 text-xs space-y-4 animate-in fade-in duration-150">
+        <div className="p-4 rounded-xl bg-stone-50 border border-indigo-200 text-xs space-y-4 animate-in fade-in duration-150">
+          {/* AND Relationship Pipeline Banner */}
+          <div className="p-3 bg-gradient-to-r from-emerald-50 via-indigo-50 to-amber-50 rounded-xl border border-stone-200 text-xs text-stone-800 flex flex-col md:flex-row md:items-center justify-between gap-2 shadow-2xs">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-bold text-stone-900 flex items-center gap-1 shrink-0">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                协同流水线（“和”的关系 · 同时满足）：
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded-full font-bold border transition-all ${
+                  globalOptions.enableRemoval !== false
+                    ? 'bg-indigo-100 text-indigo-800 border-indigo-300'
+                    : 'bg-stone-200 text-stone-500 border-stone-300 line-through'
+                }`}
+              >
+                1. 抠图去底 {globalOptions.enableRemoval !== false ? '✓' : '关'}
+              </span>
+              <span className="text-stone-400 font-bold">➔</span>
+              <span
+                className={`px-2 py-0.5 rounded-full font-bold border transition-all ${
+                  globalOptions.sizeConfig?.enabled
+                    ? 'bg-purple-100 text-purple-800 border-purple-300'
+                    : 'bg-stone-200 text-stone-600 border-stone-300'
+                }`}
+              >
+                2. 尺寸规格 {globalOptions.sizeConfig?.enabled
+                  ? (globalOptions.sizeConfig.mode === 'custom'
+                      ? `${globalOptions.sizeConfig.customWidth}×${globalOptions.sizeConfig.customHeight}px`
+                      : globalOptions.sizeConfig.mode === 'scale'
+                      ? `${globalOptions.sizeConfig.scalePercent}%`
+                      : '自定')
+                  : (globalOptions.wechat?.enabled ? '微信240' : '原尺寸')}
+              </span>
+              <span className="text-stone-400 font-bold">➔</span>
+              <span
+                className={`px-2 py-0.5 rounded-full font-bold border transition-all ${
+                  globalOptions.wechat?.enabled
+                    ? 'bg-emerald-100 text-[#07c160] border-emerald-300'
+                    : 'bg-stone-200 text-stone-500 border-stone-300 line-through'
+                }`}
+              >
+                3. 微信规范 {globalOptions.wechat?.enabled ? '✓' : '关'}
+              </span>
+              <span className="text-stone-400 font-bold">➔</span>
+              <span
+                className={`px-2 py-0.5 rounded-full font-bold border transition-all ${
+                  globalOptions.compression?.enabled
+                    ? 'bg-amber-100 text-amber-800 border-amber-300'
+                    : 'bg-stone-200 text-stone-500 border-stone-300 line-through'
+                }`}
+              >
+                4. 体积压缩 {globalOptions.compression?.enabled ? `≤${globalOptions.compression.targetSizeKb}KB` : '关'}
+              </span>
+            </div>
+            <div className="text-[11px] text-stone-600 font-medium shrink-0 bg-white/80 px-2 py-0.5 rounded border border-stone-200">
+              各标签为“和”的关系，导出时满足以上所有已勾选参数
+            </div>
+          </div>
+
           {/* Tabs inside panel */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-stone-200 pb-2">
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                onClick={() => setSettingsTab('removal')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  settingsTab === 'removal'
+                    ? 'bg-indigo-600 text-white shadow-2xs'
+                    : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200'
+                }`}
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>抠图与去底</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                  settingsTab === 'removal'
+                    ? 'bg-indigo-700 text-white'
+                    : globalOptions.enableRemoval !== false
+                    ? 'bg-indigo-50 text-indigo-700'
+                    : 'bg-stone-100 text-stone-400'
+                }`}>
+                  {globalOptions.enableRemoval !== false ? '已开启' : '关闭'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSettingsTab('size')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  settingsTab === 'size'
+                    ? 'bg-purple-600 text-white shadow-2xs'
+                    : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200'
+                }`}
+              >
+                <Scaling className="w-3.5 h-3.5" />
+                <span>任意尺寸规格</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                  settingsTab === 'size'
+                    ? 'bg-purple-700 text-white'
+                    : globalOptions.sizeConfig?.enabled
+                    ? 'bg-purple-50 text-purple-700'
+                    : 'bg-stone-100 text-stone-400'
+                }`}>
+                  {globalOptions.sizeConfig?.enabled ? '已开启' : '自适应'}
+                </span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setSettingsTab('wechat')}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
                   settingsTab === 'wechat'
                     ? 'bg-[#07c160] text-white shadow-2xs'
                     : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200'
                 }`}
               >
                 <Smile className="w-3.5 h-3.5" />
-                微信表情包规范设置
+                <span>微信表情包规范</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                  settingsTab === 'wechat'
+                    ? 'bg-emerald-700 text-white'
+                    : globalOptions.wechat?.enabled
+                    ? 'bg-emerald-50 text-[#07c160]'
+                    : 'bg-stone-100 text-stone-400'
+                }`}>
+                  {globalOptions.wechat?.enabled ? '已开启' : '关闭'}
+                </span>
               </button>
+
               <button
                 type="button"
                 onClick={() => setSettingsTab('compression')}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
                   settingsTab === 'compression'
                     ? 'bg-amber-600 text-white shadow-2xs'
                     : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200'
                 }`}
               >
                 <Zap className="w-3.5 h-3.5" />
-                微信上传体积压缩
-              </button>
-              <button
-                type="button"
-                onClick={() => setSettingsTab('general')}
-                className={`px-3 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors ${
-                  settingsTab === 'general'
-                    ? 'bg-indigo-600 text-white shadow-2xs'
-                    : 'bg-white text-stone-600 hover:text-stone-900 border border-stone-200'
-                }`}
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                底色消除与容差参数
+                <span>体积压缩</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                  settingsTab === 'compression'
+                    ? 'bg-amber-700 text-white'
+                    : globalOptions.compression?.enabled
+                    ? 'bg-amber-50 text-amber-700'
+                    : 'bg-stone-100 text-stone-400'
+                }`}>
+                  {globalOptions.compression?.enabled ? `≤${globalOptions.compression.targetSizeKb}K` : '关闭'}
+                </span>
               </button>
             </div>
 
             <button
               type="button"
               onClick={handleApplyToAll}
-              className="px-3 py-1 bg-stone-900 hover:bg-black text-white rounded-md font-medium transition-colors shadow-2xs flex items-center gap-1"
+              className="px-3.5 py-1.5 bg-stone-900 hover:bg-black text-white rounded-lg font-semibold transition-colors shadow-2xs flex items-center gap-1.5 cursor-pointer"
             >
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
               应用当前配置到全部 {totalCount} 个项目
@@ -553,6 +743,31 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
           {/* WeChat Sticker Settings Tab */}
           {settingsTab === 'wechat' && (
             <div className="space-y-4 animate-in fade-in duration-100">
+              {/* WeChat Master Toggle Banner */}
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={globalOptions.wechat?.enabled ?? true}
+                    onChange={(e) => updateWeChatOption('enabled', e.target.checked)}
+                    className="rounded text-[#07c160] focus:ring-[#07c160] w-4 h-4"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-stone-900 block">
+                      启用微信表情包官方规范 (默认开启)
+                    </span>
+                    <span className="text-[11px] text-stone-600">
+                      包含 2px 白色描边（防微信深色模式黑底看不清）、自适应居中留白防裁切与底部文字排版
+                    </span>
+                  </div>
+                </label>
+                <div className="flex items-center gap-1.5 self-end md:self-center">
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[11px] font-semibold border border-emerald-300">
+                    {globalOptions.wechat?.enabled ? '规范生效中' : '已关闭'}
+                  </span>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* 1. Size Spec */}
                 <div className="bg-white p-3 rounded-xl border border-stone-200 space-y-2">
@@ -912,115 +1127,366 @@ export const BatchControls: React.FC<BatchControlsProps> = ({
             </div>
           )}
 
-          {/* General Removal Settings Tab */}
-          {settingsTab === 'general' && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1 animate-in fade-in duration-100">
-              {/* Color */}
-              <div>
-                <label className="block text-stone-600 font-medium mb-1.5">
-                  目标背景颜色
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={globalOptions.targetColor}
-                    onChange={(e) =>
-                      setGlobalOptions({ ...globalOptions, targetColor: e.target.value })
-                    }
-                    className="w-8 h-8 rounded border border-stone-300 cursor-pointer p-0.5"
-                  />
-                  <input
-                    type="text"
-                    value={globalOptions.targetColor}
-                    onChange={(e) =>
-                      setGlobalOptions({ ...globalOptions, targetColor: e.target.value })
-                    }
-                    className="w-20 px-2 py-1 text-xs border border-stone-300 rounded font-mono uppercase"
-                  />
-                  <div className="flex items-center gap-1">
-                    {presetColors.map((p) => (
-                      <button
-                        key={p.color}
-                        type="button"
-                        onClick={() =>
-                          setGlobalOptions({ ...globalOptions, targetColor: p.color })
-                        }
-                        className="w-5 h-5 rounded border border-stone-300 shadow-xs"
-                        style={{ backgroundColor: p.color }}
-                        title={p.label}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Tolerance */}
-              <div>
-                <div className="flex justify-between items-center mb-1.5">
-                  <label className="text-stone-600 font-medium">
-                    容差阈值: {globalOptions.tolerance}%
-                  </label>
-                  <span className="text-stone-400 text-[11px]">
-                    {globalOptions.tolerance < 10
-                      ? '严格匹配'
-                      : globalOptions.tolerance > 30
-                      ? '宽松匹配'
-                      : '标准推荐'}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="1"
-                  max="60"
-                  value={globalOptions.tolerance}
-                  onChange={(e) =>
-                    setGlobalOptions({
-                      ...globalOptions,
-                      tolerance: parseInt(e.target.value, 10),
-                    })
-                  }
-                  className="w-full accent-indigo-600 h-1.5 bg-stone-200 rounded-lg cursor-pointer"
-                />
-              </div>
-
-              {/* Mode & Defringe */}
-              <div className="flex flex-col gap-2">
+          {/* 1. Removal Settings Tab */}
+          {settingsTab === 'removal' && (
+            <div className="space-y-4 animate-in fade-in duration-100">
+              {/* Removal Master Toggle Banner */}
+              <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
                 <label className="flex items-center gap-2 cursor-pointer select-none">
                   <input
                     type="checkbox"
-                    checked={globalOptions.contiguous}
+                    checked={globalOptions.enableRemoval !== false}
                     onChange={(e) =>
-                      setGlobalOptions({
-                        ...globalOptions,
-                        contiguous: e.target.checked,
-                      })
+                      setGlobalOptions({ ...globalOptions, enableRemoval: e.target.checked })
                     }
                     className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4"
                   />
-                  <span className="text-stone-700 font-medium">
-                    边缘向内扩散 (保护主体内部相同颜色)
-                  </span>
+                  <div>
+                    <span className="text-xs font-bold text-stone-900 block">
+                      启用抠图与去底 (默认开启)
+                    </span>
+                    <span className="text-[11px] text-stone-600">
+                      勾选后自动消除目标底色；若取消勾选，则保留原图背景，仅执行尺寸规格调整与体积压缩
+                    </span>
+                  </div>
                 </label>
+                <div className="flex items-center gap-1.5 self-end md:self-center">
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 text-[11px] font-semibold border border-indigo-300">
+                    {globalOptions.enableRemoval !== false ? '去底已启用' : '保留原底'}
+                  </span>
+                </div>
+              </div>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-stone-600">边缘去杂色 (羽化):</span>
-                  {[0, 1, 2].map((lvl) => (
+              {globalOptions.enableRemoval !== false && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
+                  {/* Color */}
+                  <div className="bg-white p-3 rounded-xl border border-stone-200 space-y-2">
+                    <label className="block text-stone-700 font-semibold text-xs">
+                      目标背景颜色
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={globalOptions.targetColor}
+                        onChange={(e) =>
+                          setGlobalOptions({ ...globalOptions, targetColor: e.target.value })
+                        }
+                        className="w-8 h-8 rounded border border-stone-300 cursor-pointer p-0.5"
+                      />
+                      <input
+                        type="text"
+                        value={globalOptions.targetColor}
+                        onChange={(e) =>
+                          setGlobalOptions({ ...globalOptions, targetColor: e.target.value })
+                        }
+                        className="w-20 px-2 py-1 text-xs border border-stone-300 rounded font-mono uppercase"
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5 pt-1 flex-wrap">
+                      {presetColors.map((p) => (
+                        <button
+                          key={p.color}
+                          type="button"
+                          onClick={() =>
+                            setGlobalOptions({ ...globalOptions, targetColor: p.color })
+                          }
+                          className="px-2 py-0.5 rounded text-[11px] border border-stone-200 hover:bg-stone-50 flex items-center gap-1 cursor-pointer"
+                        >
+                          <span
+                            className="w-2.5 h-2.5 rounded-full border border-stone-300 inline-block"
+                            style={{ backgroundColor: p.color }}
+                          />
+                          <span>{p.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Tolerance */}
+                  <div className="bg-white p-3 rounded-xl border border-stone-200 space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-stone-700 font-semibold text-xs">
+                        容差阈值: {globalOptions.tolerance}%
+                      </label>
+                      <span className="text-stone-400 text-[11px]">
+                        {globalOptions.tolerance < 10
+                          ? '严格匹配'
+                          : globalOptions.tolerance > 30
+                          ? '宽松匹配'
+                          : '标准推荐'}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="60"
+                      value={globalOptions.tolerance}
+                      onChange={(e) =>
+                        setGlobalOptions({
+                          ...globalOptions,
+                          tolerance: parseInt(e.target.value, 10),
+                        })
+                      }
+                      className="w-full accent-indigo-600 h-1.5 bg-stone-200 rounded-lg cursor-pointer"
+                    />
+                    <p className="text-[11px] text-stone-400 leading-tight">
+                      纯色背景建议 15~20%，若有反光微噪点可提高至 25~35%
+                    </p>
+                  </div>
+
+                  {/* Mode & Defringe */}
+                  <div className="bg-white p-3 rounded-xl border border-stone-200 space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={globalOptions.contiguous}
+                        onChange={(e) =>
+                          setGlobalOptions({
+                            ...globalOptions,
+                            contiguous: e.target.checked,
+                          })
+                        }
+                        className="rounded text-indigo-600 focus:ring-indigo-500 w-4 h-4"
+                      />
+                      <span className="text-stone-700 font-medium text-xs">
+                        边缘向内扩散 (保护主体内部相同颜色)
+                      </span>
+                    </label>
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <span className="text-stone-600 text-xs">边缘去杂色:</span>
+                      {[0, 1, 2].map((lvl) => (
+                        <button
+                          key={lvl}
+                          type="button"
+                          onClick={() =>
+                            setGlobalOptions({ ...globalOptions, defringe: lvl })
+                          }
+                          className={`px-2.5 py-0.5 rounded text-[11px] font-semibold border ${
+                            globalOptions.defringe === lvl
+                              ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
+                              : 'bg-white border-stone-200 text-stone-600'
+                          }`}
+                        >
+                          {lvl === 0 ? '无' : `${lvl}px`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 2. Arbitrary Size Settings Tab */}
+          {settingsTab === 'size' && (
+            <div className="space-y-4 animate-in fade-in duration-100">
+              {/* Arbitrary Size Master Toggle */}
+              <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={globalOptions.sizeConfig?.enabled ?? true}
+                    onChange={(e) => updateSizeConfigOption('enabled', e.target.checked)}
+                    className="rounded text-purple-600 focus:ring-purple-500 w-4 h-4"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-stone-900 block">
+                      启用任意尺寸规格重设 (支持任意自定义尺寸 / 比例 / 预设)
+                    </span>
+                    <span className="text-[11px] text-stone-600">
+                      支持导出 512×512、1080×1080、手机宽 750px、百分比缩放或自定义像素，打破微信 240px 单一限制
+                    </span>
+                  </div>
+                </label>
+                <div className="flex items-center gap-1.5 self-end md:self-center">
+                  <span className="px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 text-[11px] font-semibold border border-purple-300">
+                    {globalOptions.sizeConfig?.enabled ? '自定规格生效中' : '未开启'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Mode Selection Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {[
+                  {
+                    id: 'custom',
+                    title: '自定义宽高像素',
+                    desc: '自由设定像素数值，适合特定场景',
+                  },
+                  {
+                    id: 'wechat',
+                    title: '微信标准 240×240',
+                    desc: '微信开放平台官方标准正方形',
+                  },
+                  {
+                    id: 'scale',
+                    title: '百分比等比缩放',
+                    desc: '按 75%、50% 等比例缩小画质',
+                  },
+                  {
+                    id: 'original',
+                    title: '保持原图尺寸',
+                    desc: '不改变分辨率，导出原始图像大小',
+                  },
+                ].map((m) => {
+                  const isCur =
+                    (globalOptions.sizeConfig?.mode || 'custom') === m.id;
+                  return (
                     <button
-                      key={lvl}
+                      key={m.id}
                       type="button"
                       onClick={() =>
-                        setGlobalOptions({ ...globalOptions, defringe: lvl })
+                        updateSizeConfigOption('mode', m.id as any)
                       }
-                      className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
-                        globalOptions.defringe === lvl
-                          ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
-                          : 'bg-white border-stone-200 text-stone-600'
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        isCur
+                          ? 'bg-purple-50 border-purple-400 ring-2 ring-purple-300 shadow-2xs'
+                          : 'bg-white border-stone-200 hover:border-stone-300 hover:bg-stone-50'
                       }`}
                     >
-                      {lvl === 0 ? '无' : `${lvl}px`}
+                      <div className="text-xs font-bold text-stone-900 mb-0.5">
+                        {m.title}
+                      </div>
+                      <div className="text-[10px] text-stone-500 leading-tight">
+                        {m.desc}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Quick Presets Buttons */}
+              <div className="bg-white p-3 rounded-xl border border-stone-200 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-stone-700 flex items-center gap-1">
+                  <Scaling className="w-3.5 h-3.5 text-purple-600" />
+                  常用尺寸快速套用:
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {[
+                    { label: '240×240 微信表情', w: 240, h: 240 },
+                    { label: '300×300 紧凑表情', w: 300, h: 300 },
+                    { label: '512×512 高清贴纸', w: 512, h: 512 },
+                    { label: '750×750 手机高清', w: 750, h: 750 },
+                    { label: '1080×1080 社交大图', w: 1080, h: 1080 },
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => {
+                        updateSizeConfigOption('enabled', true);
+                        updateSizeConfigOption('mode', 'custom');
+                        updateSizeConfigOption('customWidth', preset.w);
+                        updateSizeConfigOption('customHeight', preset.h);
+                      }}
+                      className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-stone-100 hover:bg-purple-100 hover:text-purple-800 text-stone-700 border border-stone-200 transition-colors cursor-pointer"
+                    >
+                      {preset.label}
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Detail Options based on mode */}
+              {globalOptions.sizeConfig?.mode === 'custom' && (
+                <div className="bg-white p-3.5 rounded-xl border border-stone-200 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs font-semibold text-stone-700 block mb-1">
+                      目标宽度 (Width px)
+                    </label>
+                    <input
+                      type="number"
+                      min="16"
+                      max="10000"
+                      step="10"
+                      value={globalOptions.sizeConfig?.customWidth || 512}
+                      onChange={(e) =>
+                        updateSizeConfigOption('customWidth', parseInt(e.target.value, 10) || 240)
+                      }
+                      className="w-full px-2.5 py-1.5 text-xs font-mono font-bold border border-stone-300 rounded-lg focus:ring-1 focus:ring-purple-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-stone-700 block mb-1">
+                      目标高度 (Height px)
+                    </label>
+                    <input
+                      type="number"
+                      min="16"
+                      max="10000"
+                      step="10"
+                      value={globalOptions.sizeConfig?.customHeight || 512}
+                      onChange={(e) =>
+                        updateSizeConfigOption('customHeight', parseInt(e.target.value, 10) || 240)
+                      }
+                      className="w-full px-2.5 py-1.5 text-xs font-mono font-bold border border-stone-300 rounded-lg focus:ring-1 focus:ring-purple-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-stone-700 block mb-1">
+                      适配模式 (Fit Mode)
+                    </label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => updateSizeConfigOption('fitMode', 'contain')}
+                        className={`py-1 rounded text-[11px] font-semibold border ${
+                          (globalOptions.sizeConfig?.fitMode || 'contain') === 'contain'
+                            ? 'bg-purple-100 text-purple-800 border-purple-300 font-bold'
+                            : 'bg-white text-stone-600 border-stone-200'
+                        }`}
+                        title="等比居中留白防裁切"
+                      >
+                        等比居中
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateSizeConfigOption('fitMode', 'stretch')}
+                        className={`py-1 rounded text-[11px] font-semibold border ${
+                          globalOptions.sizeConfig?.fitMode === 'stretch'
+                            ? 'bg-purple-100 text-purple-800 border-purple-300 font-bold'
+                            : 'bg-white text-stone-600 border-stone-200'
+                        }`}
+                        title="自由拉伸充满目标宽高"
+                      >
+                        拉伸填满
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {globalOptions.sizeConfig?.mode === 'scale' && (
+                <div className="bg-white p-3.5 rounded-xl border border-stone-200 flex items-center justify-between gap-3">
+                  <span className="text-xs font-semibold text-stone-700">
+                    缩放比例: {globalOptions.sizeConfig?.scalePercent || 100}%
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {[100, 85, 75, 50, 25].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => updateSizeConfigOption('scalePercent', pct)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold border ${
+                          (globalOptions.sizeConfig?.scalePercent || 100) === pct
+                            ? 'bg-purple-600 text-white border-purple-600'
+                            : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
+                        }`}
+                      >
+                        {pct}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Notice */}
+              <div className="p-3 bg-stone-100/70 border border-stone-200 rounded-xl text-[11px] text-stone-600 leading-relaxed">
+                <span className="font-bold text-stone-800">💡 “和”的关系说明：</span>
+                尺寸规格将与【微信表情规范】（2px 白色描边/文字）与【体积压缩】参数协同生效！
+                例如选择 512×512 像素，同时保留白色描边与 &le;1MB 压缩，将导出 512px 高清且带有白色描边的达标表情或动图！
               </div>
             </div>
           )}

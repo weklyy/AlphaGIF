@@ -41,8 +41,13 @@ import {
   Stamp,
   Target,
   Crosshair,
+  Play,
+  Pause,
+  Film,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
-import { RetouchTool, RetouchOptions } from '../../types';
+import { RetouchTool, RetouchOptions, FrameInfo } from '../../types';
 
 export interface ExportSizeConfig {
   mode: 'original' | 'scale' | 'preset' | 'custom';
@@ -51,7 +56,7 @@ export interface ExportSizeConfig {
   customWidth: number;
   customHeight: number;
   lockAspectRatio: boolean;
-  format: 'png' | 'jpeg' | 'webp';
+  format: 'png' | 'jpeg' | 'webp' | 'gif';
   quality: number; // 0.1 to 1.0 (default 0.92)
   fillBgForJpeg: string; // default '#ffffff'
 }
@@ -74,6 +79,9 @@ import {
   removeBackgroundFromFrame,
   detectBackgroundColor,
   rgbToHex,
+  decodeGif,
+  encodeTransparentGifWithParams,
+  scaleImageData,
 } from '../../utils/gifProcessor';
 import { removeSquareFrameBorder } from '../../utils/frameBorderRemover';
 import { removeBackgroundWithAI } from '../../utils/aiBackgroundRemoval';
@@ -212,89 +220,234 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
   const mainCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Multi-frame GIF Animation State
+  const [isGif, setIsGif] = useState<boolean>(false);
+  const [gifFrames, setGifFrames] = useState<FrameInfo[]>([]);
+  const [currentFrameIdx, setCurrentFrameIdx] = useState<number>(0);
+  const [isPlayingGif, setIsPlayingGif] = useState<boolean>(false);
+  const [applyToAllFrames, setApplyToAllFrames] = useState<boolean>(true);
+
+  // Loop GIF playback
+  useEffect(() => {
+    if (!isGif || !isPlayingGif || gifFrames.length <= 1) return;
+    const currentFrame = gifFrames[currentFrameIdx];
+    const delay = Math.max(30, currentFrame?.delay || 100);
+    const timer = setTimeout(() => {
+      const nextIdx = (currentFrameIdx + 1) % gifFrames.length;
+      setCurrentFrameIdx(nextIdx);
+      const canvas = mainCanvasRef.current;
+      if (canvas && gifFrames[nextIdx]) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.putImageData(gifFrames[nextIdx].imageData, 0, 0);
+        }
+      }
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [isGif, isPlayingGif, currentFrameIdx, gifFrames]);
+
+  // Frame selector for manual scrub/clicks
+  const handleSelectFrame = useCallback((idx: number) => {
+    if (idx < 0 || idx >= gifFrames.length) return;
+    setIsPlayingGif(false);
+    setCurrentFrameIdx(idx);
+    const canvas = mainCanvasRef.current;
+    if (canvas && gifFrames[idx]) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.putImageData(gifFrames[idx].imageData, 0, 0);
+        setHistory([gifFrames[idx].imageData]);
+        setHistoryIndex(0);
+      }
+    }
+  }, [gifFrames]);
+
   // Load image into canvas and initialize history
   const loadImage = useCallback((file: File) => {
     setCurrentFile(file);
     const url = URL.createObjectURL(file);
     setOriginalImageUrl(url);
 
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const w = img.naturalWidth || img.width;
-      const h = img.naturalHeight || img.height;
-      setImageSize({ width: w, height: h });
-      setExportConfig((prev) => ({
-        ...prev,
-        customWidth: prev.mode === 'custom' && prev.customWidth ? prev.customWidth : w,
-        customHeight: prev.mode === 'custom' && prev.customHeight ? prev.customHeight : h,
-      }));
+    const isGifFileFormat =
+      file.type === 'image/gif' ||
+      file.name.toLowerCase().endsWith('.gif');
 
-      // Init Main Canvas
-      const canvas = mainCanvasRef.current;
-      if (!canvas) return;
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-      ctx.clearRect(0, 0, w, h);
-      ctx.drawImage(img, 0, 0);
+    if (isGifFileFormat) {
+      // Decode GIF frames asynchronously
+      file.arrayBuffer()
+        .then((buf) => decodeGif(buf))
+        .then((decoded) => {
+          if (decoded.frames && decoded.frames.length > 0) {
+            setIsGif(true);
+            setGifFrames(decoded.frames);
+            setCurrentFrameIdx(0);
+            setIsPlayingGif(false);
 
-      const initialData = ctx.getImageData(0, 0, w, h);
-      originalImageDataRef.current = initialData;
+            const w = decoded.width;
+            const h = decoded.height;
+            setImageSize({ width: w, height: h });
+            setExportConfig((prev) => ({
+              ...prev,
+              format: 'gif',
+              customWidth: prev.mode === 'custom' && prev.customWidth ? prev.customWidth : w,
+              customHeight: prev.mode === 'custom' && prev.customHeight ? prev.customHeight : h,
+            }));
 
-      // Init Mask Canvas
-      if (!maskCanvasRef.current) {
-        maskCanvasRef.current = document.createElement('canvas');
-      }
-      maskCanvasRef.current.width = w;
-      maskCanvasRef.current.height = h;
-      const mCtx = maskCanvasRef.current.getContext('2d')!;
-      mCtx.clearRect(0, 0, w, h);
+            const canvas = mainCanvasRef.current;
+            if (canvas) {
+              canvas.width = w;
+              canvas.height = h;
+              const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+              ctx.clearRect(0, 0, w, h);
+              ctx.putImageData(decoded.frames[0].imageData, 0, 0);
+              originalImageDataRef.current = decoded.frames[0].imageData;
+              setHistory([decoded.frames[0].imageData]);
+              setHistoryIndex(0);
+            }
 
-      // Init Overlay Canvas
-      if (overlayCanvasRef.current) {
-        overlayCanvasRef.current.width = w;
-        overlayCanvasRef.current.height = h;
-        const oCtx = overlayCanvasRef.current.getContext('2d')!;
-        oCtx.clearRect(0, 0, w, h);
-      }
+            if (!maskCanvasRef.current) {
+              maskCanvasRef.current = document.createElement('canvas');
+            }
+            maskCanvasRef.current.width = w;
+            maskCanvasRef.current.height = h;
+            const mCtx = maskCanvasRef.current.getContext('2d')!;
+            mCtx.clearRect(0, 0, w, h);
 
-      setHistory([initialData]);
-      setHistoryIndex(0);
-      setHasActiveMask(false);
-      setMarqueeRect(null);
+            if (overlayCanvasRef.current) {
+              overlayCanvasRef.current.width = w;
+              overlayCanvasRef.current.height = h;
+              const oCtx = overlayCanvasRef.current.getContext('2d')!;
+              oCtx.clearRect(0, 0, w, h);
+            }
 
-      // Center image in container
-      const updateCentering = () => {
-        if (!containerRef.current) return;
-        const rect = containerRef.current.getBoundingClientRect();
-        containerRectRef.current = rect;
-        const cw = rect.width > 0 ? rect.width : (containerRef.current.clientWidth || 800);
-        const ch = rect.height > 0 ? rect.height : (containerRef.current.clientHeight || 520);
-        const padding = 24;
-        const fitScale = Math.min((cw - padding * 2) / w, (ch - padding * 2) / h);
-        let targetZoom = 1.0;
-        if (w <= 280 && h <= 280) {
-          // For WeChat standard stickers (240x240), zoom comfortably to ~360px (1.5x) so user can see and work on details easily
-          targetZoom = Math.min(fitScale, 1.5);
-        } else if (fitScale < 1.0) {
-          targetZoom = fitScale;
-        }
-        targetZoom = Math.max(0.2, Math.round(targetZoom * 10) / 10);
-        setZoom(targetZoom);
-        setPan({
-          x: Math.max(0, Math.round((cw - w * targetZoom) / 2)),
-          y: Math.max(0, Math.round((ch - h * targetZoom) / 2)),
+            setHasActiveMask(false);
+            setMarqueeRect(null);
+
+            const updateCentering = () => {
+              if (!containerRef.current) return;
+              const rect = containerRef.current.getBoundingClientRect();
+              containerRectRef.current = rect;
+              const cw = rect.width > 0 ? rect.width : (containerRef.current.clientWidth || 800);
+              const ch = rect.height > 0 ? rect.height : (containerRef.current.clientHeight || 520);
+              const padding = 24;
+              const fitScale = Math.min((cw - padding * 2) / w, (ch - padding * 2) / h);
+              let targetZoom = 1.0;
+              if (w <= 280 && h <= 280) {
+                targetZoom = Math.min(fitScale, 1.5);
+              } else if (fitScale < 1.0) {
+                targetZoom = fitScale;
+              }
+              targetZoom = Math.max(0.2, Math.round(targetZoom * 10) / 10);
+              setZoom(targetZoom);
+              setPan({
+                x: Math.max(0, Math.round((cw - w * targetZoom) / 2)),
+                y: Math.max(0, Math.round((ch - h * targetZoom) / 2)),
+              });
+            };
+
+            requestAnimationFrame(updateCentering);
+            setTimeout(updateCentering, 60);
+            setTimeout(updateCentering, 250);
+
+            onImageLoadedStateChange?.(true);
+            showToast?.(`已载入动态 GIF (${decoded.frames.length} 帧)，可逐帧微调并导出 GIF！`);
+          } else {
+            fallbackLoadStaticImage(url);
+          }
+        })
+        .catch((err) => {
+          console.warn('Failed to decode GIF frames, falling back to static:', err);
+          fallbackLoadStaticImage(url);
         });
-      };
+      return;
+    }
 
-      requestAnimationFrame(updateCentering);
-      setTimeout(updateCentering, 60);
-      setTimeout(updateCentering, 250);
-      onImageLoadedStateChange?.(true);
-    };
-    img.src = url;
-  }, [onImageLoadedStateChange]);
+    fallbackLoadStaticImage(url);
+
+    function fallbackLoadStaticImage(imgUrl: string) {
+      setIsGif(false);
+      setGifFrames([]);
+      setIsPlayingGif(false);
+      setCurrentFrameIdx(0);
+
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        setImageSize({ width: w, height: h });
+        setExportConfig((prev) => ({
+          ...prev,
+          format: prev.format === 'gif' ? 'png' : prev.format,
+          customWidth: prev.mode === 'custom' && prev.customWidth ? prev.customWidth : w,
+          customHeight: prev.mode === 'custom' && prev.customHeight ? prev.customHeight : h,
+        }));
+
+        // Init Main Canvas
+        const canvas = mainCanvasRef.current;
+        if (!canvas) return;
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0);
+
+        const initialData = ctx.getImageData(0, 0, w, h);
+        originalImageDataRef.current = initialData;
+
+        // Init Mask Canvas
+        if (!maskCanvasRef.current) {
+          maskCanvasRef.current = document.createElement('canvas');
+        }
+        maskCanvasRef.current.width = w;
+        maskCanvasRef.current.height = h;
+        const mCtx = maskCanvasRef.current.getContext('2d')!;
+        mCtx.clearRect(0, 0, w, h);
+
+        // Init Overlay Canvas
+        if (overlayCanvasRef.current) {
+          overlayCanvasRef.current.width = w;
+          overlayCanvasRef.current.height = h;
+          const oCtx = overlayCanvasRef.current.getContext('2d')!;
+          oCtx.clearRect(0, 0, w, h);
+        }
+
+        setHistory([initialData]);
+        setHistoryIndex(0);
+        setHasActiveMask(false);
+        setMarqueeRect(null);
+
+        // Center image in container
+        const updateCentering = () => {
+          if (!containerRef.current) return;
+          const rect = containerRef.current.getBoundingClientRect();
+          containerRectRef.current = rect;
+          const cw = rect.width > 0 ? rect.width : (containerRef.current.clientWidth || 800);
+          const ch = rect.height > 0 ? rect.height : (containerRef.current.clientHeight || 520);
+          const padding = 24;
+          const fitScale = Math.min((cw - padding * 2) / w, (ch - padding * 2) / h);
+          let targetZoom = 1.0;
+          if (w <= 280 && h <= 280) {
+            targetZoom = Math.min(fitScale, 1.5);
+          } else if (fitScale < 1.0) {
+            targetZoom = fitScale;
+          }
+          targetZoom = Math.max(0.2, Math.round(targetZoom * 10) / 10);
+          setZoom(targetZoom);
+          setPan({
+            x: Math.max(0, Math.round((cw - w * targetZoom) / 2)),
+            y: Math.max(0, Math.round((ch - h * targetZoom) / 2)),
+          });
+        };
+
+        requestAnimationFrame(updateCentering);
+        setTimeout(updateCentering, 60);
+        setTimeout(updateCentering, 250);
+        onImageLoadedStateChange?.(true);
+      };
+      img.src = imgUrl;
+    }
+  }, [onImageLoadedStateChange, showToast]);
 
   // Handle Initial File
   useEffect(() => {
@@ -405,6 +558,13 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     if (canvas) {
       const ctx = canvas.getContext('2d')!;
       ctx.putImageData(newData, 0, 0);
+    }
+
+    // Keep gifFrames synchronized if in GIF mode
+    if (isGif && gifFrames.length > 0) {
+      setGifFrames((prev) =>
+        prev.map((f, i) => (i === currentFrameIdx ? { ...f, imageData: newData } : f))
+      );
     }
   };
 
@@ -783,6 +943,20 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       inset: 2,
       autoScale: false,
     });
+    // If GIF mode and applyToAllFrames, process all frames
+    if (isGif && applyToAllFrames && gifFrames.length > 1) {
+      setGifFrames((prev) =>
+        prev.map((f) => ({
+          ...f,
+          imageData: removeSquareFrameBorder(f.imageData, {
+            mode: 'auto',
+            borderWidth: 3,
+            inset: 2,
+            autoScale: false,
+          }),
+        }))
+      );
+    }
     pushHistory(result);
     clearOverlay();
     showToast?.('✨ 正方形黑框/彩色边框线已一键识别消除！');
@@ -791,10 +965,33 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
   // Sync / Send current clean image to batch transparency list
   const handleSyncToBatch = async () => {
     if (!mainCanvasRef.current) return;
+    const baseName = (currentFile?.name || 'sticker').replace(/\.[^/.]+$/, '');
+
+    if (isGif && gifFrames.length > 0) {
+      showToast?.('正在重新编码动态 GIF 并同步至批量列表...');
+      try {
+        const res = await encodeTransparentGifWithParams(
+          gifFrames,
+          imageSize.width,
+          imageSize.height,
+          { scaleRatio: 1.0, maxColors: 256, frameStep: 1 }
+        );
+        const file = new File([res.blob], `${baseName}_clean.gif`, { type: 'image/gif' });
+        if (onSyncToBatch) {
+          onSyncToBatch(file);
+        } else if (onSendToTransparency) {
+          onSendToTransparency(file);
+        }
+        showToast?.('已将微调后的动态 GIF 表情同步至批量列表！');
+        return;
+      } catch (err) {
+        console.warn('GIF re-encode failed, falling back to PNG', err);
+      }
+    }
+
     const blob = await new Promise<Blob>((resolve) => {
       mainCanvasRef.current!.toBlob((b) => resolve(b || new Blob()), 'image/png');
     });
-    const baseName = (currentFile?.name || 'sticker').replace(/\.[^/.]+$/, '');
     const file = new File([blob], `${baseName}_clean.png`, { type: 'image/png' });
     if (onSyncToBatch) {
       onSyncToBatch(file);
@@ -1388,13 +1585,77 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
   }, [isExportModalOpen]);
 
   // Download Output Image with full size and quality control
-  const handleDownload = async (overrideFormat?: 'png' | 'jpeg' | 'webp') => {
+  const handleDownload = async (overrideFormat?: 'png' | 'jpeg' | 'webp' | 'gif') => {
     if (!mainCanvasRef.current) return;
     const format = overrideFormat || exportConfig.format;
     const tw = targetDimensions.width;
     const th = targetDimensions.height;
 
     if (tw <= 0 || th <= 0) return;
+
+    // GIF Animated Export
+    if (format === 'gif' || (isGif && !overrideFormat)) {
+      showToast?.('正在编码并导出动态 GIF 图片...');
+      try {
+        let framesToEncode: FrameInfo[] = gifFrames && gifFrames.length > 0 ? [...gifFrames] : [];
+        if (framesToEncode.length === 0 && mainCanvasRef.current) {
+          const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
+          framesToEncode = [
+            {
+              imageData: ctx.getImageData(0, 0, imageSize.width, imageSize.height),
+              delay: 100,
+            },
+          ];
+        } else if (mainCanvasRef.current && currentFrameIdx >= 0 && currentFrameIdx < framesToEncode.length) {
+          const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true });
+          if (ctx) {
+            framesToEncode[currentFrameIdx] = {
+              ...framesToEncode[currentFrameIdx],
+              imageData: ctx.getImageData(0, 0, imageSize.width, imageSize.height),
+            };
+          }
+        }
+
+        // If dimensions need scaling, scale each frame
+        if (tw !== imageSize.width || th !== imageSize.height) {
+          framesToEncode = framesToEncode.map((f) => ({
+            imageData: scaleImageData(f.imageData, tw, th),
+            delay: f.delay,
+          }));
+        }
+
+        const res = await encodeTransparentGifWithParams(
+          framesToEncode,
+          tw,
+          th,
+          {
+            scaleRatio: 1.0,
+            maxColors: 256,
+            frameStep: 1,
+          }
+        );
+        const blob = res.blob;
+
+        const baseFileName = (currentFile?.name || 'sticker').replace(/\.[^/.]+$/, '');
+        const link = document.createElement('a');
+        link.download = `${baseFileName}_${tw}x${th}.gif`;
+        link.href = URL.createObjectURL(blob);
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+
+        const sizeStr =
+          blob.size >= 1024 * 1024
+            ? `${(blob.size / (1024 * 1024)).toFixed(2)} MB`
+            : `${(blob.size / 1024).toFixed(1)} KB`;
+        showToast?.(`已成功导出 ${tw}×${th} px (${sizeStr}) 动态 GIF 表情包！`);
+        setIsExportModalOpen(false);
+        return;
+      } catch (err) {
+        console.error('Failed to export animated GIF:', err);
+        showToast?.('导出动态 GIF 失败，请重试');
+        return;
+      }
+    }
 
     try {
       const exportCanvas = document.createElement('canvas');
@@ -1460,10 +1721,27 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
   // Forward to Transparency Tool
   const handleForwardToTransparency = async () => {
     if (!mainCanvasRef.current || !onSendToTransparency) return;
+    const baseName = (currentFile?.name || 'sticker').replace(/\.[^/.]+$/, '');
+    if (isGif && gifFrames.length > 0) {
+      try {
+        const res = await encodeTransparentGifWithParams(
+          gifFrames,
+          imageSize.width,
+          imageSize.height,
+          { scaleRatio: 1.0, maxColors: 256, frameStep: 1 }
+        );
+        const file = new File([res.blob], `${baseName}_sticker.gif`, { type: 'image/gif' });
+        onSendToTransparency(file);
+        showToast?.('已将动态 GIF 修图结果送往「背景透明化工具」！');
+        return;
+      } catch (err) {
+        console.warn('GIF forward failed, fallback to PNG:', err);
+      }
+    }
     const blob = await new Promise<Blob>((resolve) => {
       mainCanvasRef.current!.toBlob((b) => resolve(b || new Blob()), 'image/png');
     });
-    const file = new File([blob], `clean_sticker_${Date.now()}.png`, { type: 'image/png' });
+    const file = new File([blob], `${baseName}_sticker.png`, { type: 'image/png' });
     onSendToTransparency(file);
     showToast?.('已将修图结果送往「背景透明化工具」！');
   };
@@ -1697,17 +1975,17 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                   {isDraggingUpload ? '松开鼠标立即载入图片！' : '上传需要修图或去水印的图片'}
                 </h3>
                 <p className="text-xs text-stone-500">
-                  支持 PNG / JPG / WEBP，可直接拖入或使用快捷键 <kbd className="bg-stone-100 px-1.5 py-0.5 border rounded font-mono text-[11px]">Ctrl+V</kbd> 粘贴
+                  支持 GIF 动图 / PNG / JPG / WEBP，可直接拖入或使用快捷键 <kbd className="bg-stone-100 px-1.5 py-0.5 border rounded font-mono text-[11px]">Ctrl+V</kbd> 粘贴
                 </p>
               </div>
 
               <div className="flex justify-center gap-3 pt-2">
                 <label className="px-4 py-2 rounded-xl bg-pink-600 hover:bg-pink-700 text-white text-xs font-bold transition-all shadow-xs cursor-pointer flex items-center gap-1.5">
                   <Upload className="w-4 h-4" />
-                  <span>选择本地图片</span>
+                  <span>选择本地图片或动图</span>
                   <input
                     type="file"
-                    accept="image/png, image/jpeg, image/webp"
+                    accept="image/png, image/jpeg, image/webp, image/gif, .gif"
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];
@@ -2484,7 +2762,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 <span>换图</span>
                 <input
                   type="file"
-                  accept="image/png, image/jpeg, image/webp"
+                  accept="image/png, image/jpeg, image/webp, image/gif, .gif"
                   className="hidden"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
@@ -2632,12 +2910,88 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
             )}
           </div>
 
+          {/* GIF Animation Frame Control Bar (When multi-frame GIF is loaded) */}
+          {isGif && gifFrames.length > 1 && (
+            <div className="h-[36px] min-h-[36px] max-h-[36px] box-border px-3 bg-blue-50/90 border-t border-blue-200 flex items-center justify-between gap-3 text-xs select-none whitespace-nowrap overflow-x-auto no-scrollbar">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1 font-bold text-blue-900 bg-blue-100 px-2 py-0.5 rounded text-[11px] border border-blue-200">
+                  <Film className="w-3.5 h-3.5 text-blue-700" />
+                  <span>动态 GIF ({gifFrames.length} 帧)</span>
+                </span>
+
+                {/* Play / Pause */}
+                <button
+                  type="button"
+                  onClick={() => setIsPlayingGif(!isPlayingGif)}
+                  className={`px-2 py-0.5 rounded font-bold flex items-center gap-1 transition-colors cursor-pointer text-[11px] shadow-2xs ${
+                    isPlayingGif
+                      ? 'bg-amber-500 text-white hover:bg-amber-600'
+                      : 'bg-blue-600 text-white hover:bg-blue-700'
+                  }`}
+                  title={isPlayingGif ? '暂停动图播放' : '循环播放动图预览'}
+                >
+                  {isPlayingGif ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3 fill-current" />}
+                  <span>{isPlayingGif ? '暂停' : '播放'}</span>
+                </button>
+
+                {/* Prev frame */}
+                <button
+                  type="button"
+                  onClick={() => handleSelectFrame((currentFrameIdx - 1 + gifFrames.length) % gifFrames.length)}
+                  className="p-1 rounded bg-white hover:bg-stone-100 border border-stone-200 text-stone-700 cursor-pointer"
+                  title="上一帧"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+
+                <span className="font-mono text-xs font-bold text-stone-800">
+                  第 {currentFrameIdx + 1} / {gifFrames.length} 帧
+                </span>
+
+                {/* Next frame */}
+                <button
+                  type="button"
+                  onClick={() => handleSelectFrame((currentFrameIdx + 1) % gifFrames.length)}
+                  className="p-1 rounded bg-white hover:bg-stone-100 border border-stone-200 text-stone-700 cursor-pointer"
+                  title="下一帧"
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+
+                {/* Scrubber slider */}
+                <input
+                  type="range"
+                  min={0}
+                  max={gifFrames.length - 1}
+                  value={currentFrameIdx}
+                  onChange={(e) => handleSelectFrame(parseInt(e.target.value, 10))}
+                  className="w-24 sm:w-36 accent-blue-600 h-1.5 bg-blue-200 rounded cursor-pointer"
+                  title="拖动微调切换对应帧"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-blue-900 font-medium bg-white px-2 py-0.5 rounded border border-blue-200">
+                  <input
+                    type="checkbox"
+                    checked={applyToAllFrames}
+                    onChange={(e) => setApplyToAllFrames(e.target.checked)}
+                    className="rounded text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                  />
+                  <span>消除黑框/水印同步应用至全部 {gifFrames.length} 帧</span>
+                </label>
+              </div>
+            </div>
+          )}
+
           {/* Bottom Export & Inter-tab Action Bar (高度收敛至 36px) */}
           <div className="h-[36px] min-h-[36px] max-h-[36px] box-border px-3 bg-stone-50 border-t border-stone-200 flex items-center justify-between gap-2 text-xs select-none whitespace-nowrap overflow-x-auto overflow-y-hidden no-scrollbar">
             <div className="flex items-center gap-1.5 text-stone-500 shrink-0">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span className="hidden sm:inline">修图完成？可直接下载或一键送往切片制作微信表情包</span>
-              <span className="sm:hidden">修图完成</span>
+              <span className="hidden sm:inline">
+                {isGif ? '动态微调完成？可直接导出 GIF 动图或同步至批量列表' : '修图完成？可直接下载或一键送往切片制作微信表情包'}
+              </span>
+              <span className="sm:hidden">微调完成</span>
             </div>
 
             <div className="flex items-center gap-1.5 shrink-0 ml-auto">
@@ -2674,28 +3028,53 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
 
               {/* Download Clean Image */}
               <div className="flex items-center rounded-md bg-white border border-stone-300 p-0.5 shadow-2xs text-[11px] h-6 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => handleDownload('png')}
-                  className="px-2 h-5 rounded hover:bg-stone-100 text-stone-700 font-bold transition-colors cursor-pointer flex items-center gap-1"
-                  title={`下载 PNG (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
-                >
-                  <Download className="w-3 h-3 text-stone-500" />
-                  <span>下载 PNG</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDownload('jpeg')}
-                  className="px-1.5 h-5 rounded hover:bg-stone-100 text-stone-700 font-medium transition-colors cursor-pointer"
-                  title={`下载 JPG (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
-                >
-                  JPG
-                </button>
+                {isGif ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDownload('gif')}
+                    className="px-2.5 h-5 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold transition-colors cursor-pointer flex items-center gap-1"
+                    title={`导出动态 GIF (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
+                  >
+                    <Film className="w-3 h-3 text-white" />
+                    <span>导出 GIF 动态图</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleDownload('png')}
+                    className="px-2 h-5 rounded hover:bg-stone-100 text-stone-700 font-bold transition-colors cursor-pointer flex items-center gap-1"
+                    title={`下载 PNG (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
+                  >
+                    <Download className="w-3 h-3 text-stone-500" />
+                    <span>下载 PNG</span>
+                  </button>
+                )}
+
+                {isGif ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDownload('png')}
+                    className="px-1.5 h-5 rounded hover:bg-stone-100 text-stone-700 font-medium transition-colors cursor-pointer"
+                    title="导出当前静止帧 PNG"
+                  >
+                    PNG
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleDownload('jpeg')}
+                    className="px-1.5 h-5 rounded hover:bg-stone-100 text-stone-700 font-medium transition-colors cursor-pointer"
+                    title={`下载 JPG (${targetDimensions.width || imageSize.width}×${targetDimensions.height || imageSize.height} px)`}
+                  >
+                    JPG
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setIsExportModalOpen(true)}
                   className="px-1 h-5 rounded hover:bg-stone-100 text-stone-400 hover:text-stone-700 transition-colors cursor-pointer border-l border-stone-200 ml-0.5"
-                  title="控制图片大小与画质选项"
+                  title="控制图片大小、格式与动图选项"
                 >
                   <ChevronDown className="w-3 h-3" />
                 </button>
@@ -3045,12 +3424,17 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 </div>
 
                 {/* Format Radio Tabs */}
-                <div className="grid grid-cols-3 gap-2 mb-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
                   {[
+                    {
+                      id: 'gif',
+                      name: 'GIF 动态图',
+                      desc: '保留多帧动画与透明通道（动态表情包必选）',
+                    },
                     {
                       id: 'png',
                       name: 'PNG 格式',
-                      desc: '无损高清，支持透明背景（微信表情包首选）',
+                      desc: '无损高清，支持透明背景（微信静态表情首选）',
                     },
                     {
                       id: 'jpeg',
@@ -3256,6 +3640,17 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
               </button>
 
               <div className="flex items-center gap-2">
+                {isGif && (
+                  <button
+                    type="button"
+                    onClick={() => handleDownload('gif')}
+                    className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-sm hover:shadow transition-all cursor-pointer flex items-center gap-1.5"
+                    title={`导出多帧动态 GIF (${targetDimensions.width}×${targetDimensions.height} px)`}
+                  >
+                    <Film className="w-3.5 h-3.5" />
+                    <span>导出 GIF 动图</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => handleDownload('png')}

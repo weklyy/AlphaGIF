@@ -154,33 +154,17 @@ export const FrameRemovalControlPanel: React.FC<FrameRemovalControlPanelProps> =
         </div>
       </div>
 
-      {/* Three Action Buttons: One-Click Auto, Eyedropper Pick, and Brush Smear */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
+      {/* Action Buttons: One-Click Straight Line Frame Elimination, Brush Smear Line Removal */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
         {onOneClickAutoDelete && (
           <button
             type="button"
             onClick={onOneClickAutoDelete}
-            className="w-full py-2 px-2 bg-amber-500 hover:bg-amber-600 active:scale-98 text-stone-950 font-bold rounded-lg border border-amber-600 shadow-xs flex items-center justify-center gap-1.5 transition-all text-xs cursor-pointer"
-            title="鼠标点一下，全自动检测识别图片中的方框并全部删除"
+            className="w-full py-2.5 px-3 bg-amber-500 hover:bg-amber-600 active:scale-98 text-stone-950 font-bold rounded-lg border border-amber-600 shadow-xs flex items-center justify-center gap-1.5 transition-all text-xs cursor-pointer"
+            title="一键全部消除所有直线方框（纯直线切除，不按颜色匹配，100%保护画面图画与文字）"
           >
-            <Sparkles className="w-3.5 h-3.5 text-stone-950 fill-stone-950" />
-            <span>⚡ 鼠标点一下全删</span>
-          </button>
-        )}
-
-        {onPickColorFromScreen && (
-          <button
-            type="button"
-            onClick={onPickColorFromScreen}
-            className={`w-full py-2 px-2 rounded-lg border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-              isPickingColor
-                ? 'bg-amber-400 text-stone-950 border-amber-600 ring-2 ring-amber-400 animate-pulse'
-                : 'bg-white hover:bg-stone-100 text-stone-800 border-stone-300 shadow-2xs'
-            }`}
-            title="鼠标点击画面中任意方框线，即可直接全部删除所有方框"
-          >
-            <Pipette className="w-3.5 h-3.5 text-amber-700 stroke-[2.5]" />
-            <span>{isPickingColor ? '点击图中方框...' : '🎯 点画面方框全删'}</span>
+            <Sparkles className="w-4 h-4 text-stone-950 fill-stone-950" />
+            <span>⚡ 一键全消直线方框 (100%不伤图)</span>
           </button>
         )}
 
@@ -188,17 +172,17 @@ export const FrameRemovalControlPanel: React.FC<FrameRemovalControlPanelProps> =
           <button
             type="button"
             onClick={onToggleBrushSmear}
-            className={`w-full py-2 px-2 rounded-lg border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+            className={`w-full py-2.5 px-3 rounded-lg border text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               isBrushSmearActive
                 ? 'bg-amber-400 text-stone-950 border-amber-600 ring-2 ring-amber-400 animate-pulse shadow-xs font-black'
                 : hasBrushMask
-                ? 'bg-amber-100 text-amber-950 border-amber-400'
+                ? 'bg-amber-100 text-amber-950 border-amber-400 font-bold'
                 : 'bg-white hover:bg-stone-100 text-stone-800 border-stone-300 shadow-2xs'
             }`}
-            title="按住鼠标拖动涂抹擦除残余框线与角落杂点"
+            title="涂抹消框：垂直涂抹仅消垂直线，水平涂抹仅消水平线，轻抹即消，且严格只消除直线！"
           >
-            <Paintbrush className="w-3.5 h-3.5 text-amber-700" />
-            <span>{isBrushSmearActive ? '涂抹消框中...' : '🖌️ 画笔涂抹消框'}</span>
+            <Paintbrush className="w-4 h-4 text-amber-700" />
+            <span>{isBrushSmearActive ? '涂抹消直线中...' : '🖌️ 涂抹消直线框 (轻抹即消)'}</span>
           </button>
         )}
       </div>
@@ -300,10 +284,10 @@ export const FrameRemovalControlPanel: React.FC<FrameRemovalControlPanelProps> =
           <div className="text-[10px] space-y-1 pt-0.5 border-t border-amber-200/80 leading-relaxed">
             <p className="text-emerald-900 font-semibold flex items-center gap-1">
               <span>🛡️</span>
-              <span><strong>保护画作细节：</strong>画笔涂抹纯手动擦除，<strong>不按颜色匹配</strong>，绘图中的黑线、文字、眼睛等同色内容绝不误删！</span>
+              <span><strong>只消除直线·保护画作：</strong>垂直涂抹仅联动消除当前垂直线，水平涂抹仅联动消除当前水平线，自动吸附直线，<strong>绝不按颜色匹配</strong>，绘画中人物与文字100%完好保留！</span>
             </p>
             <p className="text-amber-900/80">
-              💡 <strong>操作提示：</strong>拖动鼠标在要清除的方框线上涂抹即可擦除；涂抹完成后点击「完成涂抹」，涂抹引导色自动隐藏，画面仅保留纯净透明擦除效果！
+              💡 <strong>操作提示：</strong>在方框线附近随意涂抹即可自动吸附整条直线；涂抹完成后点击「完成涂抹」，提示颜色自动隐藏，线框纯净透明化！
             </p>
           </div>
         </div>

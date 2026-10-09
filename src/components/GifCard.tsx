@@ -45,6 +45,8 @@ import {
   rgbToHex,
   removeBackgroundFromFrame,
   renderFrameWithWeChatOptions,
+  renderFramePipeline,
+  encodeTransparentGifWithParams,
   COMPRESSION_PRESETS,
 } from '../utils/gifProcessor';
 import { removeBackgroundWithAI } from '../utils/aiBackgroundRemoval';
@@ -421,15 +423,56 @@ export const GifCard: React.FC<GifCardProps> = ({
     }
   };
 
-  // DOWNLOAD HANDLER (100% FIXED: GUARANTEED TO DOWNLOAD TRANSPARENT CUTOUT, NEVER ORIGINAL)
+  // DOWNLOAD HANDLER (GUARANTEED TO EXPORT TRANSPARENT GIF FOR GIFS, PNG FOR STATIC)
   const handleDownloadSingle = async () => {
     const dotIndex = item.file.name.lastIndexOf('.');
     const baseName = dotIndex > -1 ? item.file.name.substring(0, dotIndex) : item.file.name;
     const isWeChat = isWeChatMode;
+    const isGif = item.mediaType === 'gif' || item.file.name.toLowerCase().endsWith('.gif') || (decodedFrames && decodedFrames.length > 1);
 
-    // Priority 1: If AI matting was performed or frames exist, ALWAYS export the transparent cutout!
+    // If item has a completed processed result Blob, prioritize downloading that directly!
+    if (item.status === 'done' && item.result?.blob) {
+      const ext = item.result.format === 'gif' || isGif ? 'gif' : 'png';
+      const suffix = item.result.isWeChatSticker ? '_wechat_sticker' : '_transparent';
+      triggerBlobDownload(item.result.blob, `${baseName}${suffix}.${ext}`);
+      return;
+    }
+
+    // Priority: GIF on-the-fly encode if result is not cached yet
+    if (isGif && decodedFrames && decodedFrames.length > 0) {
+      try {
+        const framesToEncode = decodedFrames.map((f) => ({
+          imageData: renderFramePipeline(
+            item.options.enableRemoval === false
+              ? f.imageData
+              : removeBackgroundFromFrame(f.imageData, item.options),
+            item.options
+          ),
+          delay: f.delay,
+        }));
+        const tw = framesToEncode[0]?.imageData.width || item.width || 240;
+        const th = framesToEncode[0]?.imageData.height || item.height || 240;
+        const res = await encodeTransparentGifWithParams(
+          framesToEncode,
+          tw,
+          th,
+          item.options.compression || {
+            scaleRatio: 1.0,
+            maxColors: 256,
+            frameStep: 1,
+          }
+        );
+        const suffix = isWeChat ? '_wechat_sticker' : '_transparent';
+        triggerBlobDownload(res.blob, `${baseName}${suffix}.gif`);
+        return;
+      } catch (err) {
+        console.error('Failed to encode GIF on download:', err);
+      }
+    }
+
+    // Priority 1: If AI matting was performed on static image
     const activeAiFrame = (aiFrames && aiFrames[0]) || (item.aiTransparentFrames && item.aiTransparentFrames[0]);
-    if (item.options.removalMethod === 'ai' || activeAiFrame) {
+    if (!isGif && (item.options.removalMethod === 'ai' || activeAiFrame)) {
       if (activeAiFrame) {
         const processed = isWeChat
           ? renderFrameWithWeChatOptions(activeAiFrame.imageData, item.options.wechat)
@@ -446,8 +489,8 @@ export const GifCard: React.FC<GifCardProps> = ({
       }
     }
 
-    // Priority 2: Direct export from live transparent Canvas
-    if (viewMode === 'transparent' && canvasRef.current && (item.mediaType === 'image' || decodedFrames.length <= 1)) {
+    // Priority 2: Direct export from live transparent Canvas (static image only)
+    if (!isGif && viewMode === 'transparent' && canvasRef.current) {
       canvasRef.current.toBlob((blob) => {
         if (blob) {
           const suffix = isWeChat ? '_wechat_sticker' : '_transparent';
@@ -464,7 +507,7 @@ export const GifCard: React.FC<GifCardProps> = ({
 
     function fallbackDownload() {
       if (item.result?.blob) {
-        const ext = item.result.format === 'png' ? 'png' : 'gif';
+        const ext = item.result.format === 'gif' || isGif ? 'gif' : 'png';
         const suffix = item.result.isWeChatSticker ? '_wechat_sticker' : '_transparent';
         triggerBlobDownload(item.result.blob, `${baseName}${suffix}.${ext}`);
         return;
@@ -472,7 +515,7 @@ export const GifCard: React.FC<GifCardProps> = ({
       if (item.result?.url) {
         const a = document.createElement('a');
         a.href = item.result.url;
-        const ext = item.result.format === 'png' ? 'png' : 'gif';
+        const ext = item.result.format === 'gif' || isGif ? 'gif' : 'png';
         const suffix = item.result.isWeChatSticker ? '_wechat_sticker' : '_transparent';
         a.download = `${baseName}${suffix}.${ext}`;
         document.body.appendChild(a);
@@ -667,8 +710,11 @@ export const GifCard: React.FC<GifCardProps> = ({
                   });
                   onSendToRetouch(f);
                 } else if (item.result?.blob) {
-                  const f = new File([item.result.blob], item.name.replace(/\.[^/.]+$/, '') + '_transparent.png', {
-                    type: item.result.format === 'png' ? 'image/png' : 'image/gif',
+                  const isGifItem = item.mediaType === 'gif' || item.file.name.toLowerCase().endsWith('.gif') || item.result.format === 'gif';
+                  const ext = isGifItem ? '.gif' : '.png';
+                  const mime = isGifItem ? 'image/gif' : 'image/png';
+                  const f = new File([item.result.blob], `${item.name.replace(/\.[^/.]+$/, '')}_transparent${ext}`, {
+                    type: mime,
                   });
                   onSendToRetouch(f);
                 } else {
@@ -1067,6 +1113,14 @@ export const GifCard: React.FC<GifCardProps> = ({
                               const b = await imageDataToPngBlob(aiFrames[0].imageData);
                               const f = new File([b], item.name.replace(/\.[^/.]+$/, '') + '_ai_matting.png', {
                                 type: 'image/png',
+                              });
+                              onSendToRetouch(f);
+                            } else if (item.result?.blob) {
+                              const isGifItem = item.mediaType === 'gif' || item.file.name.toLowerCase().endsWith('.gif') || item.result.format === 'gif';
+                              const ext = isGifItem ? '.gif' : '.png';
+                              const mime = isGifItem ? 'image/gif' : 'image/png';
+                              const f = new File([item.result.blob], `${item.name.replace(/\.[^/.]+$/, '')}_transparent${ext}`, {
+                                type: mime,
                               });
                               onSendToRetouch(f);
                             } else {

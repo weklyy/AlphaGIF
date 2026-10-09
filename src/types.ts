@@ -13,6 +13,16 @@ export interface WeChatStickerOptions {
 
 export type CompressionPreset = 'original' | 'wechat-auto' | 'wechat-1mb' | 'wechat-500kb' | 'light-300kb' | 'custom';
 
+export interface ArbitrarySizeOptions {
+  enabled?: boolean; // 是否启用尺寸重设/自定规格
+  mode: 'original' | 'wechat' | 'scale' | 'custom'; // original=原尺寸, wechat=微信240x240, scale=百分比, custom=自定义像素
+  scalePercent: number; // 缩放百分比 (100, 85, 75, 50, 25)
+  customWidth: number; // 目标宽度 px
+  customHeight: number; // 目标高度 px
+  lockAspectRatio: boolean; // 是否锁定原始宽高比
+  fitMode?: 'contain' | 'cover' | 'stretch'; // contain=等比居中留白(防裁切), stretch=自由拉伸, cover=填充裁剪
+}
+
 export interface CompressionOptions {
   enabled: boolean; // 是否启用压缩 (默认开启)
   preset: CompressionPreset; // 预设模式
@@ -24,6 +34,7 @@ export interface CompressionOptions {
 }
 
 export interface RemovalOptions {
+  enableRemoval?: boolean; // 是否启用抠图与去底 (默认为 true, 取消勾选则不扣除背景直接保留原底色)
   removalMethod?: 'color' | 'ai'; // 'color' for eyedropper/chroma key, 'ai' for neural subject matting
   targetColor: string; // Hex string e.g. "#ffffff"
   targetColors?: string[]; // Multiple target colors support (e.g. simultaneous multi-selection)
@@ -41,8 +52,9 @@ export interface RemovalOptions {
   frameBorderWidth?: number; // 框线消除厚度 1 - 12px (默认 3)
   frameBorderInset?: number; // 边缘安全内缩切除 0 - 8px (默认 2)
   frameBorderAutoScale?: boolean; // 是否自动裁剪至内框并自适应填充 240x240 (默认 true)
-  wechat?: WeChatStickerOptions; // WeChat Sticker formatting options
-  compression?: CompressionOptions; // 微信平台体积压缩参数
+  wechat?: WeChatStickerOptions; // WeChat Sticker formatting options (白色描边与文字等微信规范)
+  sizeConfig?: ArbitrarySizeOptions; // 导出任意图片尺寸规格 (自定义宽高、百分比、微信或原始)
+  compression?: CompressionOptions; // 微信平台/自定义体积压缩参数
 }
 
 export interface FrameInfo {

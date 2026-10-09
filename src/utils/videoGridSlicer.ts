@@ -437,11 +437,15 @@ export async function sliceVideoIntoStickers(
 
       // Apply background transparency if enabled
       if (autoTransparent) {
+        const activeBgColors = Array.isArray(config.bgColors) && config.bgColors.length > 0
+          ? config.bgColors
+          : [bgColor || '#ffffff'];
+
         imgData = removeBackgroundFromFrame(imgData, {
-          targetColor: bgColor,
-          targetColors: config.bgColors,
+          targetColor: bgColor || '#ffffff',
+          targetColors: activeBgColors,
           tolerance: tolerance || 20,
-          contiguous: true,
+          contiguous: false,
           defringe: 1,
         });
       }

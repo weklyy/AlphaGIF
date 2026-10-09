@@ -1214,52 +1214,77 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
         : strokeDirectionRef.current ||
           (Math.abs(to.y - from.y) >= Math.abs(to.x - from.x) ? 'vertical' : 'horizontal');
 
-    if (brushSyncAllCells && brushLinkMode !== 'none' && isInsideCrop) {
-      const c =
-        strokeOriginCellRef.current?.col ??
-        Math.min(cols - 1, Math.max(0, Math.floor((to.x - cropX) / cellW)));
-      const r =
-        strokeOriginCellRef.current?.row ??
-        Math.min(rows - 1, Math.max(0, Math.floor((to.y - cropY) / cellH)));
+    // Build all candidate vertical straight lines and horizontal straight lines across grid
+    const normCols = normalizeSplits(config.colSplits, cols);
+    const normRows = normalizeSplits(config.rowSplits, rows);
 
+    const vLines: number[] = [cropX, cropX + cropW];
+    for (let i = 0; i < normCols.length; i++) {
+      vLines.push(cropX + normCols[i] * cropW);
+    }
+
+    const hLines: number[] = [cropY, cropY + cropH];
+    for (let i = 0; i < normRows.length; i++) {
+      hLines.push(cropY + normRows[i] * cropH);
+    }
+
+    if (brushSyncAllCells && brushLinkMode !== 'none' && isInsideCrop) {
+      if (effectiveDir === 'vertical') {
+        // 垂直涂抹：寻找距离当前涂抹位置最近的一条垂直直线，吸附并只消除这条垂直直线！
+        let bestVLine = vLines[0];
+        let minVDiff = Math.abs(vLines[0] - to.x);
+        for (let i = 1; i < vLines.length; i++) {
+          const diff = Math.abs(vLines[i] - to.x);
+          if (diff < minVDiff) {
+            minVDiff = diff;
+            bestVLine = vLines[i];
+          }
+        }
+
+        // 仅消除该垂直直线（贯穿整条垂直线），其他垂直线绝不涂抹，且严格只消除直线不伤图画！
+        ctx.beginPath();
+        ctx.moveTo(bestVLine, cropY);
+        ctx.lineTo(bestVLine, cropY + cropH);
+        ctx.stroke();
+      } else {
+        // 水平涂抹：寻找距离当前涂抹位置最近的一条水平直线，吸附并只消除这条水平直线！
+        let bestHLine = hLines[0];
+        let minHDiff = Math.abs(hLines[0] - to.y);
+        for (let i = 1; i < hLines.length; i++) {
+          const diff = Math.abs(hLines[i] - to.y);
+          if (diff < minHDiff) {
+            minHDiff = diff;
+            bestHLine = hLines[i];
+          }
+        }
+
+        // 仅消除该水平直线（贯穿整条水平线），其他水平线绝不涂抹，且严格只消除直线不伤图画！
+        ctx.beginPath();
+        ctx.moveTo(cropX, bestHLine);
+        ctx.lineTo(cropX + cropW, bestHLine);
+        ctx.stroke();
+      }
+    } else if (isInsideCrop) {
+      // 独立单格模式：仅消除当前格内的那条直线
+      const c = Math.min(cols - 1, Math.max(0, Math.floor((to.x - cropX) / cellW)));
+      const r = Math.min(rows - 1, Math.max(0, Math.floor((to.y - cropY) / cellH)));
       const cellOriginX = cropX + c * cellW;
       const cellOriginY = cropY + r * cellH;
 
-      const fromRelX = from.x - cellOriginX;
-      const fromRelY = from.y - cellOriginY;
-      const toRelX = to.x - cellOriginX;
-      const toRelY = to.y - cellOriginY;
-
       if (effectiveDir === 'vertical') {
-        // 垂直涂抹：仅联动该垂直线所在列（同列贯穿各行 cr=0..rows-1），绝不向其他列涂抹！
-        for (let cr = 0; cr < rows; cr++) {
-          const targetCellX = cropX + c * cellW;
-          const targetCellY = cropY + cr * cellH;
-
-          ctx.beginPath();
-          ctx.moveTo(targetCellX + fromRelX, targetCellY + fromRelY);
-          ctx.lineTo(targetCellX + toRelX, targetCellY + toRelY);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(targetCellX + toRelX, targetCellY + toRelY, actualLineWidth / 2, 0, Math.PI * 2);
-          ctx.fill();
-        }
+        const cellVLines = [cellOriginX, cellOriginX + cellW];
+        const bestV = Math.abs(cellVLines[0] - to.x) < Math.abs(cellVLines[1] - to.x) ? cellVLines[0] : cellVLines[1];
+        ctx.beginPath();
+        ctx.moveTo(bestV, cellOriginY);
+        ctx.lineTo(bestV, cellOriginY + cellH);
+        ctx.stroke();
       } else {
-        // 水平涂抹：仅联动该水平线所在行（同行贯穿各列 cc=0..cols-1），绝不向其他行涂抹！
-        for (let cc = 0; cc < cols; cc++) {
-          const targetCellX = cropX + cc * cellW;
-          const targetCellY = cropY + r * cellH;
-
-          ctx.beginPath();
-          ctx.moveTo(targetCellX + fromRelX, targetCellY + fromRelY);
-          ctx.lineTo(targetCellX + toRelX, targetCellY + toRelY);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.arc(targetCellX + toRelX, targetCellY + toRelY, actualLineWidth / 2, 0, Math.PI * 2);
-          ctx.fill();
-        }
+        const cellHLines = [cellOriginY, cellOriginY + cellH];
+        const bestH = Math.abs(cellHLines[0] - to.y) < Math.abs(cellHLines[1] - to.y) ? cellHLines[0] : cellHLines[1];
+        ctx.beginPath();
+        ctx.moveTo(cellOriginX, bestH);
+        ctx.lineTo(cellOriginX + cellW, bestH);
+        ctx.stroke();
       }
     } else {
       ctx.beginPath();
@@ -1422,13 +1447,16 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
       setIsPickingColor(false);
       setIsPickingFrameColor(false);
       setAutoAlignToast({
-        message: '🖌️ 画笔涂抹消框模式已开启：按住鼠标左键在画面线框上拖动即可擦除，支持撤销与全图同步！',
+        message: '🖌️ 画笔涂抹消框模式已开启：在垂直或水平线附近涂抹即可定向消除直线，100%保护画面图画！',
         type: 'info',
       });
     } else {
       renderVideoMattingFrame();
+      if (onRemoveFrameFromStickers && config.frameEraserMaskUrl) {
+        onRemoveFrameFromStickers(undefined, config);
+      }
       setAutoAlignToast({
-        message: '✨ 画笔涂抹去框已完成！涂抹颜色已自动隐藏，框线已干净透明化。',
+        message: '✨ 画笔涂抹消框已完成！涂抹提示色已自动隐藏，直线框已干净透明化。',
         type: 'success',
       });
     }
@@ -2889,26 +2917,12 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 >
                   <button
                     type="button"
-                    onClick={handleOneClickDeleteAllFrames}
+                    onClick={() => handleOneClickDeleteAllFrames()}
                     className="px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-stone-950 flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
-                    title="鼠标点一下，即可智能识别画面中的线框并全部删除，原图不缩放，文字不受影响！"
+                    title="一键全部消除所有直线方框（纯几何切除直线，100%保护画面图画与文字）"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-stone-950 fill-stone-950" />
-                    <span>⚡ 鼠标点一下·全删方框</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleStartPickFrameColor}
-                    className={`px-2 py-1 rounded-lg text-xs font-medium border flex items-center gap-1 transition-all cursor-pointer shrink-0 ${
-                      config.removeFrameBorder
-                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
-                        : 'bg-stone-800 text-stone-300 border-white/10 hover:text-white hover:bg-stone-700'
-                    }`}
-                    title="鼠标点击画面中任意方框线直接消除"
-                  >
-                    <Pipette className="w-3.5 h-3.5 text-amber-400" />
-                    <span>🎯 点框消除</span>
+                    <span>⚡ 一键全消直线方框 (100%不伤图)</span>
                   </button>
 
                   <button
@@ -2921,10 +2935,10 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                         ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30 font-bold'
                         : 'bg-stone-800 text-stone-300 border-white/10 hover:text-white hover:bg-stone-700'
                     }`}
-                    title="按住鼠标拖动涂抹擦除残余框线与角落黑点"
+                    title="涂抹消框：垂直涂抹仅消垂直线，水平涂抹仅消水平线，轻抹即消，且严格只消除直线！"
                   >
                     <Paintbrush className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{isBrushSmearActive ? '涂抹消框中...' : '🖌️ 涂抹消框'}</span>
+                    <span>{isBrushSmearActive ? '涂抹消直线中...' : '🖌️ 涂抹消直线框'}</span>
                   </button>
 
                   {config.removeFrameBorder && (
@@ -3160,6 +3174,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
             {/* Interactive Brush Smear Canvas Layer */}
             <canvas
               ref={brushCanvasRef}
+              style={{ display: isBrushSmearActive ? 'block' : 'none' }}
               className={`absolute inset-0 w-full h-full z-35 touch-none transition-opacity ${
                 isBrushSmearActive ? 'cursor-none pointer-events-auto opacity-50' : 'hidden pointer-events-none opacity-0'
               }`}

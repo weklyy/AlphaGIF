@@ -961,17 +961,18 @@ export function applyWhiteOutline(
   return result;
 }
 
-// Format and render a transparent frame according to WeChat Sticker rules (240x240, padding, outline, caption)
-export function renderFrameWithWeChatOptions(
-  transparentImageData: ImageData,
-  wechat?: WeChatStickerOptions
+// Format and render a frame according to the combined pipeline:
+// Matting -> Arbitrary Size/Dimension -> WeChat specs (outline, caption) -> output
+export function renderFramePipeline(
+  imageData: ImageData,
+  options?: RemovalOptions
 ): ImageData {
-  if (!wechat || !wechat.enabled) {
-    return transparentImageData;
-  }
+  if (!options) return imageData;
+  const wechat = options.wechat;
+  const sizeConfig = options.sizeConfig;
 
-  const origW = transparentImageData.width;
-  const origH = transparentImageData.height;
+  const origW = imageData.width;
+  const origH = imageData.height;
 
   let targetW = origW;
   let targetH = origH;
@@ -980,20 +981,81 @@ export function renderFrameWithWeChatOptions(
   let drawX = 0;
   let drawY = 0;
 
-  const hasCaption = !!wechat.captionText && wechat.captionText.trim().length > 0;
+  const hasCaption = !!wechat?.enabled && !!wechat.captionText && wechat.captionText.trim().length > 0;
   const captionHeightReserve = hasCaption ? 32 : 0;
 
-  if (wechat.standardSize === '240') {
+  // 1. Determine Target Canvas Dimensions & Draw Placement
+  // "和" (AND) 关系协同：若启用了任意尺寸配置，尺寸优先按用户设定（自定义宽高、缩放比或原图），
+  // 同时满足微信规范（白色描边、文字排版）与体积压缩等所有已选标签！
+  if (sizeConfig?.enabled && sizeConfig.mode === 'custom' && sizeConfig.customWidth > 0 && sizeConfig.customHeight > 0) {
+    // 任意自定义像素尺寸 (如 512×512, 1080×1080, 800×600 等)
+    targetW = Math.max(16, Math.min(10000, Math.round(sizeConfig.customWidth)));
+    targetH = Math.max(16, Math.min(10000, Math.round(sizeConfig.customHeight)));
+    if (sizeConfig.fitMode === 'stretch') {
+      drawW = targetW;
+      drawH = targetH;
+      drawX = 0;
+      drawY = 0;
+    } else {
+      // 保持等比居中留白，防裁切
+      const maxDrawW = targetW - (hasCaption ? 16 : 8);
+      const maxDrawH = targetH - (hasCaption ? captionHeightReserve + 12 : 8);
+      const scale = Math.min(maxDrawW / origW, maxDrawH / origH);
+      drawW = Math.max(1, Math.round(origW * scale));
+      drawH = Math.max(1, Math.round(origH * scale));
+      drawX = Math.round((targetW - drawW) / 2);
+      if (hasCaption && wechat?.captionPosition === 'top') {
+        drawY = Math.round((targetH - captionHeightReserve - drawH) / 2) + captionHeightReserve;
+      } else if (hasCaption) {
+        drawY = Math.round((targetH - captionHeightReserve - drawH) / 2);
+      } else {
+        drawY = Math.round((targetH - drawH) / 2);
+      }
+    }
+  } else if (sizeConfig?.enabled && sizeConfig.mode === 'scale' && sizeConfig.scalePercent > 0) {
+    // 任意百分比缩放 (100%, 85%, 75%, 50%, 25%)
+    const scale = sizeConfig.scalePercent / 100;
+    drawW = Math.max(1, Math.round(origW * scale));
+    drawH = Math.max(1, Math.round(origH * scale));
+    targetW = drawW;
+    targetH = drawH + (hasCaption ? captionHeightReserve : 0);
+    drawX = 0;
+    drawY = hasCaption && wechat?.captionPosition === 'top' ? captionHeightReserve : 0;
+  } else if (sizeConfig?.enabled && sizeConfig.mode === 'wechat') {
+    // 显式指定微信 240x240
     targetW = 240;
     targetH = 240;
-    // Leave safe padding for outline (2px-4px) and optional caption
+    const maxUsableW = 240 - 24;
+    const maxUsableH = 240 - 24 - (hasCaption ? 28 : 0);
+    const scale = Math.min(maxUsableW / origW, maxUsableH / origH);
+    drawW = Math.max(1, Math.round(origW * scale));
+    drawH = Math.max(1, Math.round(origH * scale));
+    drawX = Math.round((240 - drawW) / 2);
+    if (hasCaption && wechat?.captionPosition === 'top') {
+      drawY = Math.round((240 - captionHeightReserve - drawH) / 2) + captionHeightReserve;
+    } else if (hasCaption) {
+      drawY = Math.round((240 - captionHeightReserve - drawH) / 2);
+    } else {
+      drawY = Math.round((240 - drawH) / 2);
+    }
+  } else if (sizeConfig?.enabled && sizeConfig.mode === 'original') {
+    // 显式指定保留原始尺寸
+    targetW = origW;
+    targetH = origH + (hasCaption ? captionHeightReserve : 0);
+    drawW = origW;
+    drawH = origH;
+    drawX = 0;
+    drawY = hasCaption && wechat?.captionPosition === 'top' ? captionHeightReserve : 0;
+  } else if (wechat?.enabled && wechat.standardSize === '240') {
+    // 微信官方推荐 240x240 正方形
+    targetW = 240;
+    targetH = 240;
     const maxUsableW = 240 - 24; // 216
     const maxUsableH = 240 - 24 - (hasCaption ? 28 : 0);
     const scale = Math.min(maxUsableW / origW, maxUsableH / origH);
     drawW = Math.max(1, Math.round(origW * scale));
     drawH = Math.max(1, Math.round(origH * scale));
     drawX = Math.round((240 - drawW) / 2);
-
     if (hasCaption && wechat.captionPosition === 'top') {
       drawY = Math.round((240 - captionHeightReserve - drawH) / 2) + captionHeightReserve;
     } else if (hasCaption) {
@@ -1001,7 +1063,7 @@ export function renderFrameWithWeChatOptions(
     } else {
       drawY = Math.round((240 - drawH) / 2);
     }
-  } else if (wechat.standardSize === 'max240') {
+  } else if (wechat?.enabled && wechat.standardSize === 'max240') {
     const maxDim = Math.max(origW, origH);
     const scale = maxDim > 240 ? (240 - (hasCaption ? 28 : 12)) / maxDim : 1;
     drawW = Math.max(1, Math.round(origW * scale));
@@ -1012,19 +1074,31 @@ export function renderFrameWithWeChatOptions(
     drawY = hasCaption && wechat.captionPosition === 'top' ? captionHeightReserve : 0;
   }
 
-  // Draw scaled transparent image onto canvas
+  // Check if redraw onto new canvas is needed
+  const needCanvas =
+    targetW !== origW ||
+    targetH !== origH ||
+    drawW !== origW ||
+    drawH !== origH ||
+    (wechat?.enabled && (wechat.addWhiteOutline || hasCaption));
+
+  if (!needCanvas) {
+    return imageData;
+  }
+
+  // Draw scaled image onto canvas
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
   canvas.height = targetH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return transparentImageData;
+  if (!ctx) return imageData;
 
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = origW;
   tempCanvas.height = origH;
   const tempCtx = tempCanvas.getContext('2d');
   if (tempCtx) {
-    tempCtx.putImageData(transparentImageData, 0, 0);
+    tempCtx.putImageData(imageData, 0, 0);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(tempCanvas, drawX, drawY, drawW, drawH);
@@ -1032,8 +1106,8 @@ export function renderFrameWithWeChatOptions(
 
   let currentImageData = ctx.getImageData(0, 0, targetW, targetH);
 
-  // Apply WeChat standard white outline if enabled
-  if (wechat.addWhiteOutline) {
+  // 2. Apply WeChat standard white outline if enabled
+  if (wechat?.enabled && wechat.addWhiteOutline) {
     currentImageData = applyWhiteOutline(
       currentImageData,
       wechat.outlineWidth ?? 2,
@@ -1041,8 +1115,8 @@ export function renderFrameWithWeChatOptions(
     );
   }
 
-  // Apply caption text if present
-  if (hasCaption) {
+  // 3. Apply caption text if present
+  if (hasCaption && wechat) {
     ctx.putImageData(currentImageData, 0, 0);
     const fontSize =
       wechat.captionFontSize ||
@@ -1058,9 +1132,6 @@ export function renderFrameWithWeChatOptions(
     let textY = targetH - 8;
     if (wechat.captionPosition === 'top') {
       textY = fontSize + 4;
-      ctx.textBaseline = 'alphabetic';
-    } else {
-      ctx.textBaseline = 'alphabetic';
     }
 
     // Outer stroke (black outline by default)
@@ -1076,6 +1147,20 @@ export function renderFrameWithWeChatOptions(
   }
 
   return currentImageData;
+}
+
+// Backward-compatible alias for WeChat Sticker rules
+export function renderFrameWithWeChatOptions(
+  transparentImageData: ImageData,
+  wechat?: WeChatStickerOptions
+): ImageData {
+  return renderFramePipeline(transparentImageData, {
+    targetColor: '#ffffff',
+    tolerance: 15,
+    contiguous: true,
+    defringe: 1,
+    wechat,
+  });
 }
 
 // Rescale ImageData using high-quality offscreen canvas
@@ -1478,10 +1563,7 @@ export async function processGifItem(
   cachedBuffer?: ArrayBuffer,
   cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
-  const isWeChat =
-    options.compression?.preset !== 'original' &&
-    options.compression?.enabled !== false &&
-    !!options.wechat?.enabled;
+  const isWeChat = !!options.wechat?.enabled;
   const compression = options.compression ?? {
     enabled: true,
     preset: 'wechat-auto',
@@ -1500,6 +1582,8 @@ export async function processGifItem(
     30,
     isWeChat
       ? '正在生成微信表情包 (背景透明化 + 240x240规范 + 白色描边)...'
+      : options.enableRemoval === false
+      ? '正在按设置调整尺寸与规格...'
       : '正在处理背景透明化...'
   );
 
@@ -1516,7 +1600,10 @@ export async function processGifItem(
       }
     }
 
-    if (options.removalMethod === 'ai' && frameHasAlpha && cachedFrames) {
+    if (options.enableRemoval === false) {
+      // User unchecked background removal -> keep original frame data
+      transparentData = frame.imageData;
+    } else if (options.removalMethod === 'ai' && frameHasAlpha && cachedFrames) {
       transparentData = cachedFrames[idx].imageData;
     } else {
       transparentData = removeBackgroundFromFrame(frame.imageData, options);
@@ -1533,9 +1620,7 @@ export async function processGifItem(
       });
     }
 
-    const finalData = isWeChat
-      ? renderFrameWithWeChatOptions(transparentData, options.wechat)
-      : transparentData;
+    const finalData = renderFramePipeline(transparentData, options);
     return {
       imageData: finalData,
       delay: frame.delay,
@@ -1614,10 +1699,7 @@ export async function processStaticImageItem(
   cachedBuffer?: ArrayBuffer,
   cachedFrames?: FrameInfo[]
 ): Promise<ProcessedGifResult> {
-  const isWeChat =
-    options.compression?.preset !== 'original' &&
-    options.compression?.enabled !== false &&
-    !!options.wechat?.enabled;
+  const isWeChat = !!options.wechat?.enabled;
   const compression = options.compression ?? {
     enabled: true,
     preset: 'wechat-auto',
@@ -1642,11 +1724,16 @@ export async function processStaticImageItem(
     45,
     isWeChat
       ? '正在消除背景并应用微信表情包规范 (白色描边与自适应)...'
+      : options.enableRemoval === false
+      ? '正在按设置调整图片规格与尺寸...'
       : '正在分析并消除背景色...'
   );
 
   let rawTransparentData: ImageData;
-  if (options.removalMethod === 'ai') {
+  if (options.enableRemoval === false) {
+    // User unchecked background removal -> keep original image
+    rawTransparentData = sourceImageData;
+  } else if (options.removalMethod === 'ai') {
     let cachedHasTransparency = false;
     if (cachedFrames && cachedFrames.length > 0 && cachedFrames[0]?.imageData) {
       const d = cachedFrames[0].imageData.data;
@@ -1680,9 +1767,7 @@ export async function processStaticImageItem(
     });
   }
 
-  const processedImageData = isWeChat
-    ? renderFrameWithWeChatOptions(rawTransparentData, options.wechat)
-    : rawTransparentData;
+  const processedImageData = renderFramePipeline(rawTransparentData, options);
 
   onProgress?.(
     75,

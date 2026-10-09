@@ -53,6 +53,7 @@ import { GridImageSlicerControls } from './components/WeChatSuite/GridImageSlice
 import { StickerGridResults } from './components/WeChatSuite/StickerGridResults';
 import { MaterialsManager } from './components/WeChatSuite/MaterialsManager';
 import { ImageRetouchWorkspace } from './components/WeChatSuite/ImageRetouchWorkspace';
+import { Grid15SafePadder } from './components/WeChatSuite/Grid15SafePadder';
 import { IdPhotoMaker } from './components/IdPhoto/IdPhotoMaker';
 import { sliceVideoIntoStickers } from './utils/videoGridSlicer';
 import { sliceImageIntoStickers } from './utils/imageGridSlicer';
@@ -70,7 +71,7 @@ import {
 export default function App() {
   // Navigation state: Static Slicer, Dynamic Slicer, Consolidated Transparency & Retouch Tool, and ID Photo Maker
   const [activeTab, setActiveTab] = useState<'suite_image' | 'suite_video' | 'transparency' | 'id_photo'>('suite_image');
-  const [transparencySubView, setTransparencySubView] = useState<'batch' | 'retouch'>('batch');
+  const [transparencySubView, setTransparencySubView] = useState<'batch' | 'retouch' | 'grid15_safe'>('batch');
 
   // Retouch & Watermark Workspace State
   const [retouchImageFile, setRetouchImageFile] = useState<File | null>(null);
@@ -445,6 +446,34 @@ export default function App() {
 
   const handleRetouchSendToTransparency = (file: File) => {
     handleRetouchSyncToBatch(file);
+  };
+
+  const handleSafePadderSendToStaticSlicer = (file: File) => {
+    setImageFile(file);
+    setImageUrl(URL.createObjectURL(file));
+    setImageGridConfig((prev) => ({
+      ...prev,
+      preset: '15',
+      cols: 5,
+      rows: 3,
+    }));
+    setActiveTab('suite_image');
+    showNotification('已将 16:9 安全图导入静态表情切片套件，已自动设置 5×3 15 宫格！');
+  };
+
+  const handleSafePadderSendToRetouch = (file: File) => {
+    setRetouchImageFile(file);
+    setActiveRetouchItemId(null);
+    setTransparencySubView('retouch');
+    setActiveTab('transparency');
+    showNotification('已将 16:9 安全图载入精细修图与透底画板！');
+  };
+
+  const handleSafePadderSendToBatch = (file: File) => {
+    handleFilesSelected([file]);
+    setTransparencySubView('batch');
+    setActiveTab('transparency');
+    showNotification('已将 16:9 安全图导入批量透明化列表！');
   };
 
   const handleStartImageSlice = async (imgElement: HTMLImageElement) => {
@@ -1996,13 +2025,38 @@ export default function App() {
                     </span>
                   )}
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => setTransparencySubView('grid15_safe')}
+                  className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer select-none ${
+                    transparencySubView === 'grid15_safe'
+                      ? 'bg-amber-600 text-white shadow-sm ring-2 ring-amber-600/25'
+                      : 'text-stone-600 hover:text-stone-900 hover:bg-stone-200/50'
+                  }`}
+                >
+                  <Film className={`w-4 h-4 ${transparencySubView === 'grid15_safe' ? 'text-white' : 'text-stone-400'}`} />
+                  <span>15宫格 16:9 防截断安全图</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                    transparencySubView === 'grid15_safe' ? 'bg-amber-700 text-white' : 'bg-amber-100 text-amber-800'
+                  }`}>
+                    AI视频防截断
+                  </span>
+                  {transparencySubView === 'grid15_safe' && (
+                    <span className="text-[10px] bg-amber-500/80 text-white px-1.5 py-0.5 rounded font-medium ml-0.5">
+                      当前视图
+                    </span>
+                  )}
+                </button>
               </div>
 
               <div className="text-xs text-stone-500 flex items-center gap-2 pr-2">
                 {transparencySubView === 'batch' ? (
                   <span className="hidden sm:inline">💡 针对单张图需局部抹除水印或边缘精修，可点击卡片上的「去水印/修图」画笔或切换至画板</span>
-                ) : (
+                ) : transparencySubView === 'retouch' ? (
                   <span className="hidden md:inline text-stone-400">💡 圈选或涂抹快速消除水印，处理完可一键同步回列表或送往切片</span>
+                ) : (
+                  <span className="hidden md:inline text-amber-700 font-medium">💡 为 5×3 15宫格上下精准添加安全留白，彻底解决 AI 视频模型 16:9 画幅导致的头尾截断痛点</span>
                 )}
               </div>
             </div>
@@ -2017,6 +2071,19 @@ export default function App() {
                   onSendToTransparency={handleRetouchSendToTransparency}
                   onImageLoadedStateChange={setIsRetouchImageLoaded}
                   showToast={showNotification}
+                />
+              </div>
+            )}
+
+            {/* Sub-view 3: 15宫格 16:9 防截断安全图 */}
+            {transparencySubView === 'grid15_safe' && (
+              <div className="space-y-4">
+                <Grid15SafePadder
+                  onSendToStaticSlicer={handleSafePadderSendToStaticSlicer}
+                  onSendToRetouch={handleSafePadderSendToRetouch}
+                  onSendToBatch={handleSafePadderSendToBatch}
+                  showToast={showNotification}
+                  externalImageFile={retouchImageFile || imageFile}
                 />
               </div>
             )}

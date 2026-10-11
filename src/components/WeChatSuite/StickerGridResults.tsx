@@ -14,12 +14,14 @@ import {
   Loader2,
   Paintbrush,
   Square,
+  Type,
 } from 'lucide-react';
 import { SlicedStickerItem } from '../../types';
 import {
   exportSlicedStickersOnlyZip,
   isStaticStickerSet,
 } from '../../utils/wechatZipExporter';
+import { StickerTextEditorModal } from './StickerTextEditorModal';
 
 interface StickerGridResultsProps {
   stickers: SlicedStickerItem[];
@@ -28,6 +30,7 @@ interface StickerGridResultsProps {
   onSendToRetouch?: (sticker: SlicedStickerItem) => void;
   onRemoveFrameFromStickers?: (indices?: number[]) => Promise<void> | void;
   isRemovingFrame?: boolean;
+  onUpdateStickers?: (updatedStickers: SlicedStickerItem[]) => void;
   onSetAsCover: (index: number) => void;
   onSetAsIcon: (index: number) => void;
   onSetAsGuide: (index: number) => void;
@@ -45,6 +48,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
   onSendToRetouch,
   onRemoveFrameFromStickers,
   isRemovingFrame = false,
+  onUpdateStickers,
   onSetAsCover,
   onSetAsIcon,
   onSetAsGuide,
@@ -56,8 +60,28 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
 }) => {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [isExportingZip, setIsExportingZip] = useState(false);
+  const [isTextModalOpen, setIsTextModalOpen] = useState(false);
+  const [selectedTextStickerIndex, setSelectedTextStickerIndex] = useState(1);
 
   const isStatic = isStaticStickerSet(stickers);
+
+  const handleOpenTextEditor = (index: number) => {
+    setSelectedTextStickerIndex(index);
+    setIsTextModalOpen(true);
+  };
+
+  const handleSingleStickerUpdate = (updated: SlicedStickerItem) => {
+    if (onUpdateStickers) {
+      const newList = stickers.map((s) => (s.index === updated.index ? updated : s));
+      onUpdateStickers(newList);
+    }
+  };
+
+  const handleBatchStickerUpdate = (updatedList: SlicedStickerItem[]) => {
+    if (onUpdateStickers) {
+      onUpdateStickers(updatedList);
+    }
+  };
 
   const handleExportZip = async () => {
     if (stickers.length === 0 || isExportingZip) return;
@@ -117,6 +141,16 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
 
         {/* Global Action: Download Zip, Remove Frames, and Import to Tab 2 */}
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => handleOpenTextEditor(1)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95 cursor-pointer"
+            title="手动添加或修改表情包文字，可自由选择开源商用字体、字号大小、颜色与防吃字描边"
+          >
+            <Type className="w-3.5 h-3.5 text-white" />
+            <span>✍️ 手动添加文字 / 表情包配字</span>
+          </button>
+
           {onRemoveFrameFromStickers && (
             <button
               type="button"
@@ -319,15 +353,40 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                   </button>
                 </div>
 
+                {/* Text badge if text applied */}
+                {sticker.textConfig?.text && (
+                  <div className="pt-1">
+                    <div className="px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-blue-900 text-[10px] font-bold flex items-center justify-between">
+                      <span className="truncate flex items-center gap-1">
+                        <Type className="w-2.5 h-2.5 text-blue-600" />
+                        <span>已配字:「{sticker.textConfig.text}」</span>
+                      </span>
+                      <span className="text-[9px] text-blue-600 font-mono">
+                        {sticker.textConfig.fontSize}px
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Secondary tools */}
                 <div className="flex items-center gap-1 pt-1">
                   <button
                     type="button"
                     onClick={() => handleDownloadSingle(sticker)}
-                    className="flex-1 py-1 px-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                    className="flex-1 py-1 px-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3" />
-                    下载单张 ({isStatic ? 'PNG' : 'GIF'})
+                    下载
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleOpenTextEditor(sticker.index)}
+                    title="手动为该表情包添加或修改文字（支持开源商用字体、字号、颜色与描边）"
+                    className="py-1 px-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-colors border border-blue-200/80 cursor-pointer"
+                  >
+                    <Type className="w-3 h-3 text-blue-600" />
+                    <span>{sticker.textConfig ? '改字' : '配字'}</span>
                   </button>
 
                   {onRemoveFrameFromStickers && (
@@ -335,7 +394,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                       type="button"
                       onClick={() => onRemoveFrameFromStickers([sticker.index])}
                       title="一键去除此格的正方形黑框或彩色边框线"
-                      className="py-1 px-2 bg-amber-50 hover:bg-amber-100 text-amber-900 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-amber-300/80 cursor-pointer"
+                      className="py-1 px-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-amber-300/80 cursor-pointer"
                     >
                       <Square className="w-3 h-3 text-amber-700 stroke-[2.5]" />
                       去框
@@ -347,10 +406,10 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                       type="button"
                       onClick={() => onSendToRetouch(sticker)}
                       title="送往精细修图画板：抹除原GIF错误文字、去除杂物或重新打字"
-                      className="py-1 px-2 bg-emerald-50 hover:bg-emerald-100 text-[#07c160] rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-colors border border-emerald-200/60 cursor-pointer"
+                      className="py-1 px-1.5 bg-emerald-50 hover:bg-emerald-100 text-[#07c160] rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-colors border border-emerald-200/60 cursor-pointer"
                     >
                       <Paintbrush className="w-3 h-3" />
-                      修图/改字
+                      修图
                     </button>
                   )}
 
@@ -358,7 +417,7 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
                     type="button"
                     onClick={() => onImportSingleToTab2(sticker)}
                     title="导入到背景透明化工具进行高级微调"
-                    className="py-1 px-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-indigo-200/60 cursor-pointer"
+                    className="py-1 px-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[11px] font-medium flex items-center justify-center gap-1 transition-colors border border-indigo-200/60 cursor-pointer"
                   >
                     <Sliders className="w-3 h-3" />
                     去底
@@ -369,6 +428,18 @@ export const StickerGridResults: React.FC<StickerGridResultsProps> = ({
           );
         })}
       </div>
+
+      {/* Manual Sticker Text Editor Modal */}
+      {isTextModalOpen && (
+        <StickerTextEditorModal
+          isOpen={isTextModalOpen}
+          onClose={() => setIsTextModalOpen(false)}
+          stickers={stickers}
+          initialStickerIndex={selectedTextStickerIndex}
+          onUpdateSticker={handleSingleStickerUpdate}
+          onBatchUpdateStickers={handleBatchStickerUpdate}
+        />
+      )}
     </div>
   );
 };

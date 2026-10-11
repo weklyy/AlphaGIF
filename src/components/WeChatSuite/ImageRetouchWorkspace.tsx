@@ -49,6 +49,11 @@ import {
   Type,
 } from 'lucide-react';
 import { RetouchTool, RetouchOptions, FrameInfo } from '../../types';
+import {
+  OPEN_SOURCE_FONTS,
+  TEXT_COLOR_PRESETS,
+  STROKE_COLOR_PRESETS,
+} from '../../utils/stickerFontPresets';
 
 export interface ExportSizeConfig {
   mode: 'original' | 'scale' | 'preset' | 'custom';
@@ -720,10 +725,12 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     if (options.tool === 'text') {
       const text = options.textString || '收到';
       const fontSize = options.textFontSize ?? 22;
+      const strokeEnabled = options.textStrokeEnabled ?? true;
       const strokeWidth = options.textStrokeWidth ?? 3;
       const strokeColor = options.textStrokeColor ?? '#000000';
       const textColor = options.textColor ?? '#ffffff';
       const position = options.textPosition ?? 'bottom';
+      const fontPreset = OPEN_SOURCE_FONTS.find((f) => f.id === options.textFontId) || OPEN_SOURCE_FONTS[0];
       const textX =
         position === 'custom' && options.textCustomX !== undefined
           ? options.textCustomX
@@ -733,16 +740,18 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
           ? options.textCustomY
           : position === 'top'
           ? fontSize + 8
+          : position === 'center'
+          ? Math.round(imageSize.height / 2 + fontSize / 3)
           : imageSize.height - 10;
 
       oCtx.save();
-      oCtx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
+      oCtx.font = `${fontPreset.defaultWeight} ${fontSize}px ${fontPreset.cssFamily}`;
       oCtx.textAlign = 'center';
       oCtx.lineJoin = 'round';
       oCtx.miterLimit = 2;
 
       // Outer stroke
-      if (strokeWidth > 0) {
+      if (strokeEnabled && strokeWidth > 0) {
         oCtx.lineWidth = strokeWidth * 2;
         oCtx.strokeStyle = strokeColor;
         oCtx.strokeText(text, textX, textY);
@@ -842,9 +851,11 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     textColor: string,
     strokeColor: string,
     strokeWidth: number,
-    position: 'bottom' | 'top' | 'custom',
+    position: 'bottom' | 'top' | 'center' | 'custom',
     customX?: number,
-    customY?: number
+    customY?: number,
+    fontId?: string,
+    strokeEnabled: boolean = true
   ): ImageData => {
     const w = srcData.width;
     const h = srcData.height;
@@ -854,7 +865,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     const ctx = c.getContext('2d')!;
     ctx.putImageData(srcData, 0, 0);
 
-    ctx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
+    const fontPreset = OPEN_SOURCE_FONTS.find((f) => f.id === fontId) || OPEN_SOURCE_FONTS[0];
+    ctx.font = `${fontPreset.defaultWeight} ${fontSize}px ${fontPreset.cssFamily}`;
     ctx.textAlign = 'center';
     ctx.lineJoin = 'round';
     ctx.miterLimit = 2;
@@ -863,12 +875,14 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     let textY = h - 10;
     if (position === 'top') {
       textY = fontSize + 8;
+    } else if (position === 'center') {
+      textY = Math.round(h / 2 + fontSize / 3);
     } else if (position === 'custom' && customX !== undefined && customY !== undefined) {
       textX = customX;
       textY = customY;
     }
 
-    if (strokeWidth > 0) {
+    if (strokeEnabled && strokeWidth > 0) {
       ctx.lineWidth = strokeWidth * 2;
       ctx.strokeStyle = strokeColor;
       ctx.strokeText(text, textX, textY);
@@ -895,9 +909,11 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     const textColor = options.textColor ?? '#ffffff';
     const strokeColor = options.textStrokeColor ?? '#000000';
     const strokeWidth = options.textStrokeWidth ?? 3;
+    const strokeEnabled = options.textStrokeEnabled ?? true;
     const position = options.textPosition ?? 'bottom';
     const customX = options.textCustomX;
     const customY = options.textCustomY;
+    const fontId = options.textFontId;
 
     const newCurrent = renderTextOnFrame(
       currentData,
@@ -908,7 +924,9 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       strokeWidth,
       position,
       customX,
-      customY
+      customY,
+      fontId,
+      strokeEnabled
     );
 
     if (isGif && applyToAllFrames && gifFrames.length > 1) {
@@ -925,7 +943,9 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
             strokeWidth,
             position,
             customX,
-            customY
+            customY,
+            fontId,
+            strokeEnabled
           ),
         };
       });
@@ -2731,7 +2751,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
 
                 {/* 文字配字参数栏 */}
                 {options.tool === 'text' && (
-                  <div className="flex items-center gap-1.5 bg-blue-50/90 h-7 px-2 rounded-md border border-blue-200 shrink-0">
+                  <div className="flex items-center gap-1.5 bg-blue-50/90 h-7 px-2 rounded-md border border-blue-200 shrink-0 flex-wrap sm:flex-nowrap">
                     <span className="text-blue-900 text-[11px] font-bold whitespace-nowrap flex items-center gap-0.5">
                       <Type className="w-3 h-3 text-blue-600" />
                       <span>文字:</span>
@@ -2744,42 +2764,101 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                         setOptions((prev) => ({ ...prev, textString: e.target.value }));
                         renderOverlay();
                       }}
-                      className="w-20 sm:w-28 text-xs bg-white border border-blue-200 rounded px-1.5 py-0.5 focus:ring-1 focus:ring-blue-500 font-bold text-stone-800"
+                      className="w-16 sm:w-24 text-xs bg-white border border-blue-200 rounded px-1.5 py-0.5 focus:ring-1 focus:ring-blue-500 font-bold text-stone-800"
                     />
 
-                    {/* 常用预设快捷字 */}
-                    <div className="hidden sm:flex items-center gap-1">
-                      {['收到', '哈哈', '无语', '点赞', '好的'].map((w) => (
-                        <button
-                          key={w}
-                          type="button"
-                          onClick={() => {
-                            setOptions((prev) => ({ ...prev, textString: w }));
-                            renderOverlay();
-                          }}
-                          className="px-1.5 py-0.2 rounded text-[10px] bg-white hover:bg-blue-100 text-blue-900 font-medium border border-blue-200 transition-colors cursor-pointer"
-                        >
-                          {w}
-                        </button>
+                    {/* 开源商用字体选择 */}
+                    <select
+                      value={options.textFontId || 'zcool-kuaile'}
+                      onChange={(e) => {
+                        setOptions((prev) => ({ ...prev, textFontId: e.target.value }));
+                        renderOverlay();
+                      }}
+                      className="text-[11px] bg-white border border-blue-200 rounded px-1 py-0.5 font-medium text-blue-950 cursor-pointer max-w-[95px] truncate"
+                      title="选择开源商用字体"
+                    >
+                      {OPEN_SOURCE_FONTS.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
                       ))}
+                    </select>
+
+                    {/* 字号滑块 */}
+                    <div className="flex items-center gap-0.5 font-mono text-[11px] text-blue-900">
+                      <span className="text-[10px] text-stone-500">字号:</span>
+                      <input
+                        type="range"
+                        min="12"
+                        max="56"
+                        value={options.textFontSize ?? 22}
+                        onChange={(e) => {
+                          setOptions((prev) => ({ ...prev, textFontSize: parseInt(e.target.value) || 22 }));
+                          renderOverlay();
+                        }}
+                        className="w-10 sm:w-14 accent-blue-600 cursor-pointer h-1.5"
+                      />
+                      <span className="text-[10px] font-bold w-4">{options.textFontSize ?? 22}</span>
                     </div>
 
-                    <div className="h-4 w-px bg-blue-200 mx-0.5 shrink-0" />
+                    {/* 文字颜色 */}
+                    <div className="flex items-center gap-1 border-l border-blue-200 pl-1">
+                      <span className="text-[10px] text-stone-500">字色:</span>
+                      <label className="w-4 h-4 rounded-full border border-stone-300 shadow-2xs inline-block cursor-pointer relative" style={{ backgroundColor: options.textColor || '#ffffff' }}>
+                        <input
+                          type="color"
+                          value={options.textColor || '#ffffff'}
+                          onChange={(e) => {
+                            setOptions((prev) => ({ ...prev, textColor: e.target.value }));
+                            renderOverlay();
+                          }}
+                          className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                        />
+                      </label>
+                    </div>
+
+                    {/* 描边控制 */}
+                    <div className="flex items-center gap-1 border-l border-blue-200 pl-1">
+                      <label className="flex items-center gap-0.5 text-[10px] text-blue-950 font-bold cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={options.textStrokeEnabled ?? true}
+                          onChange={(e) => {
+                            setOptions((prev) => ({ ...prev, textStrokeEnabled: e.target.checked }));
+                            renderOverlay();
+                          }}
+                          className="rounded text-blue-600 scale-85"
+                        />
+                        <span>描边</span>
+                      </label>
+                      <label className="w-3.5 h-3.5 rounded-full border border-stone-300 inline-block cursor-pointer relative" style={{ backgroundColor: options.textStrokeColor || '#000000' }}>
+                        <input
+                          type="color"
+                          value={options.textStrokeColor || '#000000'}
+                          onChange={(e) => {
+                            setOptions((prev) => ({ ...prev, textStrokeColor: e.target.value }));
+                            renderOverlay();
+                          }}
+                          className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                        />
+                      </label>
+                    </div>
 
                     {/* 位置选择 */}
-                    <div className="flex items-center gap-0.5 text-[11px]">
+                    <div className="flex items-center gap-0.5 text-[11px] border-l border-blue-200 pl-1">
                       {[
-                        { id: 'bottom', label: '底部' },
-                        { id: 'top', label: '顶部' },
+                        { id: 'bottom', label: '底' },
+                        { id: 'top', label: '顶' },
+                        { id: 'center', label: '中' },
                       ].map((p) => (
                         <button
                           key={p.id}
                           type="button"
                           onClick={() => {
-                            setOptions((prev) => ({ ...prev, textPosition: p.id as 'bottom' | 'top' }));
+                            setOptions((prev) => ({ ...prev, textPosition: p.id as any }));
                             renderOverlay();
                           }}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors cursor-pointer ${
+                          className={`px-1 py-0.5 rounded text-[10px] font-medium transition-colors cursor-pointer ${
                             options.textPosition === p.id
                               ? 'bg-blue-600 text-white font-bold'
                               : 'bg-white text-stone-600 hover:bg-blue-100/60'
@@ -2788,23 +2867,6 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                           {p.label}
                         </button>
                       ))}
-                    </div>
-
-                    {/* 字号滑块 */}
-                    <div className="flex items-center gap-1 font-mono text-[11px] text-blue-900">
-                      <span className="text-[10px] text-stone-500">字号:</span>
-                      <input
-                        type="range"
-                        min="14"
-                        max="48"
-                        value={options.textFontSize ?? 22}
-                        onChange={(e) => {
-                          setOptions((prev) => ({ ...prev, textFontSize: parseInt(e.target.value) || 22 }));
-                          renderOverlay();
-                        }}
-                        className="w-12 sm:w-16 accent-blue-600 cursor-pointer h-1.5"
-                      />
-                      <span className="text-[10px] font-bold">{options.textFontSize ?? 22}px</span>
                     </div>
 
                     {/* 提交烙印按钮 */}

@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { removeBackgroundWithAI } from './aiBackgroundRemoval';
 import { removeSquareFrameBorder } from './frameBorderRemover';
+import { OPEN_SOURCE_FONTS, drawStickerText } from './stickerFontPresets';
 
 export const DEFAULT_COMPRESSION_OPTIONS: CompressionOptions = {
   enabled: true,
@@ -1150,26 +1151,26 @@ export function renderFramePipeline(
       ctx.putImageData(currentImageData, 0, 0);
     }
 
-    ctx.font = `900 ${fontSize}px "PingFang SC", "Microsoft YaHei", -apple-system, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.lineJoin = 'round';
-    ctx.miterLimit = 2;
+    const fontPreset = OPEN_SOURCE_FONTS.find((f) => f.id === wechat.captionFontId) || OPEN_SOURCE_FONTS[0];
+    const fontFamily = wechat.captionFontFamily || fontPreset.cssFamily;
 
-    const text = wechat.captionText!.trim();
-    const textX = targetW / 2;
-    let textY = targetH - 8;
-    if (wechat.captionPosition === 'top') {
-      textY = fontSize + 4;
-    }
-
-    // Outer stroke (black outline by default)
-    ctx.lineWidth = Math.max(3, Math.round(fontSize / 4.5));
-    ctx.strokeStyle = wechat.captionStrokeColor || '#000000';
-    ctx.strokeText(text, textX, textY);
-
-    // Inner text fill
-    ctx.fillStyle = wechat.captionColor || '#ffffff';
-    ctx.fillText(text, textX, textY);
+    drawStickerText(
+      ctx,
+      {
+        text: wechat.captionText!.trim(),
+        fontId: wechat.captionFontId || fontPreset.id,
+        fontFamily,
+        fontSize,
+        color: wechat.captionColor || '#ffffff',
+        strokeEnabled: wechat.captionStrokeEnabled ?? true,
+        strokeColor: wechat.captionStrokeColor || '#000000',
+        strokeWidth: wechat.captionStrokeWidth !== undefined ? wechat.captionStrokeWidth : Math.max(2, Math.round(fontSize / 6)),
+        position: (wechat.captionPosition as any) || 'bottom',
+        offsetY: wechat.captionOffsetY || 0,
+      },
+      targetW,
+      targetH
+    );
 
     currentImageData = ctx.getImageData(0, 0, targetW, targetH);
   }

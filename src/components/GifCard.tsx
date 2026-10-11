@@ -50,6 +50,11 @@ import {
   COMPRESSION_PRESETS,
 } from '../utils/gifProcessor';
 import { removeBackgroundWithAI } from '../utils/aiBackgroundRemoval';
+import {
+  OPEN_SOURCE_FONTS,
+  TEXT_COLOR_PRESETS,
+  STROKE_COLOR_PRESETS,
+} from '../utils/stickerFontPresets';
 
 interface GifCardProps {
   item: GifItem;
@@ -1383,9 +1388,9 @@ export const GifCard: React.FC<GifCardProps> = ({
                   </div>
 
                   {/* Caption Text Input & Presets */}
-                  <div className="bg-white p-2.5 rounded-lg border border-emerald-200 space-y-1.5">
+                  <div className="bg-white p-2.5 rounded-lg border border-emerald-200 space-y-2">
                     <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium text-stone-600 flex items-center gap-1">
+                      <span className="font-bold text-stone-700 flex items-center gap-1">
                         <Type className="w-3.5 h-3.5 text-[#07c160]" />
                         表情包配字文案:
                       </span>
@@ -1404,48 +1409,198 @@ export const GifCard: React.FC<GifCardProps> = ({
                       placeholder="在表情包上添加文字（如：收到、哈哈）"
                       value={item.options.wechat?.captionText || ''}
                       onChange={(e) => updateWeChatSetting('captionText', e.target.value)}
-                      className="w-full text-xs border border-stone-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-[#07c160]"
+                      className="w-full text-xs font-bold border border-stone-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#07c160]"
                     />
 
                     {/* Quick Caption Chips */}
-                    <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                    <div className="flex flex-wrap items-center gap-1">
                       {quickCardCaptions.map((text) => (
                         <button
                           key={text}
                           type="button"
                           onClick={() => updateWeChatSetting('captionText', text)}
-                          className="px-1.5 py-0.5 rounded text-[10px] bg-stone-100 hover:bg-stone-200 text-stone-700 cursor-pointer"
+                          className="px-1.5 py-0.5 rounded text-[10px] bg-stone-100 hover:bg-stone-200 text-stone-700 font-medium cursor-pointer"
                         >
                           {text}
                         </button>
                       ))}
                     </div>
 
-                    {/* Auto erase bottom text option */}
-                    <div className="pt-1.5 border-t border-emerald-100 space-y-1.5">
-                      <label className="flex items-center gap-1.5 text-[11px] text-stone-700 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={item.options.wechat?.eraseOriginalBottomText ?? false}
-                          onChange={(e) => updateWeChatSetting('eraseOriginalBottomText', e.target.checked)}
-                          className="rounded text-[#07c160] focus:ring-[#07c160] w-3.5 h-3.5"
-                        />
-                        <span className="font-bold text-amber-800">
-                          自动擦除原图底部旧文字区（防新旧文字重叠）
-                        </span>
-                      </label>
-
-                      {onSendToRetouch && (
-                        <button
-                          type="button"
-                          onClick={() => onSendToRetouch(item.file)}
-                          className="w-full py-1.5 px-2 bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
-                          title="进入画板：可逐帧用矩形或涂抹消除错误文字，并重新打字"
+                    {/* FONT SELECTION & FONT SIZE CONTROLS (If text exists or editing) */}
+                    <div className="pt-2 border-t border-emerald-100 space-y-2">
+                      {/* Font Family (Open Source Commercially Usable Fonts) */}
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="font-semibold text-stone-600 flex items-center gap-1">
+                            <Sparkles className="w-3 h-3 text-amber-500" />
+                            开源商用字体:
+                          </span>
+                          <span className="text-[10px] text-emerald-700 font-medium">免费商用</span>
+                        </div>
+                        <select
+                          value={item.options.wechat?.captionFontId || 'zcool-kuaile'}
+                          onChange={(e) => {
+                            const font = OPEN_SOURCE_FONTS.find((f) => f.id === e.target.value);
+                            updateWeChatSetting('captionFontId', e.target.value);
+                            if (font) updateWeChatSetting('captionFontFamily', font.cssFamily);
+                          }}
+                          className="w-full text-xs border border-stone-200 rounded-lg px-2 py-1 bg-stone-50 font-medium text-stone-800 cursor-pointer"
                         >
-                          <Paintbrush className="w-3.5 h-3.5 text-pink-600" />
-                          <span>🎨 进入修图画板：自由擦除旧文字并重新打字</span>
-                        </button>
-                      )}
+                          {OPEN_SOURCE_FONTS.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.displayName}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Font Size & Position */}
+                      <div className="grid grid-cols-2 gap-2">
+                        {/* Font Size */}
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="font-semibold text-stone-600">字号大小:</span>
+                            <span className="font-mono font-bold text-[#07c160] text-[10px]">
+                              {item.options.wechat?.captionFontSize ?? 22}px
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="14"
+                            max="44"
+                            value={item.options.wechat?.captionFontSize ?? 22}
+                            onChange={(e) =>
+                              updateWeChatSetting('captionFontSize', parseInt(e.target.value, 10) || 22)
+                            }
+                            className="w-full accent-[#07c160] cursor-pointer h-1.5"
+                          />
+                        </div>
+
+                        {/* Text Position */}
+                        <div className="space-y-1">
+                          <span className="font-semibold text-stone-600 text-[11px] block">位置:</span>
+                          <div className="flex items-center gap-1">
+                            {[
+                              { id: 'bottom', label: '底部' },
+                              { id: 'top', label: '顶部' },
+                              { id: 'center', label: '居中' },
+                            ].map((pos) => (
+                              <button
+                                key={pos.id}
+                                type="button"
+                                onClick={() => updateWeChatSetting('captionPosition', pos.id as any)}
+                                className={`flex-1 py-0.5 rounded text-[10px] font-bold border transition-colors cursor-pointer ${
+                                  (item.options.wechat?.captionPosition || 'bottom') === pos.id
+                                    ? 'bg-[#07c160] text-white border-[#07c160]'
+                                    : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+                                }`}
+                              >
+                                {pos.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Text Color & Stroke Options */}
+                      <div className="space-y-1.5 pt-1 border-t border-emerald-50">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="font-semibold text-stone-600">文字颜色:</span>
+                          <div className="flex items-center gap-1">
+                            <span
+                              className="w-3 h-3 rounded-full border border-stone-300"
+                              style={{ backgroundColor: item.options.wechat?.captionColor || '#ffffff' }}
+                            />
+                            <span className="font-mono text-[10px] text-stone-600">
+                              {item.options.wechat?.captionColor || '#ffffff'}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {TEXT_COLOR_PRESETS.slice(0, 6).map((c) => (
+                            <button
+                              key={c.value}
+                              type="button"
+                              onClick={() => updateWeChatSetting('captionColor', c.value)}
+                              className={`h-5 px-1.5 rounded text-[10px] font-bold border flex items-center gap-1 cursor-pointer ${
+                                (item.options.wechat?.captionColor || '#ffffff').toLowerCase() === c.value.toLowerCase()
+                                  ? 'border-stone-900 bg-stone-100 ring-1 ring-stone-900/20'
+                                  : 'border-stone-200 bg-white'
+                              }`}
+                            >
+                              <span className="w-2 h-2 rounded-full border border-stone-300" style={{ backgroundColor: c.value }} />
+                              <span>{c.name.split(' ')[0]}</span>
+                            </button>
+                          ))}
+                          <label className="h-5 px-1 rounded text-[10px] border border-stone-200 bg-white text-stone-500 cursor-pointer flex items-center">
+                            <input
+                              type="color"
+                              value={item.options.wechat?.captionColor || '#ffffff'}
+                              onChange={(e) => updateWeChatSetting('captionColor', e.target.value)}
+                              className="opacity-0 w-0 h-0"
+                            />
+                            <span>调色...</span>
+                          </label>
+                        </div>
+
+                        {/* Stroke Controls */}
+                        <div className="flex items-center justify-between text-[11px] pt-1">
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={item.options.wechat?.captionStrokeEnabled ?? true}
+                              onChange={(e) => updateWeChatSetting('captionStrokeEnabled', e.target.checked)}
+                              className="rounded text-[#07c160] focus:ring-[#07c160] w-3 h-3"
+                            />
+                            <span className="font-semibold text-stone-700">防吃字描边</span>
+                          </label>
+
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-stone-500">粗细:</span>
+                            {[1, 2, 3, 4].map((sw) => (
+                              <button
+                                key={sw}
+                                type="button"
+                                onClick={() => updateWeChatSetting('captionStrokeWidth', sw)}
+                                className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border transition-colors cursor-pointer ${
+                                  (item.options.wechat?.captionStrokeWidth ?? 3) === sw
+                                    ? 'bg-stone-900 text-white border-stone-900'
+                                    : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+                                }`}
+                              >
+                                {sw}px
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Auto erase bottom text option */}
+                      <div className="pt-1.5 border-t border-emerald-100 space-y-1.5">
+                        <label className="flex items-center gap-1.5 text-[11px] text-stone-700 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={item.options.wechat?.eraseOriginalBottomText ?? false}
+                            onChange={(e) => updateWeChatSetting('eraseOriginalBottomText', e.target.checked)}
+                            className="rounded text-[#07c160] focus:ring-[#07c160] w-3.5 h-3.5"
+                          />
+                          <span className="font-bold text-amber-800">
+                            自动擦除原图底部旧文字区（防新旧文字重叠）
+                          </span>
+                        </label>
+
+                        {onSendToRetouch && (
+                          <button
+                            type="button"
+                            onClick={() => onSendToRetouch(item.file)}
+                            className="w-full py-1.5 px-2 bg-pink-50 hover:bg-pink-100 text-pink-700 border border-pink-200 rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-2xs"
+                            title="进入画板：可逐帧用矩形或涂抹消除错误文字，并重新打字"
+                          >
+                            <Paintbrush className="w-3.5 h-3.5 text-pink-600" />
+                            <span>🎨 进入修图画板：自由擦除旧文字并重新打字</span>
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>

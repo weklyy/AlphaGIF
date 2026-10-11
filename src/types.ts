@@ -1,3 +1,5 @@
+import { StickerTextConfig } from './utils/stickerFontPresets';
+
 export interface WeChatStickerOptions {
   enabled: boolean; // whether to generate WeChat sticker format
   standardSize: '240' | 'max240' | 'original'; // 240x240 standard square, max 240px, or original
@@ -5,10 +7,15 @@ export interface WeChatStickerOptions {
   outlineWidth: number; // 1 - 4px (default 2px)
   outlineColor: string; // default '#ffffff'
   captionText?: string; // optional sticker text e.g. "收到", "点赞"
-  captionPosition?: 'bottom' | 'top'; // default 'bottom'
+  captionPosition?: 'bottom' | 'top' | 'center' | 'custom'; // default 'bottom'
   captionColor?: string; // default '#ffffff'
   captionStrokeColor?: string; // default '#000000'
-  captionFontSize?: number; // 14 - 32px (default 22)
+  captionStrokeWidth?: number; // 0 - 8px (default 3)
+  captionStrokeEnabled?: boolean; // default true
+  captionFontId?: string; // e.g. 'zcool-kuaile', 'noto-sans-sc'
+  captionFontFamily?: string; // CSS font-family string
+  captionFontSize?: number; // 12 - 48px (default 24)
+  captionOffsetY?: number; // vertical fine-tune
   eraseOriginalBottomText?: boolean; // 自动擦除原图底部旧文字区（防旧字重叠）
 }
 
@@ -215,6 +222,7 @@ export interface SlicedStickerItem {
   duration: number;
   representativeFrameData: ImageData;
   representativeDataUrl: string;
+  textConfig?: StickerTextConfig;
 }
 
 export interface BannerOptions {
@@ -289,11 +297,14 @@ export interface RetouchOptions {
   cloneStampAligned?: boolean;  // 仿制图章连续对齐模式 (true=相对位移对齐)
   // Text Tool options
   textString?: string;          // 当前输入的文字内容
-  textFontSize?: number;        // 文字大小 (14 - 48px)
+  textFontId?: string;          // 开源商用字体 ID (e.g. 'zcool-kuaile')
+  textFontSize?: number;        // 文字大小 (14 - 64px)
   textColor?: string;           // 文字颜色 (默认 '#ffffff')
+  textStrokeEnabled?: boolean;  // 是否开启描边 (默认 true)
   textStrokeColor?: string;     // 文字描边颜色 (默认 '#000000')
-  textStrokeWidth?: number;     // 描边粗细 (0 - 6px)
-  textPosition?: 'bottom' | 'top' | 'custom'; // 文字位置
+  textStrokeWidth?: number;     // 描边粗细 (0 - 8px)
+  textPosition?: 'bottom' | 'top' | 'center' | 'custom'; // 文字位置
+  textOffsetY?: number;         // 垂直偏移微调
   textCustomX?: number;         // 自定义 X 坐标
   textCustomY?: number;         // 自定义 Y 坐标
 }

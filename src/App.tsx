@@ -1784,6 +1784,10 @@ export default function App() {
                 {slicedStickers.length > 0 && (
                   <StickerGridResults
                     stickers={slicedStickers}
+                    onUpdateStickers={(newList) => {
+                      setSlicedStickers(newList);
+                      showNotification('✨ 已更新表情包文字，可直接下载单张或打包全部 ZIP！');
+                    }}
                     onImportAllToTab2={handleImportAllStickersToTab2}
                     onImportSingleToTab2={handleImportSingleStickerToTab2}
                     onSendToRetouch={handleSendStickerToRetouch}
@@ -1896,6 +1900,10 @@ export default function App() {
                 {imageSlicedStickers.length > 0 && (
                   <StickerGridResults
                     stickers={imageSlicedStickers}
+                    onUpdateStickers={(newList) => {
+                      setImageSlicedStickers(newList);
+                      showNotification('✨ 已更新静态表情包文字，可直接下载单张或打包全部 ZIP！');
+                    }}
                     onImportAllToTab2={handleImportAllImageStickersToTab3}
                     onImportSingleToTab2={handleImportSingleImageStickerToTab3}
                     onSendToRetouch={handleSendStickerToRetouch}

@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Image as ImageIcon,
   UserCheck,
+  Gift,
 } from 'lucide-react';
 import {
   GifItem,
@@ -55,6 +56,7 @@ import { MaterialsManager } from './components/WeChatSuite/MaterialsManager';
 import { ImageRetouchWorkspace } from './components/WeChatSuite/ImageRetouchWorkspace';
 import { Grid15SafePadder } from './components/WeChatSuite/Grid15SafePadder';
 import { IdPhotoMaker } from './components/IdPhoto/IdPhotoMaker';
+import { RedPacketCoverMaker } from './components/RedPacket/RedPacketCoverMaker';
 import { sliceVideoIntoStickers } from './utils/videoGridSlicer';
 import { sliceImageIntoStickers } from './utils/imageGridSlicer';
 import { processStickerItemFrameRemoval } from './utils/frameBorderRemover';
@@ -69,8 +71,8 @@ import {
 } from './utils/materialGenerator';
 
 export default function App() {
-  // Navigation state: Static Slicer, Dynamic Slicer, Consolidated Transparency & Retouch Tool, and ID Photo Maker
-  const [activeTab, setActiveTab] = useState<'suite_image' | 'suite_video' | 'transparency' | 'id_photo'>('suite_image');
+  // Navigation state: Static Slicer, Dynamic Slicer, Consolidated Transparency & Retouch Tool, WeChat Red Packet Cover, and ID Photo Maker
+  const [activeTab, setActiveTab] = useState<'suite_image' | 'suite_video' | 'transparency' | 'red_packet' | 'id_photo'>('suite_image');
   const [transparencySubView, setTransparencySubView] = useState<'batch' | 'retouch' | 'grid15_safe'>('batch');
 
   // Retouch & Watermark Workspace State
@@ -1594,14 +1596,14 @@ export default function App() {
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-base font-bold text-stone-900 leading-tight">
-                    微信表情包与智能证件照多功能制作套件
+                    微信表情包、红包封面与智能证件照制作套件
                   </h1>
-                  <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                    表情审核物料 • 1/2寸证件照换底 • 100%本地安全
+                  <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-800 border border-red-300">
+                    微信红包封面全套 • 表情审核物料 • 1/2寸证件照换底 • 100%本地安全
                   </span>
                 </div>
                 <p className="text-xs text-stone-500">
-                  静态/动图多宫格切片 ➔ 240×240 表情 ➔ 官方物料打包 | AI 智能证件照 ➔ 1寸/2寸 ➔ 自动抠图换红蓝白底 ➔ 6寸排版冲印
+                  红包封面(封面图 957×1278/挂件 1053×1746/气泡 480×384/故事 750×1250) | 静态/动图切片 ➔ 240×240 表情 | AI 证件照 ➔ 1/2寸换底冲印
                 </p>
               </div>
             </div>
@@ -1615,7 +1617,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Three Tab Navigation Bar */}
+        {/* Five Tab Navigation Bar */}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between border-t border-stone-100 pt-1 -mb-px overflow-x-auto">
             <div className="flex items-center gap-2 overflow-x-auto">
@@ -1678,6 +1680,22 @@ export default function App() {
 
               <button
                 type="button"
+                onClick={() => setActiveTab('red_packet')}
+                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                  activeTab === 'red_packet'
+                    ? 'border-red-600 text-red-600'
+                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                }`}
+              >
+                <Gift className="w-4 h-4 text-red-600" />
+                <span>微信红包封面 (封面图·挂件·气泡·故事)</span>
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
+                  全新功能
+                </span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setActiveTab('id_photo')}
                 className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
                   activeTab === 'id_photo'
@@ -1688,7 +1706,7 @@ export default function App() {
                 <UserCheck className="w-4 h-4" />
                 <span>证件照制作 (1寸/2寸·AI抠图换底)</span>
                 <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800">
-                  全新功能
+                  智能高清
                 </span>
               </button>
             </div>
@@ -2192,7 +2210,16 @@ export default function App() {
         )}
 
         {/* ======================================================== */}
-        {/* TAB 4: 证件照制作 (AI ID Photo Maker & Background Replacer) */}
+        {/* TAB 4: 微信红包封面制作 (WeChat Red Packet Cover Maker) */}
+        {/* ======================================================== */}
+        {activeTab === 'red_packet' && (
+          <RedPacketCoverMaker
+            onNotification={showNotification}
+          />
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 5: 证件照制作 (AI ID Photo Maker & Background Replacer) */}
         {/* ======================================================== */}
         {activeTab === 'id_photo' && (
           <IdPhotoMaker
@@ -2205,7 +2232,7 @@ export default function App() {
       {/* Footer */}
       <footer className="mt-auto py-6 border-t border-stone-200 bg-white text-center text-xs text-stone-400">
         <p>
-          微信表情包一站式切片与全套审核物料生成器 • 严格遵循 240×240 / &lt;500KB / 750×400横幅 / 50×50图标 / 赞赏引导与致谢规范 • 纯本地离线运算
+          微信表情包切片与物料生成器 • 微信红包封面全套制作 (封面图 957×1278 / 封面挂件 1053×1746 / 气泡挂件 480×384 / 封面故事 750×1250) • 智能证件照制作 • 纯本地离线运算
         </p>
       </footer>
     </div>

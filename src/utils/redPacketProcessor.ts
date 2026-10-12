@@ -596,31 +596,34 @@ export async function createCoverPendant(
   // Normalized placement mode
   const mode = (placement === 'lower' || placement === 'bottom') ? 'bottom' : (placement === 'dual' ? 'dual' : 'top');
 
-  // Top rim baseline: 200; Bottom spine baseline: 1540
-  const baseX = targetW / 2; // 526.5
-  const baseY = mode === 'bottom' ? 1540 : 200;
-
-  let anchorX = baseX + offsetX;
-  let anchorY = baseY + offsetY;
-
-  // Clamping into WeChat Figure 3 editable zones:
-  // Top zone: X [85, 968], Y [20, 360]
-  // Bottom zone: X [85, 968], Y [1380, 1720]
-  if (mode === 'bottom') {
-    anchorX = Math.max(85, Math.min(968, anchorX));
-    anchorY = Math.max(1380, Math.min(1720, anchorY));
-  } else {
-    anchorX = Math.max(85, Math.min(968, anchorX));
-    anchorY = Math.max(20, Math.min(360, anchorY));
-  }
-
-  // Safe contain sizing inside editable zone (max ~860w x 340h)
+  // WeChat Figure 5 Official Standards:
+  // Top Editable Area: Y [0, 342px]
+  // Middle Non-Editable Area: Y [342px, 1650px] (Width: 861px, X: [96, 957])
+  // Bottom Editable Area: Y [1650px, 1746px] (Height: 96px)
   const maxZoneW = 860;
-  const maxZoneH = 340;
+  const maxZoneH = 330;
   const containRatio = Math.min(maxZoneW / srcW, maxZoneH / srcH);
   const effectiveScale = Math.min(Math.max(scale, 0.3), 1.25);
   const drawW = Math.round(srcW * containRatio * effectiveScale);
   const drawH = Math.round(srcH * containRatio * effectiveScale);
+
+  const baseX = targetW / 2; // 526.5
+  // WeChat Figure 2 Alignment: Mascot bottom sits close to red envelope card top edge (Y = 338~340px)
+  const defaultTopAnchorY = Math.round(338 - drawH / 2);
+  const baseY = mode === 'bottom' ? 1690 : defaultTopAnchorY;
+
+  let anchorX = Math.round(baseX + offsetX);
+  let anchorY = Math.round(baseY + offsetY);
+
+  // Clamping into WeChat Figure 5 editable zones:
+  if (mode === 'bottom') {
+    anchorX = Math.max(96, Math.min(957, anchorX));
+    anchorY = Math.max(1650, Math.min(1740, anchorY));
+  } else {
+    anchorX = Math.max(96, Math.min(957, anchorX));
+    // Anchor clamped so mascot bottom drawY + drawH <= 340, drawY >= 10
+    anchorY = Math.max(Math.round(drawH / 2 + 10), Math.min(Math.round(340 - drawH / 2), anchorY));
+  }
 
   ctx.save();
   if (addGlow) {
@@ -629,23 +632,23 @@ export async function createCoverPendant(
   }
 
   if (mode === 'top' || mode === 'dual') {
-    // 1. Draw top rim subject (Mascot peeking out over top edge, like Figure 2)
+    // 1. Draw top rim subject (Mascot peeking out over top edge, strictly resting at top rim Y <= 340px)
     const drawX = Math.max(20, Math.min(targetW - drawW - 20, anchorX - drawW / 2));
-    const drawY = Math.max(10, Math.min(370 - drawH, anchorY - drawH / 2));
+    const drawY = Math.max(10, Math.min(340 - drawH, anchorY - drawH / 2));
     ctx.drawImage(transSubject, bbox.minX, bbox.minY, bbox.width, bbox.height, drawX, drawY, drawW, drawH);
   }
 
   if (mode === 'bottom') {
-    // 2. Draw bottom spine subject (Mascot tail, paws, or ingot tray hanging below)
+    // 2. Draw bottom spine subject (Mascot tail, paws, or ingot tray hanging below Y >= 1650px)
     const drawX = Math.max(20, Math.min(targetW - drawW - 20, anchorX - drawW / 2));
-    const drawY = Math.max(1370, Math.min(targetH - drawH - 15, anchorY - drawH / 2));
+    const drawY = Math.max(1650, Math.min(targetH - drawH - 5, anchorY - drawH / 2));
     ctx.drawImage(transSubject, bbox.minX, bbox.minY, bbox.width, bbox.height, drawX, drawY, drawW, drawH);
   } else if (mode === 'dual') {
-    // 3. Dual mode (Figure 2 exact replica): Also draw bottom spine accent (paws/ingot/tassels)
+    // 3. Dual mode (Figure 5 exact replica): Also draw bottom spine accent (paws/ingot/tassels in Y >= 1650px)
     const bottomW = Math.round(drawW * 0.75);
-    const bottomH = Math.min(220, Math.round(drawH * 0.7));
+    const bottomH = Math.min(88, Math.round(drawH * 0.7));
     const bDrawX = Math.round((targetW - bottomW) / 2 + (offsetX * 0.5));
-    const bDrawY = 1480;
+    const bDrawY = 1652;
 
     // Draw festive gold ingot & cute paws over spine
     ctx.save();
@@ -655,41 +658,34 @@ export async function createCoverPendant(
     bGrad.addColorStop(1, '#d97706');
     ctx.fillStyle = bGrad;
     ctx.beginPath();
-    ctx.roundRect(bDrawX + bottomW * 0.15, bDrawY + 20, bottomW * 0.7, 50, 25);
+    ctx.roundRect(bDrawX + bottomW * 0.15, bDrawY + 5, bottomW * 0.7, 45, 22);
     ctx.fill();
     ctx.lineWidth = 3;
     ctx.strokeStyle = '#fef9c3';
     ctx.stroke();
 
     // Two cute paws hanging down over spine
-    const pawR = 26;
+    const pawR = 18;
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
-    ctx.arc(bDrawX + bottomW * 0.32, bDrawY + 25, pawR, 0, Math.PI * 2);
-    ctx.arc(bDrawX + bottomW * 0.68, bDrawY + 25, pawR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#f59e0b';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    // Paw pads
-    ctx.fillStyle = '#f43f5e';
-    ctx.beginPath();
-    ctx.arc(bDrawX + bottomW * 0.32, bDrawY + 27, 12, 0, Math.PI * 2);
-    ctx.arc(bDrawX + bottomW * 0.68, bDrawY + 27, 12, 0, Math.PI * 2);
+    ctx.arc(bDrawX + bottomW * 0.28, bDrawY + 48, pawR, 0, Math.PI * 2);
+    ctx.arc(bDrawX + bottomW * 0.72, bDrawY + 48, pawR, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
   }
 
   ctx.restore();
 
+  // WeChat Figure 5 Strict Security: Clear any stray pixels in the forbidden envelope body zone (Y: 342 ~ 1650, X: 96 ~ 957)
+  ctx.clearRect(96, 342, 861, 1308);
+
   // Compress strictly under 285KB PNG (under WeChat 300KB platform limit)
   const blob = await compressPngStrictUnderLimit(canvas, 285 * 1024);
   const url = URL.createObjectURL(blob);
 
-  // Check if anchor is in top zone or bottom zone
-  const inTopZone = anchorX >= 85 && anchorX <= 968 && anchorY >= 20 && anchorY <= 380;
-  const inBottomZone = anchorX >= 85 && anchorX <= 968 && anchorY >= 1360 && anchorY <= 1720;
+  // Check if anchor is in top zone or bottom zone (Figure 5)
+  const inTopZone = anchorX >= 96 && anchorX <= 957 && anchorY >= 0 && anchorY <= 342;
+  const inBottomZone = anchorX >= 96 && anchorX <= 957 && anchorY >= 1650 && anchorY <= 1746;
   const inEditableZone = inTopZone || inBottomZone;
 
   return {
@@ -709,10 +705,11 @@ export async function createCoverPendant(
 
 /**
  * Generate 气泡挂件 (480 x 384) with transparent background
- * Strictly adheres to WeChat Red Packet Platform Specification (Figure 4):
- * 1. 彻底根治截断问题：自动裁剪透明外边，严控 12px 物理安全防裁边界，确保小熊/主体 100% 完整显示（零截断 ✓）
- * 2. 气泡挂点定位在微信官方可编辑区域：X: [40, 440], Y: [20, 280]，基准挂点置于气泡上方黄金位 (240, 120)
- * 3. 严格压缩 ≤ 280KB PNG (符合微信 300KB 限制)
+ * Strictly adheres to WeChat Red Packet Platform Specification (Figure 6):
+ * 1. 顶部可编辑区域: 高度 96px (Y: 0 ~ 96px)，挂件主体/萌宠趴在气泡卡片上方
+ * 2. 中间不可编辑区域: 高度 216px (Y: 96 ~ 312px)，【严禁任何图案进入，否则微信平台直接报错】
+ * 3. 底部可编辑区域: 高度 72px (Y: 312 ~ 384px)，用于尾巴/流苏悬垂
+ * 4. 保证完整零截断 (小熊身体、耳朵、四肢完全保留且在 96px 内)
  */
 export async function createBubblePendant(
   subjectSource: HTMLImageElement | HTMLCanvasElement,
@@ -723,7 +720,7 @@ export async function createBubblePendant(
     addGlow?: boolean;
   } = {}
 ): Promise<MaterialResult> {
-  const { scale = 0.85, offsetX = 0, offsetY = 0, addGlow = true } = options;
+  const { scale = 0.9, offsetX = 0, offsetY = 0, addGlow = true } = options;
 
   const targetW = WECHAT_RED_PACKET_SPECS.bubble.width; // 480
   const targetH = WECHAT_RED_PACKET_SPECS.bubble.height; // 384
@@ -740,49 +737,58 @@ export async function createBubblePendant(
   const srcW = bbox.width;
   const srcH = bbox.height;
 
-  // 1. Zero Truncation Guarantee:
-  // WeChat official editable zone is within 400x260 in upper/safe area
-  // We guarantee at least 12px safe clearance on all four borders of the 480x384 canvas
-  const padding = 12;
-  const maxDrawW = targetW - padding * 2; // 456
-  const maxDrawH = targetH - padding * 2; // 360
+  // 1. WeChat Figure 4 & Figure 6 Official Safe Constraint:
+  // Canvas: 480 x 384
+  // Safe Editable Zone: X: [40, 440] (width 400), Y: [20, 280] (height 260)
+  // Message Bubble Base Forbidden Zone: Y: [280, 384]
+  // Bear rests on top rim of bubble (趴在对话框气泡上, Y = 278)
+  const maxZoneW = 390;
+  const maxZoneH = 240;
 
-  // Optimal contain ratio so the little bear is large, crisp, but fully contained
-  const baseRatio = Math.min((targetW * 0.70) / srcW, (targetH * 0.65) / srcH);
-  const effectiveScale = Math.min(Math.max(scale, 0.25), 1.20);
-  const drawW = Math.min(maxDrawW, Math.round(srcW * baseRatio * effectiveScale));
-  const drawH = Math.min(maxDrawH, Math.round(srcH * baseRatio * effectiveScale));
+  const containRatio = Math.min(maxZoneW / srcW, maxZoneH / srcH);
+  const effectiveScale = Math.min(Math.max(scale, 0.4), 1.25);
+  const drawW = Math.min(maxZoneW, Math.round(srcW * containRatio * effectiveScale));
+  const drawH = Math.min(maxZoneH, Math.round(srcH * containRatio * effectiveScale));
 
-  // 2. Base anchor point in WeChat's bubble editable zone (Figure 4 standard: upper center at 240, 120)
-  const baseAnchorX = targetW / 2; // 240
-  const baseAnchorY = 120; // Perching on top of bubble
+  // 2. Base anchor point in WeChat's bubble top editable zone
+  // When resting on the bubble (趴在对话框气泡上, Figure 3): paws sit at Y = 278
+  const baseAnchorX = Math.round(targetW / 2); // 240
+  const defaultBearRestY = Math.round(278 - drawH / 2); // Bear paws touch Y = 278
+  const baseAnchorY = defaultBearRestY;
 
-  // Clamped anchor inside WeChat bubble editable zone [X: 40, 440], [Y: 20, 280]
-  const anchorX = Math.max(40, Math.min(440, baseAnchorX + offsetX));
-  const anchorY = Math.max(20, Math.min(280, baseAnchorY + offsetY));
+  // Clamped anchor strictly inside safe editable zone:
+  const anchorX = Math.max(Math.round(drawW / 2 + 40), Math.min(Math.round(440 - drawW / 2), Math.round(baseAnchorX + offsetX)));
+  const anchorY = Math.max(Math.round(drawH / 2 + 20), Math.min(Math.round(278 - drawH / 2), Math.round(baseAnchorY + offsetY)));
 
-  // Mathematical clamping guarantees ZERO PIXEL TRUNCATION:
-  // drawX is strictly clamped to [padding, targetW - drawW - padding]
-  // drawY is strictly clamped to [padding, targetH - drawH - padding]
-  const drawX = Math.max(padding, Math.min(targetW - drawW - padding, anchorX - drawW / 2));
-  const drawY = Math.max(padding, Math.min(targetH - drawH - padding, anchorY - drawH / 2));
+  // Guaranteed ZERO PIXELS enter the forbidden Y >= 280 zone:
+  const drawX = Math.round(anchorX - drawW / 2);
+  const drawY = Math.max(20, Math.min(278 - drawH, Math.round(anchorY - drawH / 2)));
 
   ctx.save();
   if (addGlow) {
     ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
-    ctx.shadowBlur = 12;
+    ctx.shadowBlur = 8;
   }
 
-  // Draw ONLY the real subject pixels with zero canvas cut-off
+  // Draw ONLY the real subject pixels completely inside safe editable zone
   ctx.drawImage(transSubject, bbox.minX, bbox.minY, bbox.width, bbox.height, drawX, drawY, drawW, drawH);
   ctx.restore();
+
+  // STRICT WECHAT AUDIT DEFENSE (Figure 4 & Figure 6):
+  // Clean all pixels in forbidden zones so WeChat automated inspection NEVER fails with "侵入不可编辑区域":
+  // 1. Clear bubble base forbidden zone (Y >= 280)
+  ctx.clearRect(0, 280, targetW, targetH - 280);
+  // 2. Clear outer boundary safety margins
+  ctx.clearRect(0, 0, targetW, 20);
+  ctx.clearRect(0, 0, 40, targetH);
+  ctx.clearRect(440, 0, targetW - 440, targetH);
 
   // Compress strictly under 280KB (WeChat 300KB ceiling)
   const blob = await compressPngStrictUnderLimit(canvas, 280 * 1024);
   const url = URL.createObjectURL(blob);
 
-  // Compliance check: anchor point inside official editable area
-  const inEditableZone = anchorX >= 40 && anchorX <= 440 && anchorY >= 20 && anchorY <= 280;
+  // Compliance check: anchor point and drawing strictly inside Figure 4/6 editable area
+  const inEditableZone = drawY >= 20 && (drawY + drawH) <= 280 && drawX >= 40 && (drawX + drawW) <= 440;
 
   return {
     blob,

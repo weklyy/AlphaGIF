@@ -160,17 +160,17 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                 {/* Ambient Soft Red Glow behind Red Envelope */}
                 <div className="absolute w-56 h-80 rounded-full bg-red-400/20 blur-3xl pointer-events-none" />
 
-                {/* Full 1053 x 1746 Frame: Envelope Card sits inside, Pendant sits gracefully above and on spine */}
+                {/* Full 1053 x 1746 Frame: Envelope Card sits inside, Pendant sits gracefully above and on spine (WeChat Figure 5 Standard) */}
                 <div className="relative z-10 w-[270px] sm:w-[285px] aspect-[1053/1746] h-[450px] sm:h-[475px] flex items-center justify-center">
                   
-                  {/* 1. Authentic Floating WeChat Red Envelope Card (957 x 1278 inside 1053 x 1746 frame) */}
+                  {/* 1. Authentic Floating WeChat Red Envelope Card (Figure 5: 861 x 1308 non-editable body starting at Y: 342px) */}
                   <div
-                    className="absolute rounded-[26px] overflow-hidden shadow-[0_20px_45px_-8px_rgba(185,28,28,0.38)] border border-red-300/40 bg-gradient-to-b from-[#e53935] via-[#d32f2f] to-[#b71c1c] flex flex-col justify-between"
+                    className="absolute rounded-[24px] overflow-hidden shadow-[0_20px_45px_-8px_rgba(185,28,28,0.38)] border border-red-300/40 bg-gradient-to-b from-[#e53935] via-[#d32f2f] to-[#b71c1c] flex flex-col justify-between"
                     style={{
-                      top: '13.4%',
-                      height: '73.2%',
-                      left: '4.56%',
-                      width: '90.88%',
+                      top: '19.59%', // exactly 342px in 1746px (Figure 5)
+                      height: '74.91%', // exactly 1308px in 1746px (Figure 5)
+                      left: '9.12%', // exactly 96px in 1053px (Figure 5)
+                      width: '81.77%', // exactly 861px in 1053px (Figure 5)
                     }}
                   >
                     {/* Underlying Cover Image / Video (957 x 1278) */}
@@ -199,28 +199,28 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                       )}
 
                       {/* Gradient shading for header and bottom flap legibility */}
-                      <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-black/40 via-black/15 to-transparent pointer-events-none" />
-                      <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/45 via-black/15 to-transparent pointer-events-none" />
+                      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/40 via-black/15 to-transparent pointer-events-none" />
+                      <div className="absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-black/45 via-black/15 to-transparent pointer-events-none" />
                     </div>
 
                     {/* Top Header & Sender Information */}
-                    <div className="relative z-20 w-full pt-4 px-4 flex flex-col items-center text-center">
-                      <div className="w-10 h-10 rounded-2xl bg-white text-lg flex items-center justify-center shadow-md border-2 border-amber-200/90 mb-1">
+                    <div className="relative z-20 w-full pt-3 px-3 flex flex-col items-center text-center">
+                      <div className="w-9 h-9 rounded-2xl bg-white text-base flex items-center justify-center shadow-md border-2 border-amber-200/90 mb-1">
                         {senderAvatar}
                       </div>
                       <h3 className="text-xs font-bold text-white drop-shadow-md">
                         {senderName}
                       </h3>
-                      <p className="text-[10px] text-amber-200/90 font-medium drop-shadow-sm">
+                      <p className="text-[9px] text-amber-200/90 font-medium drop-shadow-sm">
                         发来一个定制微信红包
                       </p>
-                      <p className="text-xs font-bold text-white mt-1.5 drop-shadow-md tracking-wide px-2 line-clamp-2">
+                      <p className="text-xs font-bold text-white mt-1 drop-shadow-md tracking-wide px-2 line-clamp-2">
                         “{blessingText}”
                       </p>
                     </div>
 
                     {/* Authentic WeChat Envelope Curved Flap Line */}
-                    <div className="absolute inset-x-0 bottom-14 h-22 pointer-events-none z-10">
+                    <div className="absolute inset-x-0 bottom-12 h-20 pointer-events-none z-10">
                       <svg
                         viewBox="0 0 285 90"
                         preserveAspectRatio="none"
@@ -234,56 +234,70 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                     </div>
 
                     {/* Golden "開" Coin Button (Sitting gracefully on the flap joint) */}
-                    <div className="relative z-25 pb-5 flex flex-col items-center">
+                    <div className="relative z-25 pb-4 flex flex-col items-center">
                       <button
                         type="button"
                         onClick={handleOpenClick}
-                        className={`w-16 h-16 rounded-full bg-gradient-to-b from-[#ffe57f] via-[#f59e0b] to-[#b45309] text-[#78350f] font-black text-xl shadow-[0_8px_20px_rgba(0,0,0,0.35)] flex items-center justify-center border-3 border-[#fffbeb] active:scale-95 transition-all cursor-pointer ${
+                        className={`w-15 h-15 rounded-full bg-gradient-to-b from-[#ffe57f] via-[#f59e0b] to-[#b45309] text-[#78350f] font-black text-xl shadow-[0_8px_20px_rgba(0,0,0,0.35)] flex items-center justify-center border-3 border-[#fffbeb] active:scale-95 transition-all cursor-pointer ${
                           isOpenCoinRotating ? 'animate-spin scale-110' : 'hover:scale-105'
                         }`}
                         title="点击拆开红包"
                       >
                         <span>開</span>
                       </button>
-                      <span className="text-[9px] text-amber-100 mt-1.5 font-medium drop-shadow-sm bg-black/25 px-2 py-0.5 rounded-full backdrop-blur-xs">
+                      <span className="text-[8px] text-amber-100 mt-1 font-medium drop-shadow-sm bg-black/25 px-2 py-0.5 rounded-full backdrop-blur-xs">
                         点击「開」查看拆开详情
                       </span>
                     </div>
                   </div>
 
                   {/* 2. Transparent Cover Pendant (1053 x 1746) Overlay */}
-                  {/* Top mascot naturally peeks out ABOVE the envelope card (在封面的上边), bottom rests on spine */}
+                  {/* Top mascot sits directly along the envelope top edge (Y = 342px), matching Figure 2 and Figure 5 */}
                   {pendantResult && (
                     <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center animate-in fade-in">
                       <img
                         src={pendantResult.url}
-                        alt="封面挂件 (图2标准)"
+                        alt="封面挂件 (图5标准)"
                         className="w-full h-full object-contain pointer-events-none drop-shadow-lg"
                       />
                     </div>
                   )}
 
-                  {/* 3. Safe Area Guideline Overlay (WeChat Figure 3 Standard) */}
+                  {/* 3. Safe Area Guideline Overlay (WeChat Figure 5 Exact Coordinates) */}
                   {showSafeAreaGuide && (
-                    <div className="absolute inset-0 pointer-events-none z-35 flex flex-col justify-between p-1.5 text-[9px] font-bold">
-                      {/* Top probe zone (上侧探头区) */}
-                      <div className="h-[20.6%] mx-[4%] border-2 border-dashed border-emerald-400 bg-emerald-500/20 rounded-xl flex items-center justify-center text-emerald-950 font-bold">
+                    <div className="absolute inset-0 pointer-events-none z-35 text-[8px] font-bold">
+                      {/* Top editable zone: 342px height (0 ~ 19.59%) */}
+                      <div
+                        className="absolute inset-x-0 top-0 border-2 border-dashed border-emerald-400 bg-emerald-500/15 rounded-t-xl flex items-center justify-center text-emerald-950 font-bold"
+                        style={{ height: '19.59%' }}
+                      >
                         <span className="bg-white/95 px-2 py-0.5 rounded shadow-xs border border-emerald-300">
-                          ✅ 图3：上侧可编辑区 (探头在封面上边)
+                          ✅ 图5：上侧可编辑区 (高342px · 探头挂靠处)
                         </span>
                       </div>
 
-                      {/* Middle envelope forbidden area */}
-                      <div className="h-[58.8%] mx-[4%] my-1 border border-dashed border-red-400/60 bg-red-500/10 rounded-xl flex items-center justify-center text-red-900 font-bold">
+                      {/* Middle envelope forbidden area: 1308px height, 861px width (19.59% ~ 94.50%) */}
+                      <div
+                        className="absolute border border-dashed border-red-400/80 bg-red-500/10 rounded-xl flex items-center justify-center text-red-900 font-bold"
+                        style={{
+                          top: '19.59%',
+                          height: '74.91%',
+                          left: '9.12%',
+                          width: '81.77%',
+                        }}
+                      >
                         <span className="bg-white/95 px-2 py-0.5 rounded shadow-xs border border-red-300">
-                          🚫 封面主体区 (禁止遮挡)
+                          🚫 图5：不可编辑区域 (1308×861 · 禁止挂件进入)
                         </span>
                       </div>
 
-                      {/* Bottom spine zone (下侧脊端区) */}
-                      <div className="h-[20.6%] mx-[4%] border-2 border-dashed border-emerald-400 bg-emerald-500/20 rounded-xl flex items-center justify-center text-emerald-950 font-bold">
+                      {/* Bottom editable spine zone: 96px height (94.50% ~ 100%) */}
+                      <div
+                        className="absolute inset-x-0 bottom-0 border-2 border-dashed border-emerald-400 bg-emerald-500/15 rounded-b-xl flex items-center justify-center text-emerald-950 font-bold"
+                        style={{ height: '5.50%' }}
+                      >
                         <span className="bg-white/95 px-2 py-0.5 rounded shadow-xs border border-emerald-300">
-                          ✅ 图3：下侧可编辑区 (脊端垂饰)
+                          ✅ 图5：下侧可编辑区 (高96px · 脊端垂饰)
                         </span>
                       </div>
                     </div>
@@ -318,20 +332,20 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                   {/* Authentic WeChat Red Packet Bubble Card with Attached Pendant */}
                   <div className="flex items-start justify-end gap-2.5 w-full pr-1">
                     <div className="relative flex flex-col items-end">
-                      {/* 480x384 Bubble Pendant attached cleanly to the top-right corner of the red packet card */}
+                      {/* 480x384 Bubble Pendant attached cleanly to the red packet card (paws rest right on top rim) */}
                       {bubbleResult && (
-                        <div className="relative z-20 -mb-5 -mr-2 w-28 h-22 pointer-events-none drop-shadow-md flex items-center justify-center">
+                        <div className="absolute -top-[93px] right-2 w-[160px] aspect-[480/384] z-20 pointer-events-none drop-shadow-md">
                           <img
                             src={bubbleResult.url}
-                            alt="气泡挂件 (完整形象)"
-                            className="max-h-full max-w-full object-contain"
+                            alt="气泡挂件 (趴在对话框气泡上)"
+                            className="w-full h-full object-contain"
                           />
 
                           {/* Guide Crosshair if Safe Area is active */}
                           {showSafeAreaGuide && (
                             <div className="absolute inset-0 border border-dashed border-emerald-500 bg-emerald-500/10 rounded-lg flex items-center justify-center">
                               <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
-                                挂点 ({bubbleResult.anchorX ?? 240}, {bubbleResult.anchorY ?? 120})
+                                挂点 ({bubbleResult.anchorX ?? 240}, {bubbleResult.anchorY ?? 200})
                               </span>
                             </div>
                           )}

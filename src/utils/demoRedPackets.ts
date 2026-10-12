@@ -275,51 +275,52 @@ async function generateFortuneFestiveTheme(): Promise<{
   pctx.fillText('招财', 0, 5);
   pctx.restore();
 
-  // 3. Bubble Pendant: 480 x 384 (Figure 4: Upper editable zone X: 240, Y: 120 with zero truncation)
+  // 3. Bubble Pendant: 480 x 384 (Figure 6: Upper editable zone Y: 0~96px with ZERO pixels in non-editable zone)
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
   const bctx = bubbleCanvas.getContext('2d')!;
   bctx.clearRect(0, 0, 480, 384);
 
-  // Cute Little Bear / Fortune Bag centered at (240, 120), safe padding 16px
+  // Fortune Pouch centered at (240, 48), completely within Y: 4px ~ 92px
   bctx.save();
-  bctx.translate(240, 120);
+  bctx.translate(240, 52);
+  bctx.scale(0.68, 0.68);
   bctx.shadowColor = 'rgba(0,0,0,0.25)';
-  bctx.shadowBlur = 12;
+  bctx.shadowBlur = 8;
 
   // Fortune Pouch
-  const pouchGrad = bctx.createLinearGradient(-50, -40, 50, 60);
+  const pouchGrad = bctx.createLinearGradient(-45, -35, 45, 50);
   pouchGrad.addColorStop(0, '#ef4444');
   pouchGrad.addColorStop(1, '#991b1b');
   bctx.fillStyle = pouchGrad;
   bctx.beginPath();
-  bctx.ellipse(0, 18, 55, 62, 0, 0, Math.PI * 2);
+  bctx.ellipse(0, 16, 50, 54, 0, 0, Math.PI * 2);
   bctx.fill();
 
   // Gold tie ribbon
   bctx.fillStyle = '#fbbf24';
   bctx.beginPath();
-  bctx.ellipse(0, -28, 28, 10, 0, 0, Math.PI * 2);
+  bctx.ellipse(0, -25, 24, 8, 0, 0, Math.PI * 2);
   bctx.fill();
 
   // Top frills
   bctx.fillStyle = '#dc2626';
   bctx.beginPath();
-  bctx.moveTo(-28, -28);
-  bctx.lineTo(-36, -58);
-  bctx.lineTo(0, -46);
-  bctx.lineTo(36, -58);
-  bctx.lineTo(28, -28);
+  bctx.moveTo(-25, -25);
+  bctx.lineTo(-32, -50);
+  bctx.lineTo(0, -40);
+  bctx.lineTo(32, -50);
+  bctx.lineTo(25, -25);
   bctx.closePath();
   bctx.fill();
 
   // Gold character "吉" on pouch
   bctx.fillStyle = '#fbbf24';
-  bctx.font = 'bold 32px sans-serif';
+  bctx.font = 'bold 28px sans-serif';
   bctx.textAlign = 'center';
   bctx.textBaseline = 'middle';
-  bctx.fillText('吉', 0, 20);
+  bctx.fillText('吉', 0, 18);
   bctx.restore();
 
   // 4. Cover Story: 750 x 1250 (Full poster / branding card)
@@ -537,7 +538,7 @@ async function generateLionDanceTheme(): Promise<{
   drawLionPaw(75);
   pctx.restore();
 
-  // 3. Bubble Pendant: 480 x 384 (X: 240, Y: 120 with zero truncation)
+  // 3. Bubble Pendant: 480 x 384 (Figure 6: Upper zone Y: 0~96px strictly)
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
@@ -545,24 +546,24 @@ async function generateLionDanceTheme(): Promise<{
   bctx.clearRect(0, 0, 480, 384);
 
   bctx.save();
-  bctx.translate(240, 120);
-  bctx.shadowColor = 'rgba(0,0,0,0.3)';
-  bctx.shadowBlur = 14;
+  bctx.translate(240, 48);
+  bctx.shadowColor = 'rgba(0,0,0,0.25)';
+  bctx.shadowBlur = 8;
   bctx.fillStyle = '#fbbf24';
   bctx.beginPath();
-  bctx.arc(0, 0, 60, 0, Math.PI * 2);
+  bctx.arc(0, 0, 38, 0, Math.PI * 2);
   bctx.fill();
-  bctx.lineWidth = 4;
+  bctx.lineWidth = 3;
   bctx.strokeStyle = '#fef08a';
   bctx.stroke();
 
   bctx.fillStyle = '#e11d48';
   bctx.beginPath();
-  bctx.arc(0, 0, 48, 0, Math.PI * 2);
+  bctx.arc(0, 0, 30, 0, Math.PI * 2);
   bctx.fill();
 
   bctx.fillStyle = '#fef08a';
-  bctx.font = 'bold 46px sans-serif';
+  bctx.font = 'bold 30px sans-serif';
   bctx.textAlign = 'center';
   bctx.textBaseline = 'middle';
   bctx.fillText('發', 0, 0);
@@ -603,7 +604,385 @@ async function generateLionDanceTheme(): Promise<{
   };
 }
 
+/**
+ * 3. 萌熊送福 · 趴气泡小熊 (官方对齐示范款)
+ * 专门对齐微信官方图2、图4、图5、图6规范：
+ * - 封面挂件：小熊趴在红包顶部探头 (图2标准，离主体区域很近，探头挂点在 Y=220，底部趴在 Y=338，紧贴 342px 主体区)
+ * - 气泡挂件：小熊双爪刚好趴在对话框气泡上 (图3标准，趴在 Y=278，全部像素 100% 严格在 [40..440, 20..280] 可编辑区内，图6零报错)
+ */
+async function generateCuteBearTheme() {
+  // 1. 封面图 (957 x 1278)
+  const coverCanvas = document.createElement('canvas');
+  coverCanvas.width = 957;
+  coverCanvas.height = 1278;
+  const ctx = coverCanvas.getContext('2d')!;
+
+  // Festive warm gradient
+  const grad = ctx.createLinearGradient(0, 0, 957, 1278);
+  grad.addColorStop(0, '#e11d48');
+  grad.addColorStop(0.5, '#be123c');
+  grad.addColorStop(1, '#881337');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 957, 1278);
+
+  // Soft festive circle patterns
+  ctx.save();
+  ctx.fillStyle = 'rgba(254, 240, 138, 0.08)';
+  ctx.beginPath();
+  ctx.arc(478, 500, 320, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Draw cute bear illustration on cover
+  drawCuteBear(ctx, 478, 620, 280);
+
+  ctx.fillStyle = '#fef08a';
+  ctx.font = 'bold 44px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('萌熊送福 · 岁岁喜乐', 478, 860);
+
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+  ctx.font = '24px sans-serif';
+  ctx.fillText('新春大吉 · 好事连连', 478, 920);
+
+  // 2. 封面挂件 (1053 x 1746) - 图2 & 图5 规范
+  // 小熊趴在红包顶部探头 (底边在 Y = 338，紧靠 Y = 342 红包上沿，离主体很近)
+  const pendantCanvas = document.createElement('canvas');
+  pendantCanvas.width = 1053;
+  pendantCanvas.height = 1746;
+  const pctx = pendantCanvas.getContext('2d')!;
+  pctx.clearRect(0, 0, 1053, 1746);
+
+  // Draw cute bear peeking over top envelope rim (Y = 130 to 338, height 208)
+  drawCuteBearPeeking(pctx, 526.5, 220, 260, 338);
+
+  // Clean forbidden area Y: 342..1650
+  pctx.clearRect(96, 342, 861, 1308);
+
+  // 3. 气泡挂件 (480 x 384) - 图3、图4、图6 微信官方严格规范
+  // 小熊双爪刚好趴在对话框气泡上沿 (Y = 278，不能超过 Y = 280)
+  const bubbleCanvas = document.createElement('canvas');
+  bubbleCanvas.width = 480;
+  bubbleCanvas.height = 384;
+  const bctx = bubbleCanvas.getContext('2d')!;
+  bctx.clearRect(0, 0, 480, 384);
+
+  // Draw cute bear resting paws at Y = 276 (Zero pixels enter Y >= 280)
+  drawCuteBearOnBubble(bctx, 240, 175, 170, 276);
+
+  // Strict clear of non-editable zones
+  bctx.clearRect(0, 280, 480, 104);
+  bctx.clearRect(0, 0, 480, 20);
+  bctx.clearRect(0, 0, 40, 384);
+  bctx.clearRect(440, 0, 40, 384);
+
+  // 4. 封面故事 (750 x 1250)
+  const storyCanvas = document.createElement('canvas');
+  storyCanvas.width = 750;
+  storyCanvas.height = 1250;
+  const sctx = storyCanvas.getContext('2d')!;
+  const sGrad = sctx.createLinearGradient(0, 0, 750, 1250);
+  sGrad.addColorStop(0, '#881337');
+  sGrad.addColorStop(1, '#4c0519');
+  sctx.fillStyle = sGrad;
+  sctx.fillRect(0, 0, 750, 1250);
+
+  drawCuteBear(sctx, 375, 520, 240);
+
+  sctx.fillStyle = '#fef08a';
+  sctx.font = 'bold 36px sans-serif';
+  sctx.textAlign = 'center';
+  sctx.fillText('萌熊送福 · 岁岁平安', 375, 780);
+
+  sctx.fillStyle = '#ffffff';
+  sctx.font = '22px sans-serif';
+  sctx.fillText('万事顺遂 · 喜乐常安 · 诸事顺遂', 375, 840);
+
+  const [coverBlob, pendantBlob, bubbleBlob, storyBlob] = await Promise.all([
+    new Promise<Blob>((res) => coverCanvas.toBlob((b) => res(b!), 'image/jpeg', 0.92)),
+    compressPngStrictUnderLimit(pendantCanvas, 300 * 1024),
+    compressPngStrictUnderLimit(bubbleCanvas, 300 * 1024),
+    new Promise<Blob>((res) => storyCanvas.toBlob((b) => res(b!), 'image/jpeg', 0.92)),
+  ]);
+
+  return {
+    coverBlob,
+    pendantBlob,
+    bubbleBlob,
+    storyBlob,
+  };
+}
+
+/**
+ * Helper: Draw full cute bear illustration
+ */
+function drawCuteBear(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number) {
+  ctx.save();
+  const r = size / 2;
+
+  // Ears
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.65, cy - r * 0.65, r * 0.32, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.65, cy - r * 0.65, r * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#fef08a';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.65, cy - r * 0.65, r * 0.18, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.65, cy - r * 0.65, r * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head
+  ctx.fillStyle = '#fbbf24';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.75, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Cheeks
+  ctx.fillStyle = 'rgba(244, 63, 94, 0.45)';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.42, cy + r * 0.12, r * 0.14, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.42, cy + r * 0.12, r * 0.14, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Snout
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.15, r * 0.28, r * 0.22, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Nose
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.08, r * 0.1, r * 0.07, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = '#451a03';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.08, cy + r * 0.2, r * 0.08, 0.1, Math.PI * 0.9);
+  ctx.arc(cx + r * 0.08, cy + r * 0.2, r * 0.08, 0.1, Math.PI * 0.9);
+  ctx.stroke();
+
+  // Eyes
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.26, cy - r * 0.1, r * 0.08, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.26, cy - r * 0.1, r * 0.08, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eye highlights
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.28, cy - r * 0.13, r * 0.03, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.24, cy - r * 0.13, r * 0.03, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+/**
+ * Helper: Draw peeking cute bear resting at bottom Y (Figure 2 / Figure 5)
+ */
+function drawCuteBearPeeking(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, bottomY: number) {
+  ctx.save();
+  const r = size / 2;
+
+  // Ears
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.62, cy - r * 0.55, r * 0.28, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.62, cy - r * 0.55, r * 0.28, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#fef08a';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.62, cy - r * 0.55, r * 0.16, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.62, cy - r * 0.55, r * 0.16, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head
+  ctx.fillStyle = '#fbbf24';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.72, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Cheeks
+  ctx.fillStyle = 'rgba(244, 63, 94, 0.45)';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.4, cy + r * 0.1, r * 0.13, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.4, cy + r * 0.1, r * 0.13, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Snout
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.12, r * 0.26, r * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Nose
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.06, r * 0.09, r * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = '#451a03';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.07, cy + r * 0.17, r * 0.07, 0.1, Math.PI * 0.9);
+  ctx.arc(cx + r * 0.07, cy + r * 0.17, r * 0.07, 0.1, Math.PI * 0.9);
+  ctx.stroke();
+
+  // Eyes
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.24, cy - r * 0.1, r * 0.07, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.24, cy - r * 0.1, r * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eye highlights
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.26, cy - r * 0.12, r * 0.025, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.22, cy - r * 0.12, r * 0.025, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Two cute paws resting along bottomY (peeking paws)
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#fbbf24';
+  ctx.lineWidth = 3;
+  const pawR = r * 0.18;
+  const pawY = bottomY - pawR * 0.7;
+
+  ctx.beginPath();
+  ctx.ellipse(cx - r * 0.42, pawY, pawR * 1.1, pawR * 0.8, -0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(cx + r * 0.42, pawY, pawR * 1.1, pawR * 0.8, 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Paw pads
+  ctx.fillStyle = '#f43f5e';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.42, pawY, pawR * 0.35, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.42, pawY, pawR * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+/**
+ * Helper: Draw cute bear趴在气泡上 (Figure 3 & Figure 6)
+ * Paws strictly rest at bubbleRimY (e.g. 276px), with 0 pixels in Y >= 280
+ */
+function drawCuteBearOnBubble(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, bubbleRimY: number) {
+  ctx.save();
+  const r = size / 2;
+
+  // Ears
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.6, cy - r * 0.55, r * 0.27, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.6, cy - r * 0.55, r * 0.27, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#fef08a';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.6, cy - r * 0.55, r * 0.15, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.6, cy - r * 0.55, r * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head
+  ctx.fillStyle = '#fbbf24';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.7, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Cheeks
+  ctx.fillStyle = 'rgba(244, 63, 94, 0.5)';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.38, cy + r * 0.1, r * 0.13, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.38, cy + r * 0.1, r * 0.13, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Snout
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.12, r * 0.25, r * 0.18, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Nose
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + r * 0.05, r * 0.08, r * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = '#451a03';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.07, cy + r * 0.16, r * 0.06, 0.1, Math.PI * 0.9);
+  ctx.arc(cx + r * 0.07, cy + r * 0.16, r * 0.06, 0.1, Math.PI * 0.9);
+  ctx.stroke();
+
+  // Eyes
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.22, cy - r * 0.1, r * 0.07, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.22, cy - r * 0.1, r * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eye highlights
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.24, cy - r * 0.12, r * 0.025, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.2, cy - r * 0.12, r * 0.025, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Two cute little paws hanging directly over the bubble rim (趴在气泡上, Figure 3)
+  // Paws touch bubbleRimY (e.g. 276px), strictly staying above 280px
+  const pawR = r * 0.17;
+  const pawY = bubbleRimY - pawR * 0.8;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 2.5;
+
+  ctx.beginPath();
+  ctx.ellipse(cx - r * 0.38, pawY, pawR * 1.1, pawR * 0.8, -0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(cx + r * 0.38, pawY, pawR * 1.1, pawR * 0.8, 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Pink paw pads
+  ctx.fillStyle = '#f43f5e';
+  ctx.beginPath();
+  ctx.arc(cx - r * 0.38, pawY, pawR * 0.32, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.38, pawY, pawR * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 export const DEMO_RED_PACKET_THEMES: DemoRedPacketTheme[] = [
+  {
+    id: 'theme-cute-bear',
+    name: '萌熊送福 · 趴气泡小熊 (官方对齐示范款)',
+    tag: '官方对齐推荐',
+    description: '严格按照微信图2、图4、图5、图6对齐：小熊封面挂件探头贴近红包主体，气泡挂件双爪刚好趴在气泡上且 100% 落在可编辑区，上传微信零报错！',
+    themeColor: '#e11d48',
+    generateAssets: generateCuteBearTheme,
+  },
   {
     id: 'theme-fortune-festive',
     name: '福气满满 · 新春万象 (经典红金)',

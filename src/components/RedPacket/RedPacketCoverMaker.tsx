@@ -123,6 +123,14 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const coverCanvasRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  // Vertical Fine-Tuning Slider Track Refs
+  const pendantTrackRef = useRef<HTMLDivElement>(null);
+  const bubbleTrackRef = useRef<HTMLDivElement>(null);
+  const [isDraggingPendantSlider, setIsDraggingPendantSlider] = useState(false);
+  const [isDraggingBubbleSlider, setIsDraggingBubbleSlider] = useState(false);
+  const pendantDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const bubbleDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const [isDraggingPendant, setIsDraggingPendant] = useState(false);
   const [isDraggingBubble, setIsDraggingBubble] = useState(false);
   const [isDraggingCover, setIsDraggingCover] = useState(false);
@@ -133,10 +141,10 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [livePendantCoords, setLivePendantCoords] = useState<{ x: number; y: number; zone: string } | null>(null);
   const [liveBubbleCoords, setLiveBubbleCoords] = useState<{ x: number; y: number } | null>(null);
 
-  // Initialize with the first demo theme so users immediately have verified standard assets
+  // Initialize with the first demo theme (萌熊送福 · 趴气泡小熊 官方对齐款)
   useEffect(() => {
     if (!coverResult && !pendantResult) {
-      handleLoadDemoTheme('theme-fortune-festive', false);
+      handleLoadDemoTheme('theme-cute-bear', false);
     }
   }, []);
 
@@ -469,9 +477,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const handlePendantStepFineTune = async (deltaY: number) => {
     if (!pendantResult) return;
     const isBottom = pendantPlacement === 'bottom';
-    const minLimit = isBottom ? 1380 : 20;
-    const maxLimit = isBottom ? 1720 : 360;
-    const baseline = isBottom ? 1540 : 200;
+    const minLimit = isBottom ? 1650 : 30;
+    const maxLimit = isBottom ? 1735 : 338;
+    const baseline = isBottom ? 1690 : 220;
 
     const currentY = currentPendantAnchorY;
     const newY = Math.max(minLimit, Math.min(maxLimit, currentY + deltaY));
@@ -480,27 +488,40 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     setLivePendantCoords({
       x: currentPendantAnchorX,
       y: newY,
-      zone: isBottom ? '脊端垂饰 (图2标准)' : '上端探头 (图2标准)',
+      zone: isBottom ? '脊端垂饰 (图5标准)' : '上端探头 (图5标准)',
     });
     await handleUpdatePendant(pendantPlacement, pendantOffsetX, newOffY);
   };
 
-  const handlePendantSliderChange = async (targetY: number) => {
-    if (!pendantResult) return;
-    const isBottom = pendantPlacement === 'bottom';
-    const minLimit = isBottom ? 1380 : 20;
-    const maxLimit = isBottom ? 1720 : 360;
-    const baseline = isBottom ? 1540 : 200;
+  const handlePendantSliderTrackPointer = (clientY: number, isFinal: boolean) => {
+    if (!pendantResult || !pendantTrackRef.current) return;
+    const rect = pendantTrackRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height));
 
-    const newY = Math.max(minLimit, Math.min(maxLimit, targetY));
+    const isBottom = pendantPlacement === 'bottom';
+    const minLimit = isBottom ? 1650 : 30;
+    const maxLimit = isBottom ? 1735 : 338;
+    const baseline = isBottom ? 1690 : 220;
+
+    const newY = Math.round(maxLimit - ratio * (maxLimit - minLimit));
     const newOffY = newY - baseline;
     setPendantOffsetY(newOffY);
     setLivePendantCoords({
       x: currentPendantAnchorX,
       y: newY,
-      zone: isBottom ? '脊端垂饰 (图2标准)' : '上端探头 (图2标准)',
+      zone: isBottom ? '脊端垂饰 (图5标准)' : '上端探头 (图5标准)',
     });
-    await handleUpdatePendant(pendantPlacement, pendantOffsetX, newOffY);
+
+    if (pendantDebounceTimerRef.current) {
+      clearTimeout(pendantDebounceTimerRef.current);
+    }
+    if (isFinal) {
+      handleUpdatePendant(pendantPlacement, pendantOffsetX, newOffY);
+    } else {
+      pendantDebounceTimerRef.current = setTimeout(() => {
+        handleUpdatePendant(pendantPlacement, pendantOffsetX, newOffY);
+      }, 100);
+    }
   };
 
   // -------------------------------------------------------------
@@ -508,21 +529,38 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   // -------------------------------------------------------------
   const handleBubbleStepFineTune = async (deltaY: number) => {
     if (!bubbleResult) return;
+    const minLimit = 30;
+    const maxLimit = 260;
     const currentY = currentBubbleAnchorY;
-    const newY = Math.max(20, Math.min(280, currentY + deltaY));
-    const newOffY = newY - 120;
+    const newY = Math.max(minLimit, Math.min(maxLimit, currentY + deltaY));
+    const newOffY = newY - 180;
     setBubbleOffsetY(newOffY);
     setLiveBubbleCoords({ x: currentBubbleAnchorX, y: newY });
     await handleUpdateBubble(bubbleOffsetX, newOffY);
   };
 
-  const handleBubbleSliderChange = async (targetY: number) => {
-    if (!bubbleResult) return;
-    const newY = Math.max(20, Math.min(280, targetY));
-    const newOffY = newY - 120;
+  const handleBubbleSliderTrackPointer = (clientY: number, isFinal: boolean) => {
+    if (!bubbleResult || !bubbleTrackRef.current) return;
+    const rect = bubbleTrackRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height));
+
+    const minLimit = 30;
+    const maxLimit = 260;
+    const newY = Math.round(maxLimit - ratio * (maxLimit - minLimit));
+    const newOffY = newY - 180;
     setBubbleOffsetY(newOffY);
     setLiveBubbleCoords({ x: currentBubbleAnchorX, y: newY });
-    await handleUpdateBubble(bubbleOffsetX, newOffY);
+
+    if (bubbleDebounceTimerRef.current) {
+      clearTimeout(bubbleDebounceTimerRef.current);
+    }
+    if (isFinal) {
+      handleUpdateBubble(bubbleOffsetX, newOffY);
+    } else {
+      bubbleDebounceTimerRef.current = setTimeout(() => {
+        handleUpdateBubble(bubbleOffsetX, newOffY);
+      }, 100);
+    }
   };
 
   const handleUpdateBubble = async (
@@ -887,9 +925,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
   // Active Anchor Coordinates Helper
   const currentPendantAnchorX = livePendantCoords?.x ?? pendantResult?.anchorX ?? Math.round(526.5 + pendantOffsetX);
-  const currentPendantAnchorY = livePendantCoords?.y ?? pendantResult?.anchorY ?? (pendantPlacement === 'bottom' ? Math.round(1540 + pendantOffsetY) : Math.round(200 + pendantOffsetY));
+  const currentPendantAnchorY = livePendantCoords?.y ?? pendantResult?.anchorY ?? (pendantPlacement === 'bottom' ? Math.round(1690 + pendantOffsetY) : Math.round(220 + pendantOffsetY));
   const currentBubbleAnchorX = liveBubbleCoords?.x ?? bubbleResult?.anchorX ?? Math.round(240 + bubbleOffsetX);
-  const currentBubbleAnchorY = liveBubbleCoords?.y ?? bubbleResult?.anchorY ?? Math.round(120 + bubbleOffsetY);
+  const currentBubbleAnchorY = liveBubbleCoords?.y ?? bubbleResult?.anchorY ?? Math.round(180 + bubbleOffsetY);
 
   return (
     <div className="space-y-5 select-none">
@@ -1280,49 +1318,84 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               {/* Interactive Visual Canvas with DIRECT DRAGGING and Left Vertical Fine-Tuning Slider */}
               <div className="flex flex-col items-center">
                 <div className="flex items-center justify-center gap-3 w-full">
-                  {/* Left Vertical Slider with [+] at top and [-] at bottom (Micro-tuning) */}
+                  {/* Left Vertical Fine-Tuning Control Bar */}
                   <div className="flex flex-col items-center justify-between h-[400px] py-2 px-1.5 bg-neutral-100/90 rounded-2xl border border-neutral-200/90 shadow-2xs select-none shrink-0">
-                    {/* Top [+] Button */}
+                    {/* Top [+] Button: 向上微调，小熊往上走 */}
                     <button
                       type="button"
-                      onClick={() => handlePendantStepFineTune(-6)}
-                      title="向上微调 (按步长上移 6px)"
+                      onClick={() => handlePendantStepFineTune(-8)}
+                      title="向上微调 (小熊往上走 8px)"
                       className="w-7 h-7 rounded-xl bg-white hover:bg-neutral-50 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-sm font-black text-neutral-800 transition-all cursor-pointer"
                     >
                       +
                     </button>
 
-                    {/* Vertical Range Slider Track (Top-to-Bottom) */}
+                    {/* Smooth Vertical Drag Track (往上拖往上走，往下拖往下走) */}
                     <div className="flex-1 flex flex-col items-center justify-center my-2 relative group py-2">
                       <span className="text-[9px] font-mono font-bold text-amber-800 bg-white/95 px-1 py-0.5 rounded border border-neutral-200 shadow-2xs whitespace-nowrap rotate-[-90deg] mb-3">
                         {currentPendantAnchorY}px
                       </span>
-                      <input
-                        type="range"
-                        min={pendantPlacement === 'bottom' ? 1380 : 20}
-                        max={pendantPlacement === 'bottom' ? 1720 : 360}
-                        step={2}
-                        value={currentPendantAnchorY}
-                        onChange={(e) => handlePendantSliderChange(Number(e.target.value))}
-                        style={{
-                          writingMode: 'vertical-lr',
-                          direction: 'rtl',
-                          width: '8px',
-                          height: '190px',
+
+                      {/* Interactive Smooth Slider Track */}
+                      <div
+                        ref={pendantTrackRef}
+                        onPointerDown={(e) => {
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                          setIsDraggingPendantSlider(true);
+                          handlePendantSliderTrackPointer(e.clientY, false);
                         }}
-                        className="cursor-ns-resize accent-amber-500 rounded-full"
-                        title={`从上往下垂直拖动条 (当前: ${currentPendantAnchorY}px)`}
-                      />
+                        onPointerMove={(e) => {
+                          if (!isDraggingPendantSlider) return;
+                          handlePendantSliderTrackPointer(e.clientY, false);
+                        }}
+                        onPointerUp={(e) => {
+                          setIsDraggingPendantSlider(false);
+                          try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+                          handlePendantSliderTrackPointer(e.clientY, true);
+                        }}
+                        className="relative w-3.5 h-[200px] bg-neutral-200 rounded-full cursor-ns-resize flex flex-col justify-end p-0.5 select-none touch-none shadow-inner group-hover:bg-neutral-300/80 transition-colors"
+                        title="按住上下拖动调整高度 (往上拖小熊往上走，往下拖小熊往下走)"
+                      >
+                        {/* Active Fill from Bottom */}
+                        <div
+                          className="w-full bg-amber-500 rounded-full pointer-events-none transition-all duration-75"
+                          style={{
+                            height: `${(() => {
+                              const isBottom = pendantPlacement === 'bottom';
+                              const minLimit = isBottom ? 1650 : 30;
+                              const maxLimit = isBottom ? 1735 : 338;
+                              const r = Math.max(0, Math.min(1, (maxLimit - currentPendantAnchorY) / (maxLimit - minLimit)));
+                              return r * 100;
+                            })()}%`,
+                          }}
+                        />
+                        {/* Draggable Knob */}
+                        <div
+                          className="absolute left-1/2 -translate-x-1/2 w-5 h-5 rounded-full bg-white border-2 border-amber-500 shadow-md flex items-center justify-center pointer-events-none"
+                          style={{
+                            bottom: `calc(${(() => {
+                              const isBottom = pendantPlacement === 'bottom';
+                              const minLimit = isBottom ? 1650 : 30;
+                              const maxLimit = isBottom ? 1735 : 338;
+                              const r = Math.max(0, Math.min(1, (maxLimit - currentPendantAnchorY) / (maxLimit - minLimit)));
+                              return r * 100;
+                            })()}% - 10px)`,
+                          }}
+                        >
+                          <div className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+                        </div>
+                      </div>
+
                       <span className="text-[8px] font-bold text-neutral-400 mt-3 whitespace-nowrap">
-                        {pendantPlacement === 'bottom' ? '脊端' : (pendantPlacement === 'dual' ? '双端' : '上端')}
+                        {pendantPlacement === 'bottom' ? '脊端' : '上端'}
                       </span>
                     </div>
 
-                    {/* Bottom [-] Button */}
+                    {/* Bottom [-] Button: 向下微调，小熊往下走 */}
                     <button
                       type="button"
-                      onClick={() => handlePendantStepFineTune(6)}
-                      title="向下微调 (按步长下移 6px)"
+                      onClick={() => handlePendantStepFineTune(8)}
+                      title="向下微调 (小熊往下走 8px)"
                       className="w-7 h-7 rounded-xl bg-white hover:bg-neutral-50 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-sm font-black text-neutral-800 transition-all cursor-pointer"
                     >
                       -
@@ -1340,8 +1413,16 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     }`}
                     title="按住鼠标直接拖拽到上端或脊端任意位置"
                   >
-                    {/* Subtle Red Packet Silhouette in Background to visualize actual overlay */}
-                    <div className="absolute top-[20.6%] bottom-[20.6%] left-[4.5%] right-[4.5%] rounded-2xl bg-gradient-to-b from-red-600/15 to-red-800/25 border border-red-500/30 pointer-events-none z-0 flex flex-col items-center justify-between py-3">
+                    {/* Authentic WeChat Red Packet Silhouette in Background (Figure 5: 861 x 1308 starting at Y: 342px) */}
+                    <div
+                      className="absolute rounded-2xl bg-gradient-to-b from-red-600/15 to-red-800/25 border border-red-500/30 pointer-events-none z-0 flex flex-col items-center justify-between py-3"
+                      style={{
+                        top: '19.59%', // exactly 342px in 1746px (Figure 5)
+                        height: '74.91%', // exactly 1308px in 1746px (Figure 5)
+                        left: '9.12%', // exactly 96px in 1053px (Figure 5)
+                        width: '81.77%', // exactly 861px in 1053px (Figure 5)
+                      }}
+                    >
                       <div className="flex flex-col items-center gap-1 opacity-50">
                         <div className="w-5 h-5 rounded-full bg-white/60" />
                         <div className="w-10 h-1.5 rounded bg-white/50" />
@@ -1359,31 +1440,48 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           className="w-full h-full object-contain rounded-xl drop-shadow-md z-10 pointer-events-none"
                         />
 
-                        {/* WeChat Figure 3 Official Editable Guides */}
+                        {/* WeChat Figure 5 Official Editable Guides */}
                         {showGuides && (
-                          <div className="absolute inset-0 pointer-events-none z-20 flex flex-col justify-between p-1">
-                            {/* Top Editable Area (上侧可编辑区: 20~360px out of 1746) */}
-                            <div className={`h-[20.6%] mx-[4%] border-2 border-dashed rounded-xl relative flex items-center justify-center transition-all ${
-                              currentPendantAnchorY < 873 ? 'border-emerald-500 bg-emerald-500/15 ring-2 ring-emerald-400/40' : 'border-emerald-400/70 bg-emerald-500/5'
-                            }`}>
-                              <span className="absolute top-1 left-1.5 text-[8px] font-bold text-emerald-800 bg-white/95 px-1 rounded shadow-2xs">
-                                ✅ 图3：上侧可编辑区 (上端探头)
+                          <div className="absolute inset-0 pointer-events-none z-20">
+                            {/* Top Editable Area (Figure 5: 0 ~ 342px out of 1746, 上侧可编辑区) */}
+                            <div
+                              className={`absolute inset-x-0 top-0 border-2 border-dashed rounded-t-xl flex items-center justify-center transition-all ${
+                                currentPendantAnchorY < 873 ? 'border-emerald-500 bg-emerald-500/15 ring-2 ring-emerald-400/40' : 'border-emerald-400/70 bg-emerald-500/5'
+                              }`}
+                              style={{ height: '19.59%' }}
+                            >
+                              <span className="absolute top-1 left-1.5 text-[8px] font-bold text-emerald-800 bg-white/95 px-1 rounded shadow-2xs border border-emerald-200">
+                                ✅ 图5：上侧可编辑区 (高342px · 上端探头)
                               </span>
                             </div>
 
-                            {/* Middle Forbidden Area */}
-                            <div className="h-[58.8%] mx-[4%] my-1 border border-dashed border-red-300/60 bg-red-500/5 rounded-xl flex items-center justify-center">
+                            {/* Middle Forbidden Area (Figure 5: 342 ~ 1650px out of 1746, 861px width) */}
+                            <div
+                              className="absolute border border-dashed border-red-300/80 bg-red-500/5 rounded-xl flex items-center justify-center"
+                              style={{
+                                top: '19.59%',
+                                height: '74.91%',
+                                left: '9.12%',
+                                width: '81.77%',
+                              }}
+                            >
                               <span className="text-[8px] font-bold text-red-500 bg-white/95 px-1.5 py-0.5 rounded border border-red-200">
-                                🚫 封面主体区 (禁止放置挂件)
+                                🚫 图5：不可编辑主体区 (1308×861 · 禁止挂件进入)
                               </span>
                             </div>
 
-                            {/* Bottom Editable Area (下侧可编辑区: 1380~1720px out of 1746) */}
-                            <div className={`h-[20.6%] mx-[4%] border-2 border-dashed rounded-xl relative flex items-center justify-center transition-all ${
-                              currentPendantAnchorY >= 873 ? 'border-emerald-500 bg-emerald-500/15 ring-2 ring-emerald-400/40' : 'border-emerald-400/70 bg-emerald-500/5'
-                            }`}>
-                              <span className="absolute bottom-1 left-1.5 text-[8px] font-bold text-emerald-800 bg-white/95 px-1 rounded shadow-2xs">
-                                ✅ 图3：下侧可编辑区 (脊端垂饰)
+                            {/* Bottom Editable Area (Figure 5: 1650 ~ 1746px out of 1746, height 96px) */}
+                            <div
+                              className={`absolute inset-x-0 border-2 border-dashed rounded-b-xl flex items-center justify-center transition-all ${
+                                currentPendantAnchorY >= 873 ? 'border-emerald-500 bg-emerald-500/15 ring-2 ring-emerald-400/40' : 'border-emerald-400/70 bg-emerald-500/5'
+                              }`}
+                              style={{
+                                top: '94.50%',
+                                height: '5.50%',
+                              }}
+                            >
+                              <span className="absolute bottom-1 left-1.5 text-[8px] font-bold text-emerald-800 bg-white/95 px-1 rounded shadow-2xs border border-emerald-200">
+                                ✅ 图5：下侧可编辑区 (高96px · 脊端垂饰)
                               </span>
                             </div>
 
@@ -1595,49 +1693,82 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               {/* Interactive Visual Canvas with DIRECT DRAGGING and Left Vertical Fine-Tuning Slider */}
               <div className="flex flex-col items-center">
                 <div className="flex items-center justify-center gap-3 w-full">
-                  {/* Left Vertical Slider with [+] at top and [-] at bottom (Micro-tuning) */}
+                  {/* Left Vertical Fine-Tuning Control Bar */}
                   <div className="flex flex-col items-center justify-between h-[260px] py-2 px-1.5 bg-neutral-100/90 rounded-2xl border border-neutral-200/90 shadow-2xs select-none shrink-0">
-                    {/* Top [+] Button */}
+                    {/* Top [+] Button: 向上微调，小熊往上走 */}
                     <button
                       type="button"
-                      onClick={() => handleBubbleStepFineTune(-6)}
-                      title="向上微调 (按步长上移 6px)"
+                      onClick={() => handleBubbleStepFineTune(-8)}
+                      title="向上微调 (小熊往上走 8px)"
                       className="w-7 h-7 rounded-xl bg-white hover:bg-neutral-50 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-sm font-black text-neutral-800 transition-all cursor-pointer"
                     >
                       +
                     </button>
 
-                    {/* Vertical Range Slider Track */}
+                    {/* Smooth Vertical Drag Track (往上拖小熊往上走，往下拖小熊往下走) */}
                     <div className="flex-1 flex flex-col items-center justify-center my-1 relative group py-1">
                       <span className="text-[9px] font-mono font-bold text-emerald-800 bg-white/95 px-1 py-0.5 rounded border border-neutral-200 shadow-2xs whitespace-nowrap rotate-[-90deg] mb-3">
                         {currentBubbleAnchorY}px
                       </span>
-                      <input
-                        type="range"
-                        min={20}
-                        max={280}
-                        step={2}
-                        value={currentBubbleAnchorY}
-                        onChange={(e) => handleBubbleSliderChange(Number(e.target.value))}
-                        style={{
-                          writingMode: 'vertical-lr',
-                          direction: 'rtl',
-                          width: '8px',
-                          height: '110px',
+
+                      {/* Interactive Smooth Slider Track */}
+                      <div
+                        ref={bubbleTrackRef}
+                        onPointerDown={(e) => {
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                          setIsDraggingBubbleSlider(true);
+                          handleBubbleSliderTrackPointer(e.clientY, false);
                         }}
-                        className="cursor-ns-resize accent-emerald-500 rounded-full"
-                        title={`从上往下垂直拖动条 (当前: ${currentBubbleAnchorY}px)`}
-                      />
+                        onPointerMove={(e) => {
+                          if (!isDraggingBubbleSlider) return;
+                          handleBubbleSliderTrackPointer(e.clientY, false);
+                        }}
+                        onPointerUp={(e) => {
+                          setIsDraggingBubbleSlider(false);
+                          try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+                          handleBubbleSliderTrackPointer(e.clientY, true);
+                        }}
+                        className="relative w-3.5 h-[120px] bg-neutral-200 rounded-full cursor-ns-resize flex flex-col justify-end p-0.5 select-none touch-none shadow-inner group-hover:bg-neutral-300/80 transition-colors"
+                        title="按住上下拖动调整高度 (往上拖小熊往上走，往下拖小熊往下走)"
+                      >
+                        {/* Active Fill from Bottom */}
+                        <div
+                          className="w-full bg-emerald-500 rounded-full pointer-events-none transition-all duration-75"
+                          style={{
+                            height: `${(() => {
+                              const minLimit = 30;
+                              const maxLimit = 260;
+                              const r = Math.max(0, Math.min(1, (maxLimit - currentBubbleAnchorY) / (maxLimit - minLimit)));
+                              return r * 100;
+                            })()}%`,
+                          }}
+                        />
+                        {/* Draggable Knob */}
+                        <div
+                          className="absolute left-1/2 -translate-x-1/2 w-5 h-5 rounded-full bg-white border-2 border-emerald-500 shadow-md flex items-center justify-center pointer-events-none"
+                          style={{
+                            bottom: `calc(${(() => {
+                              const minLimit = 30;
+                              const maxLimit = 260;
+                              const r = Math.max(0, Math.min(1, (maxLimit - currentBubbleAnchorY) / (maxLimit - minLimit)));
+                              return r * 100;
+                            })()}% - 10px)`,
+                          }}
+                        >
+                          <div className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+                        </div>
+                      </div>
+
                       <span className="text-[8px] font-bold text-neutral-400 mt-3 whitespace-nowrap">
                         安全区
                       </span>
                     </div>
 
-                    {/* Bottom [-] Button */}
+                    {/* Bottom [-] Button: 向下微调，小熊往下走 */}
                     <button
                       type="button"
-                      onClick={() => handleBubbleStepFineTune(6)}
-                      title="向下微调 (按步长下移 6px)"
+                      onClick={() => handleBubbleStepFineTune(8)}
+                      title="向下微调 (小熊往下走 8px)"
                       className="w-7 h-7 rounded-xl bg-white hover:bg-neutral-50 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-sm font-black text-neutral-800 transition-all cursor-pointer"
                     >
                       -

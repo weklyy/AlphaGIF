@@ -1617,112 +1617,158 @@ export default function App() {
           </div>
         )}
 
-        {/* Five Tab Navigation Bar */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between border-t border-stone-100 pt-1 -mb-px overflow-x-auto">
-            <div className="flex items-center gap-2 overflow-x-auto">
+        {/* Five Tab Navigation Bar (No horizontal drag, brackets deleted, sleek segmented pill design) */}
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
+          <div className="bg-stone-100/90 backdrop-blur-md p-1.5 rounded-2xl border border-stone-200/80 shadow-2xs">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 w-full">
+              {/* Tab 1: 静态表情 */}
               <button
                 type="button"
                 onClick={() => setActiveTab('suite_image')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                className={`relative flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                   activeTab === 'suite_image'
-                    ? 'border-[#07c160] text-[#07c160]'
-                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                    ? 'bg-white text-stone-900 shadow-[0_2px_8px_rgba(0,0,0,0.08)] border border-stone-200/80 font-extrabold'
+                    : 'text-stone-600 hover:text-stone-900 hover:bg-white/60 font-semibold'
                 }`}
               >
-                <ImageIcon className="w-4 h-4" />
-                <span>静态表情（静态图多宫格切片）</span>
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                  activeTab === 'suite_image' ? 'bg-emerald-100 text-[#07c160]' : 'text-stone-500'
+                }`}>
+                  <ImageIcon className="w-3.5 h-3.5" />
+                </div>
+                <span>静态表情</span>
                 {imageSlicedStickers.length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono font-bold">
                     {imageSlicedStickers.length}
                   </span>
                 )}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('suite_video')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
-                  activeTab === 'suite_video'
-                    ? 'border-[#07c160] text-[#07c160]'
-                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
-                }`}
-              >
-                <Film className="w-4 h-4" />
-                <span>动态表情（视频多宫格切片）</span>
-                {slicedStickers.length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono">
-                    {slicedStickers.length}
-                  </span>
+                {activeTab === 'suite_image' && (
+                  <span className="absolute bottom-1 inset-x-6 h-0.5 bg-[#07c160] rounded-full" />
                 )}
               </button>
 
+              {/* Tab 2: 动态表情 */}
+              <button
+                type="button"
+                onClick={() => setActiveTab('suite_video')}
+                className={`relative flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+                  activeTab === 'suite_video'
+                    ? 'bg-white text-stone-900 shadow-[0_2px_8px_rgba(0,0,0,0.08)] border border-stone-200/80 font-extrabold'
+                    : 'text-stone-600 hover:text-stone-900 hover:bg-white/60 font-semibold'
+                }`}
+              >
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                  activeTab === 'suite_video' ? 'bg-teal-100 text-teal-600' : 'text-stone-500'
+                }`}>
+                  <Film className="w-3.5 h-3.5" />
+                </div>
+                <span>动态表情</span>
+                {slicedStickers.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-800 font-mono font-bold">
+                    {slicedStickers.length}
+                  </span>
+                )}
+                {activeTab === 'suite_video' && (
+                  <span className="absolute bottom-1 inset-x-6 h-0.5 bg-teal-500 rounded-full" />
+                )}
+              </button>
+
+              {/* Tab 3: 背景透明化 */}
               <button
                 type="button"
                 onClick={() => setActiveTab('transparency')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                className={`relative flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                   activeTab === 'transparency'
-                    ? 'border-indigo-600 text-indigo-700'
-                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                    ? 'bg-white text-stone-900 shadow-[0_2px_8px_rgba(0,0,0,0.08)] border border-stone-200/80 font-extrabold'
+                    : 'text-stone-600 hover:text-stone-900 hover:bg-white/60 font-semibold'
                 }`}
               >
-                <Sliders className="w-4 h-4" />
-                <span>背景透明化与修图去水印</span>
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                  activeTab === 'transparency' ? 'bg-indigo-100 text-indigo-600' : 'text-stone-500'
+                }`}>
+                  <Sliders className="w-3.5 h-3.5" />
+                </div>
+                <span>背景透明化</span>
                 {items.length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-indigo-100 text-indigo-800 font-mono">
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-800 font-mono font-bold">
                     {items.length}
                   </span>
                 )}
                 {retouchImageFile && (
                   <span className="w-2 h-2 rounded-full bg-pink-500 animate-pulse" title="画板有正在编辑的图片" />
                 )}
+                {activeTab === 'transparency' && (
+                  <span className="absolute bottom-1 inset-x-6 h-0.5 bg-indigo-600 rounded-full" />
+                )}
               </button>
 
+              {/* Tab 4: 微信红包封面 */}
               <button
                 type="button"
                 onClick={() => setActiveTab('red_packet')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                className={`relative flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                   activeTab === 'red_packet'
-                    ? 'border-red-600 text-red-600'
-                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                    ? 'bg-white text-stone-900 shadow-[0_2px_8px_rgba(0,0,0,0.08)] border border-stone-200/80 font-extrabold'
+                    : 'text-stone-600 hover:text-stone-900 hover:bg-white/60 font-semibold'
                 }`}
               >
-                <Gift className="w-4 h-4 text-red-600" />
-                <span>微信红包封面 (封面图·挂件·气泡·故事)</span>
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
-                  全新功能
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                  activeTab === 'red_packet' ? 'bg-rose-100 text-rose-600' : 'text-stone-500'
+                }`}>
+                  <Gift className="w-3.5 h-3.5" />
+                </div>
+                <span>微信红包封面</span>
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-colors ${
+                  activeTab === 'red_packet' ? 'bg-red-500 text-white shadow-2xs' : 'bg-red-100 text-red-700'
+                }`}>
+                  全新
                 </span>
+                {activeTab === 'red_packet' && (
+                  <span className="absolute bottom-1 inset-x-6 h-0.5 bg-red-600 rounded-full" />
+                )}
               </button>
 
+              {/* Tab 5: 证件照制作 */}
               <button
                 type="button"
                 onClick={() => setActiveTab('id_photo')}
-                className={`flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap ${
+                className={`relative col-span-2 sm:col-span-1 flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
                   activeTab === 'id_photo'
-                    ? 'border-blue-600 text-blue-700'
-                    : 'border-transparent text-stone-600 hover:text-stone-900 hover:border-stone-300'
+                    ? 'bg-white text-stone-900 shadow-[0_2px_8px_rgba(0,0,0,0.08)] border border-stone-200/80 font-extrabold'
+                    : 'text-stone-600 hover:text-stone-900 hover:bg-white/60 font-semibold'
                 }`}
               >
-                <UserCheck className="w-4 h-4" />
-                <span>证件照制作 (1寸/2寸·AI抠图换底)</span>
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800">
-                  智能高清
+                <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                  activeTab === 'id_photo' ? 'bg-blue-100 text-blue-600' : 'text-stone-500'
+                }`}>
+                  <UserCheck className="w-3.5 h-3.5" />
+                </div>
+                <span>证件照制作</span>
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-colors ${
+                  activeTab === 'id_photo' ? 'bg-blue-600 text-white shadow-2xs' : 'bg-blue-100 text-blue-700'
+                }`}>
+                  高清
                 </span>
+                {activeTab === 'id_photo' && (
+                  <span className="absolute bottom-1 inset-x-6 h-0.5 bg-blue-600 rounded-full" />
+                )}
               </button>
             </div>
+          </div>
 
-            {/* 当处于修图画板且已载入图片时，显示微型横幅切换开关 */}
-            {isRetouchImageLoaded && activeTab === 'transparency' && transparencySubView === 'retouch' && (
+          {/* 当处于修图画板且已载入图片时，显示微型横幅切换开关 */}
+          {isRetouchImageLoaded && activeTab === 'transparency' && transparencySubView === 'retouch' && (
+            <div className="flex justify-end pt-1">
               <button
                 type="button"
                 onClick={() => setManualShowBanner((v) => !v)}
-                className="shrink-0 ml-2 px-2.5 py-1 text-[11px] font-medium text-stone-500 hover:text-stone-800 rounded-md hover:bg-stone-100 border border-stone-200 transition-colors cursor-pointer whitespace-nowrap"
+                className="px-2.5 py-1 text-[11px] font-medium text-stone-500 hover:text-stone-800 rounded-lg hover:bg-stone-100 border border-stone-200 transition-colors cursor-pointer"
                 title="已自动隐藏顶部横幅以最大化画板空间，可随时切换"
               >
                 <span>{manualShowBanner ? '收起横幅' : '展开横幅'}</span>
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </header>
 

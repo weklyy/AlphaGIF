@@ -645,36 +645,62 @@ async function generateCuteBearTheme() {
   ctx.font = '24px sans-serif';
   ctx.fillText('新春大吉 · 好事连连', 478, 920);
 
-  // 2. 封面挂件 (1053 x 1746) - 图2 & 图5 规范
-  // 小熊趴在红包顶部探头 (底边在 Y = 338，紧靠 Y = 342 红包上沿，离主体很近)
+  // 2. 封面挂件 (1053 x 1746) - 微信官方图2 & 图5 规范
+  // 小熊趴在红包顶部探头 (底边在 Y = 338，紧靠 Y = 342 红包上沿)，底部脊端配有金元宝萌爪 (Y = 1650~1746)
   const pendantCanvas = document.createElement('canvas');
   pendantCanvas.width = 1053;
   pendantCanvas.height = 1746;
   const pctx = pendantCanvas.getContext('2d')!;
   pctx.clearRect(0, 0, 1053, 1746);
 
-  // Draw cute bear peeking over top envelope rim (Y = 130 to 338, height 208)
+  // Top Zone (0 ~ 342px): Cute bear peeking over top envelope rim (paws at Y = 338)
   drawCuteBearPeeking(pctx, 526.5, 220, 260, 338);
+
+  // Bottom Zone (1650 ~ 1746px): Cute golden ingot & paws at spine
+  pctx.save();
+  pctx.translate(526.5, 1698);
+  const bGrad = pctx.createLinearGradient(-100, -25, 100, 25);
+  bGrad.addColorStop(0, '#fef08a');
+  bGrad.addColorStop(0.5, '#f59e0b');
+  bGrad.addColorStop(1, '#d97706');
+  pctx.fillStyle = bGrad;
+  pctx.beginPath();
+  pctx.roundRect(-80, -20, 160, 42, 21);
+  pctx.fill();
+  pctx.lineWidth = 2.5;
+  pctx.strokeStyle = '#fef9c3';
+  pctx.stroke();
+
+  // Cute bear paws hanging over bottom spine
+  const pawR = 16;
+  pctx.fillStyle = '#ffffff';
+  pctx.beginPath();
+  pctx.arc(-42, 18, pawR, 0, Math.PI * 2);
+  pctx.arc(42, 18, pawR, 0, Math.PI * 2);
+  pctx.fill();
+  pctx.fillStyle = '#f43f5e';
+  pctx.beginPath();
+  pctx.arc(-42, 18, 6, 0, Math.PI * 2);
+  pctx.arc(42, 18, 6, 0, Math.PI * 2);
+  pctx.fill();
+  pctx.restore();
 
   // Clean forbidden area Y: 342..1650
   pctx.clearRect(96, 342, 861, 1308);
 
-  // 3. 气泡挂件 (480 x 384) - 图3、图4、图6 微信官方严格规范
-  // 小熊双爪刚好趴在对话框气泡上沿 (Y = 278，不能超过 Y = 280)
+  // 3. 气泡挂件 (480 x 384) - 微信官方严格规范
+  // 小熊双爪刚好趴在对话框气泡卡片顶缘 (Y = 96，爪子贴齐 Y = 96，严禁侵入 Y > 96)
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
   const bctx = bubbleCanvas.getContext('2d')!;
   bctx.clearRect(0, 0, 480, 384);
 
-  // Draw cute bear resting paws at Y = 276 (Zero pixels enter Y >= 280)
-  drawCuteBearOnBubble(bctx, 240, 175, 170, 276);
+  // Draw cute bear with paws directly resting on Y = 96 (card top edge)
+  drawCuteBearOnBubble(bctx, 240, 52, 94, 96);
 
-  // Strict clear of non-editable zones
-  bctx.clearRect(0, 280, 480, 104);
-  bctx.clearRect(0, 0, 480, 20);
-  bctx.clearRect(0, 0, 40, 384);
-  bctx.clearRect(440, 0, 40, 384);
+  // Strict clear of non-editable middle (96~312) and bottom
+  bctx.clearRect(0, 96, 480, 288);
 
   // 4. 封面故事 (750 x 1250)
   const storyCanvas = document.createElement('canvas');

@@ -152,10 +152,15 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
   // Clone Stamp State (仿制图案图章取样与涂抹)
   const [cloneSource, setCloneSource] = useState<{ x: number; y: number } | null>(null);
   const [isAltPressed, setIsAltPressed] = useState<boolean>(false);
+  const [isSamplingActive, setIsSamplingActive] = useState<boolean>(false);
   const cloneSnapshotRef = useRef<ImageData | null>(null);
   const cloneOffsetRef = useRef<{ x: number; y: number } | null>(null);
   const isCloningRef = useRef<boolean>(false);
   const cloneLiveSourceRef = useRef<{ x: number; y: number } | null>(null);
+  const toolRef = useRef<RetouchTool>(options.tool);
+  useEffect(() => {
+    toolRef.current = options.tool;
+  }, [options.tool]);
 
   // Auto inpaint immediately upon releasing mouse brush
   const [autoInpaintOnRelease, setAutoInpaintOnRelease] = useState<boolean>(true);
@@ -486,6 +491,9 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
 
       if (e.key === 'Alt') {
+        if (toolRef.current === 'clone-stamp') {
+          e.preventDefault();
+        }
         setIsAltPressed(true);
       }
 
@@ -521,12 +529,16 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         setSpacePressed(false);
       }
       if (e.key === 'Alt') {
+        if (toolRef.current === 'clone-stamp') {
+          e.preventDefault();
+        }
         setIsAltPressed(false);
       }
     };
 
     const handleWindowBlur = () => {
       setIsAltPressed(false);
+      setIsSamplingActive(false);
       setSpacePressed(false);
     };
 
@@ -1260,7 +1272,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     }
 
     // Clone Stamp Tool or Alt-key direct painting/sampling
-    const isAlt = e.altKey || isAltPressed;
+    const isAlt = e.altKey || isAltPressed || isSamplingActive;
     const isCloneMode = options.tool === 'clone-stamp' || (options.tool === 'brush-remove' && isAlt);
 
     if (isCloneMode) {
@@ -1268,21 +1280,19 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         // User clicks with Alt: set sample source
         setCloneSource(coords);
         cloneOffsetRef.current = null;
+        setIsSamplingActive(false);
         renderOverlay();
-        showToast?.(`已设置仿制取样源 (${coords.x}, ${coords.y})，松开 Alt 即可在目标位置涂抹仿制！`);
+        showToast?.(`🎯 已成功选定仿制源点 (${coords.x}, ${coords.y})！现在松开 Alt 键，用鼠标在目标区域拖拽涂抹即可。`);
         return;
       }
 
-      // Start clone stamping
-      let srcPoint = cloneSource;
-      if (!srcPoint) {
-        srcPoint = {
-          x: Math.max(0, Math.min(imageSize.width - 1, coords.x - 30)),
-          y: Math.max(0, Math.min(imageSize.height - 1, coords.y)),
-        };
-        setCloneSource(srcPoint);
-        showToast?.('已自动为您就近设置采样源，按住 Alt 键点击可随时重选采样源！');
+      // If user clicks without Alt and hasn't chosen a source yet: DO NOT paint, prompt user like PS!
+      if (!cloneSource) {
+        showToast?.('⚠️ 尚未选定仿制源！请按住 Alt 键（Mac为Option键）在图像上点击以选定采样源，然后再进行涂抹。');
+        return;
       }
+
+      const srcPoint = cloneSource;
 
       if (!options.cloneStampAligned || !cloneOffsetRef.current) {
         cloneOffsetRef.current = {
@@ -2543,10 +2553,32 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
 
                     <div className="h-4 w-px bg-rose-200 mx-0.5 shrink-0" />
 
+                    {/* 选取采样源按钮 (支持Alt键或直接点击按钮取样) */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsSamplingActive((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            showToast?.('🎯 已进入取样模式：请在图像上点击要复制的源图像位置');
+                          }
+                          return next;
+                        });
+                      }}
+                      className={`h-5.5 px-2 rounded font-bold text-[10px] flex items-center gap-1 transition-all cursor-pointer ${
+                        isSamplingActive || isAltPressed
+                          ? 'bg-rose-600 text-white shadow-xs ring-1 ring-rose-400 animate-pulse'
+                          : 'bg-white hover:bg-rose-100 text-rose-800 border border-rose-300 shadow-2xs'
+                      }`}
+                      title="点击进入取样模式，或直接在画面上按住 Alt 键点击选点"
+                    >
+                      <Target className="w-3 h-3 text-current" />
+                      <span>{isSamplingActive ? '请在画面点击取样...' : '选取采样源 (Alt)'}</span>
+                    </button>
+
                     {cloneSource ? (
                       <div className="flex items-center gap-1">
-                        <span className="text-[10px] bg-rose-100 text-rose-900 px-1.5 py-0.5 rounded font-mono font-bold flex items-center gap-0.5">
-                          <Target className="w-2.5 h-2.5 text-rose-700" />
+                        <span className="text-[10px] bg-rose-100 text-rose-900 px-1.5 py-0.5 rounded font-mono font-bold flex items-center gap-0.5 border border-rose-200">
                           <span>源点({cloneSource.x},{cloneSource.y})</span>
                         </span>
                         <button
@@ -2554,16 +2586,17 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                           onClick={() => {
                             setCloneSource(null);
                             cloneOffsetRef.current = null;
-                            showToast?.('请按住 Alt 键在画面中点击选取新的采样源');
+                            showToast?.('已清除采样源。请按住 Alt 键在画面中点击选取新的采样源！');
                           }}
-                          className="text-[10px] text-rose-700 hover:text-rose-900 underline cursor-pointer"
+                          className="text-[10px] text-rose-700 hover:text-rose-900 underline cursor-pointer font-medium"
+                          title="清除当前采样源"
                         >
                           重选
                         </button>
                       </div>
                     ) : (
-                      <span className="text-[10px] bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded font-bold animate-pulse">
-                        按住 Alt 键点击选取采样源
+                      <span className="text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded font-bold border border-amber-200 animate-pulse">
+                        💡 按住 Alt 键点击选定源点
                       </span>
                     )}
                   </div>
@@ -3190,8 +3223,27 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 willChange: 'transform',
               }}
             >
-              {/* Center precision cross-point dot or Alt-key sampling reticle */}
-              {isAltPressed ? (
+              {/* Center precision cross-point dot or Alt-key Photoshop sampling reticle */}
+              {options.tool === 'clone-stamp' && (isAltPressed || isSamplingActive) ? (
+                <div className="relative flex items-center justify-center">
+                  {/* PS Crosshairs extending outside */}
+                  <div className="absolute w-7 h-[1.5px] bg-black shadow-[0_0_1px_#fff]" />
+                  <div className="absolute h-7 w-[1.5px] bg-black shadow-[0_0_1px_#fff]" />
+                  <div className="w-3.5 h-3.5 rounded-full border border-black bg-rose-500/30 ring-1 ring-white flex items-center justify-center shadow-md animate-pulse">
+                    <div className="w-1 h-1 rounded-full bg-white shadow-xs" />
+                  </div>
+                  <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-rose-600 text-[10px] font-bold text-white shadow-lg whitespace-nowrap pointer-events-none ring-1 ring-white/80">
+                    🎯 按住Alt点击选取采样源
+                  </span>
+                </div>
+              ) : options.tool === 'clone-stamp' && !cloneSource ? (
+                <div className="relative flex items-center justify-center">
+                  <div className="w-1.5 h-1.5 rounded-full bg-amber-500 shadow-[0_0_0_1px_rgba(0,0,0,0.9)]" />
+                  <span className="absolute -bottom-6 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full bg-amber-600 text-[10px] font-bold text-white shadow-lg whitespace-nowrap pointer-events-none ring-1 ring-white/80 animate-bounce">
+                    ⚠️ 按住 Alt 键点击选定采样源
+                  </span>
+                </div>
+              ) : isAltPressed ? (
                 <div className="w-2.5 h-2.5 rounded-full bg-rose-600 ring-2 ring-white flex items-center justify-center shadow-md animate-pulse">
                   <div className="w-1 h-1 rounded-full bg-white" />
                 </div>
@@ -3199,12 +3251,11 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 <div className="w-1.5 h-1.5 rounded-full bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.9)]" />
               )}
 
-              {/* Tool label indicator if cursor circle is large */}
-              {Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.tool === 'clone-stamp' ? (options.cloneStampSize ?? 24) : options.brushSize) * zoom)) > 42 && (
+              {/* Tool label indicator if cursor circle is large and not already showing special badge */}
+              {!(options.tool === 'clone-stamp' && (!cloneSource || isAltPressed || isSamplingActive)) &&
+                Math.max(6, Math.round((options.tool === 'eraser' ? options.eraserSize : options.tool === 'clone-stamp' ? (options.cloneStampSize ?? 24) : options.brushSize) * zoom)) > 42 && (
                 <span className="absolute -bottom-5 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-stone-900/85 text-[10px] font-mono font-bold text-white shadow-sm whitespace-nowrap pointer-events-none">
-                  {isAltPressed
-                    ? '点击取样 (Alt)'
-                    : options.tool === 'eraser'
+                  {options.tool === 'eraser'
                     ? `橡皮 ${options.eraserSize}px`
                     : options.tool === 'clone-stamp'
                     ? `仿制图章 ${options.cloneStampSize ?? 24}px`

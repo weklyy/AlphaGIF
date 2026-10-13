@@ -161,7 +161,7 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                 <div className="absolute w-56 h-80 rounded-full bg-red-400/20 blur-3xl pointer-events-none" />
 
                 {/* Full 1053 x 1746 Frame: Envelope Card sits inside, Pendant sits gracefully above and on spine (WeChat Figure 5 Standard) */}
-                <div className="relative z-10 w-[270px] sm:w-[285px] aspect-[1053/1746] h-[450px] sm:h-[475px] flex items-center justify-center">
+                <div className="relative z-10 w-[265px] sm:w-[285px] aspect-[1053/1746] flex items-center justify-center">
                   
                   {/* 1. Authentic Floating WeChat Red Envelope Card (Figure 5: 861 x 1308 non-editable body starting at Y: 342px) */}
                   <div
@@ -329,53 +329,74 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                     </span>
                   </div>
 
-                  {/* Authentic WeChat Red Packet Bubble Card with Attached Pendant */}
+                  {/* Authentic WeChat Red Packet Bubble Card with Attached Pendant (480 x 384 Frame) */}
                   <div className="flex items-start justify-end gap-2.5 w-full pr-1">
-                    <div className="relative flex flex-col items-end">
-                      {/* 480x384 Bubble Pendant attached cleanly to the red packet card (paws rest right on top rim) */}
+                    <div className="relative w-[230px] aspect-[480/384]">
+                      {/* Authentic WeChat Red Packet Card occupies middle zone (Card height ~180px, centered in the 216px forbidden zone) */}
+                      <div
+                        className="absolute inset-x-2 bg-[#fa9d3b] text-white rounded-2xl rounded-tr-xs overflow-hidden shadow-sm border border-[#e58a27] cursor-pointer active:opacity-90 z-10 flex flex-col justify-between"
+                        style={{
+                          top: '29.6875%', // centered inside 96~312px (Y=114px)
+                          height: '46.875%', // exactly 180px in 384px
+                        }}
+                      >
+                        <div className="p-3 flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-xl bg-[#c23636] flex items-center justify-center text-base shrink-0 shadow-xs border border-white/20">
+                            🧧
+                          </div>
+                          <div className="overflow-hidden flex-1">
+                            <div className="text-xs font-bold leading-tight truncate">
+                              {blessingText}
+                            </div>
+                            <div className="text-[9px] text-amber-100/90 mt-0.5 font-medium truncate">
+                              领取专享定制红包封面
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="bg-white/95 text-neutral-500 text-[9px] px-3 py-1 flex items-center justify-between border-t border-amber-500/20">
+                          <span>微信红包</span>
+                          <span className="text-[8px] text-amber-600 font-bold">专享封面</span>
+                        </div>
+                      </div>
+
+                      {/* 480x384 Bubble Pendant (overlays 1:1 onto the exact 480x384 frame) */}
                       {bubbleResult && (
-                        <div className="absolute -top-[93px] right-2 w-[160px] aspect-[480/384] z-20 pointer-events-none drop-shadow-md">
+                        <div className="absolute inset-0 z-20 pointer-events-none drop-shadow-md">
                           <img
                             src={bubbleResult.url}
                             alt="气泡挂件 (趴在对话框气泡上)"
                             className="w-full h-full object-contain"
                           />
 
-                          {/* Guide Crosshair if Safe Area is active */}
+                          {/* Guide Overlay if Safe Area is active */}
                           {showSafeAreaGuide && (
-                            <div className="absolute inset-0 border border-dashed border-emerald-500 bg-emerald-500/10 rounded-lg flex items-center justify-center">
-                              <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
-                                挂点 ({bubbleResult.anchorX ?? 240}, {bubbleResult.anchorY ?? 200})
-                              </span>
+                            <div className="absolute inset-0 pointer-events-none z-30">
+                              {/* Top Editable Area (0~96px, 25%) */}
+                              <div
+                                className="absolute inset-x-0 top-0 border border-dashed border-emerald-500 bg-emerald-500/10 rounded-t-lg flex items-center justify-center"
+                                style={{ height: '25%' }}
+                              >
+                                <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
+                                  颈部可编辑区 (高96px · 趴气泡)
+                                </span>
+                              </div>
+                              {/* Bottom Editable Area (312~384px, 18.75%) */}
+                              <div
+                                className="absolute inset-x-0 bottom-0 border border-dashed border-emerald-500 bg-emerald-500/10 rounded-b-lg flex items-center justify-center"
+                                style={{ height: '18.75%' }}
+                              >
+                                <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
+                                  底部可编辑区 (72px)
+                                </span>
+                              </div>
                             </div>
                           )}
                         </div>
                       )}
-
-                      {/* Authentic WeChat Red Packet Bubble Card (1:1 WeChat Client) */}
-                      <div className="relative bg-[#fa9d3b] text-white rounded-2xl rounded-tr-xs overflow-hidden shadow-sm border border-[#e58a27] w-[225px] cursor-pointer active:opacity-90">
-                        <div className="p-3.5 flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-[#c23636] flex items-center justify-center text-xl shrink-0 shadow-xs border border-white/20">
-                            🧧
-                          </div>
-                          <div className="overflow-hidden">
-                            <div className="text-xs font-bold leading-tight truncate">
-                              {blessingText}
-                            </div>
-                            <div className="text-[10px] text-amber-100/90 mt-0.5 font-medium">
-                              领取专享定制红包封面
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="bg-white/95 text-neutral-500 text-[10px] px-3.5 py-1.5 flex items-center justify-between border-t border-amber-500/20">
-                          <span>微信红包</span>
-                          <span className="text-[9px] text-amber-600 font-bold">专享封面</span>
-                        </div>
-                      </div>
                     </div>
 
-                    <div className="w-9 h-9 rounded-lg bg-red-600 text-white flex items-center justify-center text-sm font-bold shrink-0 shadow-xs mt-1">
+                    <div className="w-9 h-9 rounded-lg bg-red-600 text-white flex items-center justify-center text-sm font-bold shrink-0 shadow-xs mt-7">
                       {senderAvatar}
                     </div>
                   </div>

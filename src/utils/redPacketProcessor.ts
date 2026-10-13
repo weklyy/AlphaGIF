@@ -83,29 +83,29 @@ export const WECHAT_EDITABLE_ZONES = {
   coverPendant: {
     width: 1053,
     height: 1746,
-    // 微信官方规范 (图3)：封面挂件位于封面的上侧和下侧（上端与脊端），中间为红包封面主体不可放置区
+    // 微信官方规范：封面挂件位于封面的上侧 (342px) 和下侧 (96px)，中间 1308px 为主体不可编辑区
     topZone: {
-      name: '上侧可编辑区域 (上端探头)',
-      minX: 85,
-      maxX: 968,
-      minY: 20,
-      maxY: 360,
+      name: '上侧可编辑区域 (顶部探头)',
+      minX: 96,
+      maxX: 957,
+      minY: 0,
+      maxY: 342,
       defaultAnchorX: 526.5,
       defaultAnchorY: 200, // 微信官方顶部探头推荐位
     },
     bottomZone: {
-      name: '下侧可编辑区域 (脊端垂饰)',
-      minX: 85,
-      maxX: 968,
-      minY: 1380,
-      maxY: 1720,
+      name: '下侧可编辑区域 (底部垂饰)',
+      minX: 96,
+      maxX: 957,
+      minY: 1650,
+      maxY: 1746,
       defaultAnchorX: 526.5,
-      defaultAnchorY: 1540, // 微信官方脊端垂托推荐位
+      defaultAnchorY: 1698, // 微信官方脊端垂托推荐位
     },
     middleForbiddenZone: {
-      minY: 360,
-      maxY: 1380,
-      desc: '封面主体区（头像、昵称、祝福语、開奖金币按钮），严禁放置挂件',
+      minY: 342,
+      maxY: 1650,
+      desc: '封面主体不可编辑区 (1308×861)，严禁放置挂件',
     },
     defaultAnchorX: 526.5,
     defaultAnchorY: 200,
@@ -113,13 +113,35 @@ export const WECHAT_EDITABLE_ZONES = {
   bubblePendant: {
     width: 480,
     height: 384,
-    // 微信官方规范 (图4)：气泡挂件可编辑区域位于聊天气泡上方及安全范围
-    minX: 40,
-    maxX: 440,
-    minY: 20,
-    maxY: 280,
+    // 微信官方规范：气泡挂件总尺寸 480×384
+    // 颈部可编辑区：上面 96 像素 (Y: 0 ~ 96)
+    // 消息底座不可编辑区：中间 216 像素 (Y: 96 ~ 312)
+    // 底部可编辑区：底部 72 像素 (Y: 312 ~ 384)
+    topZone: {
+      name: '上侧颈部可编辑区 (趴气泡/探头)',
+      minX: 40,
+      maxX: 440,
+      minY: 0,
+      maxY: 96,
+      defaultAnchorX: 240,
+      defaultAnchorY: 48,
+    },
+    middleForbiddenZone: {
+      minY: 96,
+      maxY: 312,
+      desc: '气泡主体不可编辑区 (中间 216 像素)',
+    },
+    bottomZone: {
+      name: '下侧底部可编辑区 (底部垂饰)',
+      minX: 40,
+      maxX: 440,
+      minY: 312,
+      maxY: 384,
+      defaultAnchorX: 240,
+      defaultAnchorY: 348,
+    },
     defaultAnchorX: 240,
-    defaultAnchorY: 120, // 气泡上方黄金挂点
+    defaultAnchorY: 48,
   },
 };
 
@@ -548,16 +570,123 @@ export function getAlphaBoundingBox(
   };
 }
 
+export interface PendantPartConfig {
+  source: HTMLImageElement | HTMLCanvasElement;
+  scale?: number; // 0.2 ~ 5.0 (支持放大至 500%)
+  offsetX?: number;
+  offsetY?: number;
+}
+
+/**
+ * Generate 封面挂件 (1053 x 1746) supporting separate Top + Bottom uploads or Full artwork
+ * Automatically merges top and bottom into ONE compliant transparent PNG for WeChat!
+ */
+export async function createCompositeCoverPendant(options: {
+  topPart?: PendantPartConfig | null;
+  bottomPart?: PendantPartConfig | null;
+  fullSource?: (HTMLImageElement | HTMLCanvasElement) | null;
+  addGlow?: boolean;
+  glowColor?: string;
+}): Promise<MaterialResult> {
+  const {
+    topPart,
+    bottomPart,
+    fullSource,
+    addGlow = true,
+    glowColor = '#fef08a',
+  } = options;
+
+  const targetW = WECHAT_RED_PACKET_SPECS.pendant.width; // 1053
+  const targetH = WECHAT_RED_PACKET_SPECS.pendant.height; // 1746
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, targetW, targetH);
+
+  // 1. Full artwork mode
+  if (fullSource) {
+    const trans = await ensureTransparentSubject(fullSource);
+    ctx.drawImage(trans, 0, 0, targetW, targetH);
+  }
+
+  // 2. Top Part (顶部 342px 可编辑区域, Y: 0 ~ 342)
+  // 用户直观心智：小熊/主体最底部默认贴紧不可编辑区上沿 Y = 342
+  let topDrawY = 0;
+  let topDrawH = 0;
+  if (topPart && topPart.source) {
+    const trans = await ensureTransparentSubject(topPart.source);
+    const bbox = getAlphaBoundingBox(trans);
+    if (bbox.hasContent) {
+      const baseH = 280;
+      const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
+      topDrawH = Math.round(baseH * effectiveScale);
+      const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
+      const topDrawX = Math.round((targetW - topDrawW) / 2 + (topPart.offsetX || 0));
+      // 底部重合基准：Y = 342
+      topDrawY = Math.round(342 - topDrawH + (topPart.offsetY || 0));
+
+      ctx.save();
+      if (addGlow) {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = 16;
+      }
+      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+      ctx.restore();
+    }
+  }
+
+  // 3. Bottom Part (底部 96px 可编辑区域, Y: 1650 ~ 1746)
+  // 用户直观心智：垂饰/底托最顶端默认贴紧不可编辑区下沿 Y = 1650
+  let bottomDrawY = 1650;
+  let bottomDrawH = 0;
+  if (bottomPart && bottomPart.source) {
+    const trans = await ensureTransparentSubject(bottomPart.source);
+    const bbox = getAlphaBoundingBox(trans);
+    if (bbox.hasContent) {
+      const baseH = 80;
+      const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 5.0);
+      bottomDrawH = Math.round(baseH * effectiveScale);
+      const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
+      const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (bottomPart.offsetX || 0));
+      // 顶部重合基准：Y = 1650
+      bottomDrawY = Math.round(1650 + (bottomPart.offsetY || 0));
+
+      ctx.save();
+      if (addGlow) {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = 14;
+      }
+      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, bottomDrawX, bottomDrawY, bottomDrawW, bottomDrawH);
+      ctx.restore();
+    }
+  }
+
+  // 微信官方严格审核：清空主体不可编辑区 (Y: 342 ~ 1650, X: 96 ~ 957)
+  ctx.clearRect(96, 342, 861, 1308);
+
+  const blob = await compressPngStrictUnderLimit(canvas, 285 * 1024);
+  const url = URL.createObjectURL(blob);
+
+  return {
+    blob,
+    url,
+    size: blob.size,
+    width: targetW,
+    height: targetH,
+    format: 'PNG',
+    isCompliant: blob.size <= 300 * 1024,
+    warnings: blob.size > 300 * 1024 ? ['封面挂件体积超出 300KB'] : [],
+    anchorX: 526,
+    anchorY: topPart ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
+    inEditableZone: true,
+  };
+}
+
 /**
  * Generate 封面挂件 (1053 x 1746) with transparent background
- * Strictly adheres to WeChat Red Packet Platform Specification (Figure 2 & Figure 3):
- * 1. 封面挂件严格位于封面的【上端】(上侧可编辑区域 Y: 20~360) 或【脊端】(下侧可编辑区域 Y: 1380~1720)
- * 2. 中间区域 (Y: 360~1380) 为红包封面主体展示区（头像、昵称、祝福语、開奖按钮），严禁放置挂件
- * 3. 挂件模式：
- *    - 'top': 上端探头挂件 (默认推荐，如虎头探出顶部，Y ≈ 200)
- *    - 'bottom': 脊端垂饰挂件 (底部元宝/祥瑞底托，Y ≈ 1540)
- *    - 'dual': 上下双端联动挂件 (与图2官方标准一致：顶部探头 + 脊端萌爪/元宝底托)
- * 4. 挂点严格锁定在上侧或下侧可编辑区域内，PNG 体积严格 ≤ 300KB
+ * Backwards-compatible single-source wrapper delegating to createCompositeCoverPendant
  */
 export async function createCoverPendant(
   subjectSource: HTMLImageElement | HTMLCanvasElement,
@@ -572,155 +701,53 @@ export async function createCoverPendant(
 ): Promise<MaterialResult> {
   const {
     placement = 'top',
-    scale = 0.85,
+    scale = 1.0,
     offsetY = 0,
     offsetX = 0,
     addGlow = true,
     glowColor = '#fef08a',
   } = options;
 
-  const targetW = WECHAT_RED_PACKET_SPECS.pendant.width; // 1053
-  const targetH = WECHAT_RED_PACKET_SPECS.pendant.height; // 1746
-
-  const canvas = document.createElement('canvas');
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext('2d')!;
-  ctx.clearRect(0, 0, targetW, targetH);
-
-  const transSubject = await ensureTransparentSubject(subjectSource);
-  const bbox = getAlphaBoundingBox(transSubject);
-  const srcW = bbox.width;
-  const srcH = bbox.height;
-
-  // Normalized placement mode
   const mode = (placement === 'lower' || placement === 'bottom') ? 'bottom' : (placement === 'dual' ? 'dual' : 'top');
 
-  // WeChat Figure 5 Official Standards:
-  // Top Editable Area: Y [0, 342px]
-  // Middle Non-Editable Area: Y [342px, 1650px] (Width: 861px, X: [96, 957])
-  // Bottom Editable Area: Y [1650px, 1746px] (Height: 96px)
-  const maxZoneW = 860;
-  const maxZoneH = 330;
-  const containRatio = Math.min(maxZoneW / srcW, maxZoneH / srcH);
-  const effectiveScale = Math.min(Math.max(scale, 0.3), 1.25);
-  const drawW = Math.round(srcW * containRatio * effectiveScale);
-  const drawH = Math.round(srcH * containRatio * effectiveScale);
-
-  const baseX = targetW / 2; // 526.5
-  // WeChat Figure 2 Alignment: Mascot bottom sits close to red envelope card top edge (Y = 338~340px)
-  const defaultTopAnchorY = Math.round(338 - drawH / 2);
-  const baseY = mode === 'bottom' ? 1690 : defaultTopAnchorY;
-
-  let anchorX = Math.round(baseX + offsetX);
-  let anchorY = Math.round(baseY + offsetY);
-
-  // Clamping into WeChat Figure 5 editable zones:
   if (mode === 'bottom') {
-    anchorX = Math.max(96, Math.min(957, anchorX));
-    anchorY = Math.max(1650, Math.min(1740, anchorY));
-  } else {
-    anchorX = Math.max(96, Math.min(957, anchorX));
-    // Anchor clamped so mascot bottom drawY + drawH <= 340, drawY >= 10
-    anchorY = Math.max(Math.round(drawH / 2 + 10), Math.min(Math.round(340 - drawH / 2), anchorY));
-  }
-
-  ctx.save();
-  if (addGlow) {
-    ctx.shadowColor = glowColor;
-    ctx.shadowBlur = 16;
-  }
-
-  if (mode === 'top' || mode === 'dual') {
-    // 1. Draw top rim subject (Mascot peeking out over top edge, strictly resting at top rim Y <= 340px)
-    const drawX = Math.max(20, Math.min(targetW - drawW - 20, anchorX - drawW / 2));
-    const drawY = Math.max(10, Math.min(340 - drawH, anchorY - drawH / 2));
-    ctx.drawImage(transSubject, bbox.minX, bbox.minY, bbox.width, bbox.height, drawX, drawY, drawW, drawH);
-  }
-
-  if (mode === 'bottom') {
-    // 2. Draw bottom spine subject (Mascot tail, paws, or ingot tray hanging below Y >= 1650px)
-    const drawX = Math.max(20, Math.min(targetW - drawW - 20, anchorX - drawW / 2));
-    const drawY = Math.max(1650, Math.min(targetH - drawH - 5, anchorY - drawH / 2));
-    ctx.drawImage(transSubject, bbox.minX, bbox.minY, bbox.width, bbox.height, drawX, drawY, drawW, drawH);
+    return createCompositeCoverPendant({
+      bottomPart: { source: subjectSource, scale, offsetX, offsetY },
+      addGlow,
+      glowColor,
+    });
   } else if (mode === 'dual') {
-    // 3. Dual mode (Figure 5 exact replica): Also draw bottom spine accent (paws/ingot/tassels in Y >= 1650px)
-    const bottomW = Math.round(drawW * 0.75);
-    const bottomH = Math.min(88, Math.round(drawH * 0.7));
-    const bDrawX = Math.round((targetW - bottomW) / 2 + (offsetX * 0.5));
-    const bDrawY = 1652;
-
-    // Draw festive gold ingot & cute paws over spine
-    ctx.save();
-    const bGrad = ctx.createLinearGradient(bDrawX, bDrawY, bDrawX + bottomW, bDrawY + bottomH);
-    bGrad.addColorStop(0, '#fef08a');
-    bGrad.addColorStop(0.5, '#f59e0b');
-    bGrad.addColorStop(1, '#d97706');
-    ctx.fillStyle = bGrad;
-    ctx.beginPath();
-    ctx.roundRect(bDrawX + bottomW * 0.15, bDrawY + 5, bottomW * 0.7, 45, 22);
-    ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = '#fef9c3';
-    ctx.stroke();
-
-    // Two cute paws hanging down over spine
-    const pawR = 18;
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(bDrawX + bottomW * 0.28, bDrawY + 48, pawR, 0, Math.PI * 2);
-    ctx.arc(bDrawX + bottomW * 0.72, bDrawY + 48, pawR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    return createCompositeCoverPendant({
+      topPart: { source: subjectSource, scale, offsetX, offsetY },
+      bottomPart: { source: subjectSource, scale: scale * 0.75, offsetX, offsetY: 0 },
+      addGlow,
+      glowColor,
+    });
+  } else {
+    return createCompositeCoverPendant({
+      topPart: { source: subjectSource, scale, offsetX, offsetY },
+      addGlow,
+      glowColor,
+    });
   }
-
-  ctx.restore();
-
-  // WeChat Figure 5 Strict Security: Clear any stray pixels in the forbidden envelope body zone (Y: 342 ~ 1650, X: 96 ~ 957)
-  ctx.clearRect(96, 342, 861, 1308);
-
-  // Compress strictly under 285KB PNG (under WeChat 300KB platform limit)
-  const blob = await compressPngStrictUnderLimit(canvas, 285 * 1024);
-  const url = URL.createObjectURL(blob);
-
-  // Check if anchor is in top zone or bottom zone (Figure 5)
-  const inTopZone = anchorX >= 96 && anchorX <= 957 && anchorY >= 0 && anchorY <= 342;
-  const inBottomZone = anchorX >= 96 && anchorX <= 957 && anchorY >= 1650 && anchorY <= 1746;
-  const inEditableZone = inTopZone || inBottomZone;
-
-  return {
-    blob,
-    url,
-    size: blob.size,
-    width: targetW,
-    height: targetH,
-    format: 'PNG',
-    isCompliant: blob.size <= 300 * 1024,
-    warnings: blob.size > 300 * 1024 ? ['挂件体积超出 300KB'] : [],
-    anchorX: Math.round(anchorX),
-    anchorY: Math.round(anchorY),
-    inEditableZone,
-  };
 }
 
 /**
- * Generate 气泡挂件 (480 x 384) with transparent background
- * Strictly adheres to WeChat Red Packet Platform Specification (Figure 6):
- * 1. 顶部可编辑区域: 高度 96px (Y: 0 ~ 96px)，挂件主体/萌宠趴在气泡卡片上方
- * 2. 中间不可编辑区域: 高度 216px (Y: 96 ~ 312px)，【严禁任何图案进入，否则微信平台直接报错】
- * 3. 底部可编辑区域: 高度 72px (Y: 312 ~ 384px)，用于尾巴/流苏悬垂
- * 4. 保证完整零截断 (小熊身体、耳朵、四肢完全保留且在 96px 内)
+ * Generate 气泡挂件 (480 x 384) supporting separate Top + Bottom uploads or Full artwork
+ * Automatically merges top and bottom into ONE compliant transparent PNG for WeChat!
  */
-export async function createBubblePendant(
-  subjectSource: HTMLImageElement | HTMLCanvasElement,
-  options: {
-    scale?: number;
-    offsetX?: number;
-    offsetY?: number;
-    addGlow?: boolean;
-  } = {}
-): Promise<MaterialResult> {
-  const { scale = 0.9, offsetX = 0, offsetY = 0, addGlow = true } = options;
+export async function createCompositeBubblePendant(options: {
+  topPart?: PendantPartConfig | null;
+  bottomPart?: PendantPartConfig | null;
+  fullSource?: (HTMLImageElement | HTMLCanvasElement) | null;
+  addGlow?: boolean;
+}): Promise<MaterialResult> {
+  const {
+    topPart,
+    bottomPart,
+    fullSource,
+    addGlow = true,
+  } = options;
 
   const targetW = WECHAT_RED_PACKET_SPECS.bubble.width; // 480
   const targetH = WECHAT_RED_PACKET_SPECS.bubble.height; // 384
@@ -731,64 +758,79 @@ export async function createBubblePendant(
   const ctx = canvas.getContext('2d')!;
   ctx.clearRect(0, 0, targetW, targetH);
 
-  const transSubject = await ensureTransparentSubject(subjectSource);
-  // Detect true non-transparent bounds of the subject (e.g. little bear)
-  const bbox = getAlphaBoundingBox(transSubject);
-  const srcW = bbox.width;
-  const srcH = bbox.height;
-
-  // 1. WeChat Figure 4 & Figure 6 Official Safe Constraint:
-  // Canvas: 480 x 384
-  // Safe Editable Zone: X: [40, 440] (width 400), Y: [20, 280] (height 260)
-  // Message Bubble Base Forbidden Zone: Y: [280, 384]
-  // Bear rests on top rim of bubble (趴在对话框气泡上, Y = 278)
-  const maxZoneW = 390;
-  const maxZoneH = 240;
-
-  const containRatio = Math.min(maxZoneW / srcW, maxZoneH / srcH);
-  const effectiveScale = Math.min(Math.max(scale, 0.4), 1.25);
-  const drawW = Math.min(maxZoneW, Math.round(srcW * containRatio * effectiveScale));
-  const drawH = Math.min(maxZoneH, Math.round(srcH * containRatio * effectiveScale));
-
-  // 2. Base anchor point in WeChat's bubble top editable zone
-  // When resting on the bubble (趴在对话框气泡上, Figure 3): paws sit at Y = 278
-  const baseAnchorX = Math.round(targetW / 2); // 240
-  const defaultBearRestY = Math.round(278 - drawH / 2); // Bear paws touch Y = 278
-  const baseAnchorY = defaultBearRestY;
-
-  // Clamped anchor strictly inside safe editable zone:
-  const anchorX = Math.max(Math.round(drawW / 2 + 40), Math.min(Math.round(440 - drawW / 2), Math.round(baseAnchorX + offsetX)));
-  const anchorY = Math.max(Math.round(drawH / 2 + 20), Math.min(Math.round(278 - drawH / 2), Math.round(baseAnchorY + offsetY)));
-
-  // Guaranteed ZERO PIXELS enter the forbidden Y >= 280 zone:
-  const drawX = Math.round(anchorX - drawW / 2);
-  const drawY = Math.max(20, Math.min(278 - drawH, Math.round(anchorY - drawH / 2)));
-
-  ctx.save();
-  if (addGlow) {
-    ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
-    ctx.shadowBlur = 8;
+  // 1. Full artwork mode
+  if (fullSource) {
+    const trans = await ensureTransparentSubject(fullSource);
+    ctx.drawImage(trans, 0, 0, targetW, targetH);
   }
 
-  // Draw ONLY the real subject pixels completely inside safe editable zone
-  ctx.drawImage(transSubject, bbox.minX, bbox.minY, bbox.width, bbox.height, drawX, drawY, drawW, drawH);
-  ctx.restore();
+  // 2. Top Part (顶部 96px 颈部可编辑区, Y: 0 ~ 96)
+  // 微信官方平台真实展示特性：挂件在聊天框中与气泡卡片等比例渲染，顶部探头/小熊双爪自然搭在气泡边缘
+  let topDrawY = 0;
+  let topDrawH = 0;
+  if (topPart && topPart.source) {
+    const trans = await ensureTransparentSubject(topPart.source);
+    const bbox = getAlphaBoundingBox(trans);
+    if (bbox.hasContent) {
+      // WeChat Red Packet bubble pendant top proportion: base height 118px matches official WeChat template
+      const baseH = 118;
+      const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
+      topDrawH = Math.round(baseH * effectiveScale);
+      const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
+      const topDrawX = Math.round((targetW - topDrawW) / 2 + (topPart.offsetX || 0));
+      // 基准：爪子/底部搭在 Y = 96 边缘，配合 offsetY 精准上下调整
+      topDrawY = Math.round(96 - topDrawH + (topPart.offsetY || 0));
 
-  // STRICT WECHAT AUDIT DEFENSE (Figure 4 & Figure 6):
-  // Clean all pixels in forbidden zones so WeChat automated inspection NEVER fails with "侵入不可编辑区域":
-  // 1. Clear bubble base forbidden zone (Y >= 280)
-  ctx.clearRect(0, 280, targetW, targetH - 280);
-  // 2. Clear outer boundary safety margins
-  ctx.clearRect(0, 0, targetW, 20);
-  ctx.clearRect(0, 0, 40, targetH);
-  ctx.clearRect(440, 0, targetW - 440, targetH);
+      ctx.save();
+      if (addGlow) {
+        ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
+        ctx.shadowBlur = 8;
+      }
+      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+      ctx.restore();
+    }
+  }
 
-  // Compress strictly under 280KB (WeChat 300KB ceiling)
+  // 3. Bottom Part (底部 72px 可编辑区, Y: 312 ~ 384)
+  // 用户直观心智：垂饰最顶端默认重合在不可编辑区域下沿 Y = 312
+  let bottomDrawY = 312;
+  let bottomDrawH = 0;
+  if (bottomPart && bottomPart.source) {
+    const trans = await ensureTransparentSubject(bottomPart.source);
+    const bbox = getAlphaBoundingBox(trans);
+    if (bbox.hasContent) {
+      const baseH = 60;
+      const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 5.0);
+      bottomDrawH = Math.round(baseH * effectiveScale);
+      const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
+      const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (bottomPart.offsetX || 0));
+      // 顶部重合基准：Y = 312
+      bottomDrawY = Math.round(312 + (bottomPart.offsetY || 0));
+
+      ctx.save();
+      if (addGlow) {
+        ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
+        ctx.shadowBlur = 8;
+      }
+      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, bottomDrawX, bottomDrawY, bottomDrawW, bottomDrawH);
+      ctx.restore();
+    }
+  }
+
+  // 微信官方严格审核：中间 216px (Y: 96 ~ 312) 绝对不可编辑区，100% 彻底抹除！
+  ctx.clearRect(0, 96, targetW, 216);
+
+  if (!bottomPart && !fullSource) {
+    // 仅顶部时，确保 Y >= 96 全部清空
+    ctx.clearRect(0, 96, targetW, targetH - 96);
+  }
+  if (!topPart && !fullSource) {
+    // 仅底部时，确保 Y < 312 全部清空
+    ctx.clearRect(0, 0, targetW, 312);
+  }
+
   const blob = await compressPngStrictUnderLimit(canvas, 280 * 1024);
   const url = URL.createObjectURL(blob);
-
-  // Compliance check: anchor point and drawing strictly inside Figure 4/6 editable area
-  const inEditableZone = drawY >= 20 && (drawY + drawH) <= 280 && drawX >= 40 && (drawX + drawW) <= 440;
 
   return {
     blob,
@@ -799,10 +841,39 @@ export async function createBubblePendant(
     format: 'PNG',
     isCompliant: blob.size <= 300 * 1024,
     warnings: blob.size > 300 * 1024 ? ['气泡挂件体积超出 300KB'] : [],
-    anchorX: Math.round(anchorX),
-    anchorY: Math.round(anchorY),
-    inEditableZone,
+    anchorX: 240,
+    anchorY: topPart ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
+    inEditableZone: true,
   };
+}
+
+/**
+ * Generate 气泡挂件 (480 x 384) with transparent background
+ * Backwards-compatible single-source wrapper delegating to createCompositeBubblePendant
+ */
+export async function createBubblePendant(
+  subjectSource: HTMLImageElement | HTMLCanvasElement,
+  options: {
+    placement?: 'top' | 'bottom';
+    scale?: number;
+    offsetX?: number;
+    offsetY?: number;
+    addGlow?: boolean;
+  } = {}
+): Promise<MaterialResult> {
+  const { placement = 'top', scale = 1.0, offsetX = 0, offsetY = 0, addGlow = true } = options;
+
+  if (placement === 'bottom') {
+    return createCompositeBubblePendant({
+      bottomPart: { source: subjectSource, scale, offsetX, offsetY },
+      addGlow,
+    });
+  } else {
+    return createCompositeBubblePendant({
+      topPart: { source: subjectSource, scale, offsetX, offsetY },
+      addGlow,
+    });
+  }
 }
 
 /**

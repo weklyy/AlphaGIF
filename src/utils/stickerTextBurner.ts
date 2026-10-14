@@ -4,11 +4,12 @@
  */
 
 import { SlicedStickerItem } from '../types';
-import { StickerTextConfig, drawStickerText } from './stickerFontPresets';
+import { StickerTextConfig, drawStickerText, applyEraseActions } from './stickerFontPresets';
 import { decodeGif, encodeTransparentGifWithParams, decodeMediaFile } from './gifProcessor';
 
 /**
- * Burn custom typography (font, size, color, stroke, position) onto a single sticker item (GIF or PNG).
+ * Burn custom typography (font, size, color, stroke, position, orientation)
+ * and manual erase operations (wiping out original text) onto a single sticker item (GIF or PNG).
  * Preserves the original raw blob so the user can re-edit or undo text anytime without quality degradation.
  */
 export async function burnTextToStickerItem(
@@ -43,8 +44,15 @@ export async function burnTextToStickerItem(
       ctx.clearRect(0, 0, width, height);
       ctx.putImageData(frame.imageData, 0, 0);
 
-      // Draw custom styled text overlay
-      drawStickerText(ctx, config, width, height);
+      // Apply manual eraser actions (wipe out original text) across all GIF frames
+      if (config.eraseActions && config.eraseActions.length > 0) {
+        applyEraseActions(ctx, config.eraseActions);
+      }
+
+      // Draw custom styled text overlay (if text is provided)
+      if (config.text && config.text.trim().length > 0) {
+        drawStickerText(ctx, config, width, height);
+      }
 
       const modifiedImageData = ctx.getImageData(0, 0, width, height);
       updatedFrames.push({
@@ -108,8 +116,15 @@ export async function burnTextToStickerItem(
         ctx.clearRect(0, 0, w, h);
         ctx.drawImage(img, 0, 0);
 
+        // Apply manual eraser actions (wipe out original text)
+        if (config.eraseActions && config.eraseActions.length > 0) {
+          applyEraseActions(ctx, config.eraseActions);
+        }
+
         // Draw styled text
-        drawStickerText(ctx, config, w, h);
+        if (config.text && config.text.trim().length > 0) {
+          drawStickerText(ctx, config, w, h);
+        }
 
         const repImageData = ctx.getImageData(0, 0, w, h);
         const repDataUrl = canvas.toDataURL('image/png');

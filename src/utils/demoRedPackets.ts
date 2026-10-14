@@ -697,7 +697,7 @@ async function generateCuteBearTheme() {
   bctx.clearRect(0, 0, 480, 384);
 
   // Draw cute bear with paws directly resting on Y = 96 (card top edge)
-  drawCuteBearOnBubble(bctx, 240, 52, 94, 96);
+  drawCuteBearOnBubble(bctx, 240, 48, 106, 96);
 
   // Strict clear of non-editable middle (96~312) and bottom
   bctx.clearRect(0, 96, 480, 288);
@@ -972,9 +972,9 @@ function drawCuteBearOnBubble(ctx: CanvasRenderingContext2D, cx: number, cy: num
   ctx.fill();
 
   // Two cute little paws hanging directly over the bubble rim (趴在气泡上, Figure 3)
-  // Paws touch bubbleRimY (e.g. 276px), strictly staying above 280px
+  // Paws touch bubbleRimY (96px), bottom of paws perfectly touches the envelope card edge
   const pawR = r * 0.17;
-  const pawY = bubbleRimY - pawR * 0.8;
+  const pawY = bubbleRimY - (pawR * 0.8 + 1.25);
 
   ctx.fillStyle = '#ffffff';
   ctx.strokeStyle = '#f59e0b';

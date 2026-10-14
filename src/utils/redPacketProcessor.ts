@@ -516,10 +516,11 @@ export interface AlphaBoundingBox {
 /**
  * Accurately detects non-transparent pixel bounding box of an image/canvas.
  * Crucial for zero-truncation guarantee (小熊完整无截断).
+ * Supports smart shadow filter (ignoring faint floor contact shadows alpha < threshold).
  */
 export function getAlphaBoundingBox(
   source: HTMLCanvasElement | HTMLImageElement,
-  alphaThreshold = 15
+  alphaThreshold = 24
 ): AlphaBoundingBox {
   const w = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
   const h = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
@@ -545,7 +546,9 @@ export function getAlphaBoundingBox(
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
-      const a = data[(y * w + x) * 4 + 3];
+      const idx = (y * w + x) * 4;
+      const a = data[idx + 3];
+      // Filter out pure transparent pixels as well as near-transparent floor shadow noise
       if (a > alphaThreshold) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -570,11 +573,79 @@ export function getAlphaBoundingBox(
   };
 }
 
+/**
+ * Automatically trims transparent, semi-transparent, and near-white/shadow borders
+ * tightly around the actual subject so no empty padding or floor shadows fool alignment.
+ */
+export async function trimImageTransparentBorders(
+  source: HTMLImageElement | HTMLCanvasElement,
+  options: {
+    alphaThreshold?: number;
+    bottomCropPercent?: number; // 0 ~ 0.8 (e.g. 0.25 to chop off bottom 25% empty/shadow space)
+    topCropPercent?: number;
+    padding?: number;
+  } = {}
+): Promise<{ canvas: HTMLCanvasElement; img: HTMLImageElement; bbox: AlphaBoundingBox; originalW: number; originalH: number }> {
+  const {
+    alphaThreshold = 26,
+    bottomCropPercent = 0,
+    topCropPercent = 0,
+    padding = 2,
+  } = options;
+
+  const w = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
+  const h = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
+
+  // 1. Initial bounding box
+  const bbox = getAlphaBoundingBox(source, alphaThreshold);
+
+  if (!bbox.hasContent) {
+    const emptyCanvas = document.createElement('canvas');
+    emptyCanvas.width = Math.max(1, w);
+    emptyCanvas.height = Math.max(1, h);
+    const img = await loadImageElement(emptyCanvas.toDataURL('image/png'));
+    return { canvas: emptyCanvas, img, bbox, originalW: w, originalH: h };
+  }
+
+  // 2. Apply bottom and top percentage trims if requested (to chop off un-matted ground/shadows)
+  let cropMinY = bbox.minY + Math.round(bbox.height * Math.max(0, Math.min(0.5, topCropPercent)));
+  let cropMaxY = bbox.maxY - Math.round(bbox.height * Math.max(0, Math.min(0.8, bottomCropPercent)));
+  if (cropMaxY <= cropMinY) {
+    cropMaxY = cropMinY + 10;
+  }
+
+  let cropMinX = Math.max(0, bbox.minX - padding);
+  let cropMaxX = Math.min(w - 1, bbox.maxX + padding);
+  cropMinY = Math.max(0, cropMinY - padding);
+  cropMaxY = Math.min(h - 1, cropMaxY + padding);
+
+  const cropW = Math.max(1, cropMaxX - cropMinX + 1);
+  const cropH = Math.max(1, cropMaxY - cropMinY + 1);
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = cropW;
+  outCanvas.height = cropH;
+  const ctx = outCanvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(source, cropMinX, cropMinY, cropW, cropH, 0, 0, cropW, cropH);
+
+  const img = await loadImageElement(outCanvas.toDataURL('image/png'));
+  const newBbox = getAlphaBoundingBox(outCanvas, alphaThreshold);
+
+  return {
+    canvas: outCanvas,
+    img,
+    bbox: newBbox,
+    originalW: w,
+    originalH: h,
+  };
+}
+
 export interface PendantPartConfig {
   source: HTMLImageElement | HTMLCanvasElement;
   scale?: number; // 0.2 ~ 5.0 (支持放大至 500%)
   offsetX?: number;
   offsetY?: number;
+  bottomCropPercent?: number; // 0% ~ 80% 去除底部留白
 }
 
 /**
@@ -617,7 +688,14 @@ export async function createCompositeCoverPendant(options: {
   let topDrawH = 0;
   if (topPart && topPart.source) {
     const trans = await ensureTransparentSubject(topPart.source);
-    const bbox = getAlphaBoundingBox(trans);
+    const trimmed = await trimImageTransparentBorders(trans, {
+      alphaThreshold: 24,
+      bottomCropPercent: topPart.bottomCropPercent || 0,
+      padding: 0,
+    });
+    const bbox = trimmed.bbox;
+    const drawSource = trimmed.canvas;
+
     if (bbox.hasContent) {
       const baseH = 280;
       const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
@@ -632,7 +710,7 @@ export async function createCompositeCoverPendant(options: {
         ctx.shadowColor = glowColor;
         ctx.shadowBlur = 16;
       }
-      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+      ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
       ctx.restore();
     }
   }
@@ -770,10 +848,18 @@ export async function createCompositeBubblePendant(options: {
   let topDrawH = 0;
   if (topPart && topPart.source) {
     const trans = await ensureTransparentSubject(topPart.source);
-    const bbox = getAlphaBoundingBox(trans);
+    // Auto-trim transparent borders and apply bottom crop if user requested
+    const trimmed = await trimImageTransparentBorders(trans, {
+      alphaThreshold: 24,
+      bottomCropPercent: topPart.bottomCropPercent || 0,
+      padding: 0,
+    });
+    const bbox = trimmed.bbox;
+    const drawSource = trimmed.canvas;
+
     if (bbox.hasContent) {
-      // WeChat Red Packet bubble pendant top proportion: base height 118px matches official WeChat template
-      const baseH = 118;
+      // WeChat Red Packet bubble pendant top proportion: base height 96px matches official WeChat template (0 ~ 96px zone)
+      const baseH = 96;
       const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
       topDrawH = Math.round(baseH * effectiveScale);
       const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
@@ -786,20 +872,20 @@ export async function createCompositeBubblePendant(options: {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
       }
-      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+      ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
       ctx.restore();
     }
   }
 
   // 3. Bottom Part (底部 72px 可编辑区, Y: 312 ~ 384)
-  // 用户直观心智：垂饰最顶端默认重合在不可编辑区域下沿 Y = 312
+  // 用户直观心智：垂饰最顶端默认重合在不可编辑区域下沿 Y = 312，标准高度 72px
   let bottomDrawY = 312;
   let bottomDrawH = 0;
   if (bottomPart && bottomPart.source) {
     const trans = await ensureTransparentSubject(bottomPart.source);
     const bbox = getAlphaBoundingBox(trans);
     if (bbox.hasContent) {
-      const baseH = 60;
+      const baseH = 72;
       const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 5.0);
       bottomDrawH = Math.round(baseH * effectiveScale);
       const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));

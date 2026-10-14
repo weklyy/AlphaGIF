@@ -332,12 +332,12 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                   {/* Authentic WeChat Red Packet Bubble Card with Attached Pendant (480 x 384 Frame) */}
                   <div className="flex items-start justify-end gap-2.5 w-full pr-1">
                     <div className="relative w-[230px] aspect-[480/384]">
-                      {/* Authentic WeChat Red Packet Card occupies middle zone (Card height ~180px, centered in the 216px forbidden zone) */}
+                      {/* Authentic WeChat Red Packet Card occupies middle zone (Card height exactly 96~312px, seamless with 96px top boundary) */}
                       <div
                         className="absolute inset-x-2 bg-[#fa9d3b] text-white rounded-2xl rounded-tr-xs overflow-hidden shadow-sm border border-[#e58a27] cursor-pointer active:opacity-90 z-10 flex flex-col justify-between"
                         style={{
-                          top: '29.6875%', // centered inside 96~312px (Y=114px)
-                          height: '46.875%', // exactly 180px in 384px
+                          top: '25%', // 紧贴 Y = 96px，与小熊下沿无缝紧密贴合
+                          height: '56.25%', // 完整贴合中间 216px 红包卡片区 (96~312px)
                         }}
                       >
                         <div className="p-3 flex items-center gap-2.5">

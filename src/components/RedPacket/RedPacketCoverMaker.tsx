@@ -36,6 +36,8 @@ import {
   Crown,
   Smile,
   FileCheck,
+  Scissors,
+  Crop,
 } from 'lucide-react';
 import {
   WECHAT_RED_PACKET_SPECS,
@@ -52,6 +54,9 @@ import {
   packageAllRedPacketAssets,
   loadImageElement,
   ensureTransparentSubject,
+  trimImageTransparentBorders,
+  getAlphaBoundingBox,
+  AlphaBoundingBox,
 } from '../../utils/redPacketProcessor';
 import { removeBackgroundWithAI } from '../../utils/aiBackgroundRemoval';
 import { DEMO_RED_PACKET_THEMES } from '../../utils/demoRedPackets';
@@ -126,6 +131,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [pendantScale, setPendantScale] = useState(1.0);
   const [pendantOffsetX, setPendantOffsetX] = useState(0);
   const [pendantOffsetY, setPendantOffsetY] = useState(0);
+  const [pendantTopBottomCrop, setPendantTopBottomCrop] = useState<number>(0); // 0 ~ 0.8
   const [pendantTopFileName, setPendantTopFileName] = useState('');
   const [pendantBottomFileName, setPendantBottomFileName] = useState('');
   const [pendantFullFileName, setPendantFullFileName] = useState('');
@@ -140,6 +146,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [bubbleTopScale, setBubbleTopScale] = useState<number>(1.0);
   const [bubbleTopOffsetX, setBubbleTopOffsetX] = useState<number>(0);
   const [bubbleTopOffsetY, setBubbleTopOffsetY] = useState<number>(0);
+  const [bubbleTopBottomCrop, setBubbleTopBottomCrop] = useState<number>(0); // 0 ~ 0.8 (底部空白裁切百分比)
   const [bubbleBottomScale, setBubbleBottomScale] = useState<number>(1.0);
   const [bubbleBottomOffsetX, setBubbleBottomOffsetX] = useState<number>(0);
   const [bubbleBottomOffsetY, setBubbleBottomOffsetY] = useState<number>(0);
@@ -151,6 +158,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [bubbleBottomFileName, setBubbleBottomFileName] = useState('');
   const [bubbleFullFileName, setBubbleFullFileName] = useState('');
   const [showGuides, setShowGuides] = useState(true);
+
+  // Crop & Trim Modal States
+  const [cropModalOpen, setCropModalOpen] = useState(false);
+  const [cropModalTarget, setCropModalTarget] = useState<'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom'>('bubbleTop');
+  const [cropModalImg, setCropModalImg] = useState<HTMLImageElement | null>(null);
+  const [cropModalBottomCrop, setCropModalBottomCrop] = useState<number>(0);
+  const [cropModalTopCrop, setCropModalTopCrop] = useState<number>(0);
 
   // Customization Options: Story (750x1250)
   const [storyTitle, setStoryTitle] = useState('红包故事 · 岁岁平安');
@@ -331,6 +345,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     bottomImg?: HTMLImageElement | null;
     fullImg?: HTMLImageElement | null;
     mode?: 'split' | 'full';
+    topBottomCrop?: number;
   }) => {
     const mode = opts?.mode ?? pendantUploadMode;
     const tImg = opts?.topImg !== undefined ? opts.topImg : pendantTopImg;
@@ -340,6 +355,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     const tScale = opts?.topScale ?? pendantTopScale;
     const tOffX = opts?.topOffX ?? pendantTopOffsetX;
     const tOffY = opts?.topOffY ?? pendantTopOffsetY;
+    const tCrop = opts?.topBottomCrop !== undefined ? opts.topBottomCrop : pendantTopBottomCrop;
 
     const bScale = opts?.bottomScale ?? pendantBottomScale;
     const bOffX = opts?.bottomOffX ?? pendantBottomOffsetX;
@@ -348,7 +364,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     try {
       if (mode === 'split') {
         const res = await createCompositeCoverPendant({
-          topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY } : null,
+          topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY, bottomCropPercent: tCrop } : null,
           bottomPart: bImg ? { source: bImg, scale: bScale, offsetX: bOffX, offsetY: bOffY } : null,
           addGlow: pendantAddGlow,
         });
@@ -380,6 +396,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     bottomImg?: HTMLImageElement | null;
     fullImg?: HTMLImageElement | null;
     mode?: 'split' | 'full';
+    topBottomCrop?: number;
   }) => {
     const mode = opts?.mode ?? bubbleUploadMode;
     const tImg = opts?.topImg !== undefined ? opts.topImg : bubbleTopImg;
@@ -389,6 +406,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     const tScale = opts?.topScale ?? bubbleTopScale;
     const tOffX = opts?.topOffX ?? bubbleTopOffsetX;
     const tOffY = opts?.topOffY ?? bubbleTopOffsetY;
+    const tCrop = opts?.topBottomCrop !== undefined ? opts.topBottomCrop : bubbleTopBottomCrop;
 
     const bScale = opts?.bottomScale ?? bubbleBottomScale;
     const bOffX = opts?.bottomOffX ?? bubbleBottomOffsetX;
@@ -397,7 +415,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     try {
       if (mode === 'split') {
         const res = await createCompositeBubblePendant({
-          topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY } : null,
+          topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY, bottomCropPercent: tCrop } : null,
           bottomPart: bImg ? { source: bImg, scale: bScale, offsetX: bOffX, offsetY: bOffY } : null,
           addGlow: true,
         });
@@ -1064,12 +1082,16 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       }
 
       setProcessingProgress(85);
-      const cutoutImg = await loadImageElement(cutoutCanvas.toDataURL('image/png'));
+      // Auto-trim transparent borders and shadows so the subject fits snugly
+      const trimmed = await trimImageTransparentBorders(cutoutCanvas, { alphaThreshold: 24, padding: 0 });
+      const cutoutImg = trimmed.img;
+
       if (slot === 'top') {
         setBubbleTopImg(cutoutImg);
         setBubbleTopFileName(file.name);
+        setBubbleTopBottomCrop(0);
         setBubbleActivePart('top');
-        await renderCompositeBubble({ topImg: cutoutImg });
+        await renderCompositeBubble({ topImg: cutoutImg, topBottomCrop: 0 });
       } else if (slot === 'bottom') {
         setBubbleBottomImg(cutoutImg);
         setBubbleBottomFileName(file.name);
@@ -1081,13 +1103,103 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         await renderCompositeBubble({ fullImg: cutoutImg });
       }
       setProcessingProgress(100);
-      onNotification(`🎉 气泡挂件${slot === 'top' ? '顶部' : slot === 'bottom' ? '底部' : '完整'}图片已更新，并已自动合成至微信 480×384 规范图！`);
+      onNotification(`🎉 气泡挂件${slot === 'top' ? '顶部' : slot === 'bottom' ? '底部' : '完整'}图片已更新，已自动紧凑识别主体并合成至微信 480×384 规范图！`);
     } catch (e: any) {
       onNotification('气泡挂件处理失败: ' + e.message);
     } finally {
       setTimeout(() => {
         setIsProcessing(false);
       }, 300);
+    }
+  };
+
+  const handleAutoTightTrim = async (slot: 'bubbleTop' | 'pendantTop') => {
+    setIsProcessing(true);
+    setProcessingStatus('正在智能检测主体轮廓，清除周围空白与接触阴影...');
+    try {
+      const src = slot === 'bubbleTop' ? bubbleTopImg : pendantTopImg;
+      if (!src) return;
+      const trimmed = await trimImageTransparentBorders(src, { alphaThreshold: 35, padding: 0 });
+      if (slot === 'bubbleTop') {
+        setBubbleTopImg(trimmed.img);
+        setBubbleTopBottomCrop(0);
+        await renderCompositeBubble({ topImg: trimmed.img, topBottomCrop: 0 });
+        onNotification('✨ 已成功紧凑裁切！小熊底部多余空白与阴影已清除，已紧密贴齐微信红包卡片');
+      } else {
+        setPendantTopImg(trimmed.img);
+        setPendantTopBottomCrop(0);
+        await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0 });
+        onNotification('✨ 已成功紧凑裁切！挂件底部多余空白与阴影已清除');
+      }
+    } catch (e: any) {
+      onNotification('裁切失败: ' + e.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleOpenCropModal = (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom') => {
+    let img: HTMLImageElement | null = null;
+    let bottomCrop = 0;
+    if (slot === 'bubbleTop') {
+      img = bubbleTopImg;
+      bottomCrop = bubbleTopBottomCrop;
+    } else if (slot === 'bubbleBottom') {
+      img = bubbleBottomImg;
+    } else if (slot === 'pendantTop') {
+      img = pendantTopImg;
+      bottomCrop = pendantTopBottomCrop;
+    } else {
+      img = pendantBottomImg;
+    }
+
+    if (!img) {
+      onNotification('请先上传图片再进行裁剪');
+      return;
+    }
+    setCropModalTarget(slot);
+    setCropModalImg(img);
+    setCropModalBottomCrop(bottomCrop);
+    setCropModalTopCrop(0);
+    setCropModalOpen(true);
+  };
+
+  const handleApplyCropModal = async () => {
+    if (!cropModalImg) return;
+    setIsProcessing(true);
+    setProcessingStatus('正在应用裁剪并重新合成...');
+    try {
+      const trimmed = await trimImageTransparentBorders(cropModalImg, {
+        alphaThreshold: 24,
+        bottomCropPercent: cropModalBottomCrop,
+        topCropPercent: cropModalTopCrop,
+        padding: 0,
+      });
+
+      if (cropModalTarget === 'bubbleTop') {
+        setBubbleTopImg(trimmed.img);
+        setBubbleTopBottomCrop(0);
+        await renderCompositeBubble({ topImg: trimmed.img, topBottomCrop: 0 });
+        onNotification('🎉 裁剪完成！小熊已紧密贴合红包顶部');
+      } else if (cropModalTarget === 'pendantTop') {
+        setPendantTopImg(trimmed.img);
+        setPendantTopBottomCrop(0);
+        await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0 });
+        onNotification('🎉 裁剪完成！挂件已紧密贴合');
+      } else if (cropModalTarget === 'bubbleBottom') {
+        setBubbleBottomImg(trimmed.img);
+        await renderCompositeBubble({ bottomImg: trimmed.img });
+        onNotification('🎉 底部垂饰裁剪完成！');
+      } else {
+        setPendantBottomImg(trimmed.img);
+        await renderCompositePendant({ bottomImg: trimmed.img });
+        onNotification('🎉 底部垂饰裁剪完成！');
+      }
+      setCropModalOpen(false);
+    } catch (e: any) {
+      onNotification('裁剪失败: ' + e.message);
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -2562,7 +2674,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           A
                         </span>
                         <span className="font-bold text-xs text-neutral-900">顶部趴贴挂件</span>
-                        <span className="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">颈部 0~96px</span>
+                        <span className="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">标准高度 96px (0~96px)</span>
                       </div>
                       {bubbleTopImg && (
                         <button
@@ -2584,20 +2696,45 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         )}
                       </div>
                       <div className="flex-1 space-y-1">
-                        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                          <Upload className="w-3.5 h-3.5" />
-                          <span>{bubbleTopImg ? '替换顶部图片' : '上传顶部图片'}</span>
-                          <input
-                            type="file"
-                            accept="image/png,image/jpeg,image/webp"
-                            className="hidden"
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files[0]) {
-                                handleUploadBubbleSlot(e.target.files[0], 'top');
-                              }
-                            }}
-                          />
-                        </label>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>{bubbleTopImg ? '替换顶部图片' : '上传顶部图片'}</span>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/webp"
+                              className="hidden"
+                              onChange={(e) => {
+                                if (e.target.files && e.target.files[0]) {
+                                  handleUploadBubbleSlot(e.target.files[0], 'top');
+                                }
+                              }}
+                            />
+                          </label>
+
+                          {bubbleTopImg && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleAutoTightTrim('bubbleTop')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 active:scale-95 text-emerald-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-emerald-300 shadow-2xs"
+                                title="一键识别小熊身体轮廓，切除所有外围空白与阴影"
+                              >
+                                <Scissors className="w-3 h-3 text-emerald-700" />
+                                <span>智能紧凑去留白</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenCropModal('bubbleTop')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-xs rounded-xl cursor-pointer transition-all border border-neutral-200 shadow-2xs"
+                                title="打开精确可视化裁剪工具"
+                              >
+                                <Crop className="w-3 h-3 text-neutral-600" />
+                                <span>手动裁剪</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
                         <p className="text-[10px] text-neutral-400 truncate">
                           {bubbleTopFileName || '如：趴气泡小熊、探头吉祥物'}
                         </p>
@@ -2607,7 +2744,10 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     {/* Scale Controls (20% to 500%) with [+] and [-] fine-tuning */}
                     <div className="space-y-1.5 pt-2 border-t border-neutral-200/70 text-xs">
                       <div className="flex items-center justify-between font-bold text-neutral-700">
-                        <span>缩放大小 (最大500%)</span>
+                        <div className="flex items-center gap-1.5">
+                          <span>缩放大小</span>
+                          <span className="text-[10px] text-neutral-400 font-normal">基准高 96px (100% 完整显示在 0~96px 内)</span>
+                        </div>
                         <span className="font-mono text-emerald-800 font-black">{Math.round(bubbleTopScale * 100)}%</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -2653,22 +2793,31 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         </button>
                       </div>
                       <div className="flex items-center gap-1 pt-1 flex-wrap">
-                        {[0.5, 1.0, 1.5, 2.5, 3.5, 5.0].map((val) => (
+                        {[
+                          { val: 0.5, label: '50%' },
+                          { val: 0.8, label: '80%' },
+                          { val: 1.0, label: '100% 满高 (96px)' },
+                          { val: 1.2, label: '120%' },
+                          { val: 1.5, label: '150%' },
+                          { val: 2.0, label: '200%' },
+                        ].map((item) => (
                           <button
-                            key={val}
+                            key={item.val}
                             type="button"
                             onClick={() => {
-                              setBubbleTopScale(val);
+                              setBubbleTopScale(item.val);
                               setBubbleActivePart('top');
-                              renderCompositeBubble({ topScale: val });
+                              renderCompositeBubble({ topScale: item.val });
                             }}
                             className={`text-[9px] px-1.5 py-0.5 rounded-md border font-bold transition-all cursor-pointer ${
-                              Math.abs(bubbleTopScale - val) < 0.05
-                                ? 'bg-emerald-600 text-white border-emerald-600'
+                              Math.abs(bubbleTopScale - item.val) < 0.05
+                                ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
+                                : item.val === 1.0
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold'
                                 : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
                             }`}
                           >
-                            {Math.round(val * 100)}%
+                            {item.label}
                           </button>
                         ))}
                       </div>
@@ -2783,7 +2932,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.max(-60, bubbleTopOffsetY - 2);
+                              const val = Math.max(-120, bubbleTopOffsetY - 2);
                               setBubbleTopOffsetY(val);
                               renderCompositeBubble({ topOffY: val });
                             }}
@@ -2795,8 +2944,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </button>
                           <input
                             type="range"
-                            min="-60"
-                            max="60"
+                            min="-120"
+                            max="120"
                             step="1"
                             value={bubbleTopOffsetY}
                             onChange={(e) => {
@@ -2809,7 +2958,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.min(60, bubbleTopOffsetY + 2);
+                              const val = Math.min(120, bubbleTopOffsetY + 2);
                               setBubbleTopOffsetY(val);
                               renderCompositeBubble({ topOffY: val });
                             }}
@@ -2820,6 +2969,105 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             <span>▼</span>
                           </button>
                         </div>
+                      </div>
+
+                      {/* 3. 底部空白与阴影裁剪滑块 (一键解决小熊悬空、与红包卡片脱节的痛点) */}
+                      <div className="space-y-1.5 pt-2 border-t border-neutral-100">
+                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
+                          <span className="flex items-center gap-1.5 text-emerald-800">
+                            <Scissors className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>底部留白/阴影切除</span>
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
+                              bubbleTopBottomCrop > 0
+                                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : 'bg-neutral-100 text-neutral-600 border-neutral-200'
+                            }`}>
+                              {Math.round(bubbleTopBottomCrop * 100)}% {bubbleTopBottomCrop > 0 ? `(裁去 ${Math.round(bubbleTopBottomCrop * 100)}% 底部)` : '(未裁剪)'}
+                            </span>
+                            {bubbleTopBottomCrop > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBubbleTopBottomCrop(0);
+                                  renderCompositeBubble({ topBottomCrop: 0 });
+                                }}
+                                className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
+                                title="还原为原图完整高度"
+                              >
+                                还原原图
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const val = Math.max(0, Math.round((bubbleTopBottomCrop - 0.05) * 100) / 100);
+                              setBubbleTopBottomCrop(val);
+                              renderCompositeBubble({ topBottomCrop: val });
+                            }}
+                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
+                            title="减少底部裁剪 5%"
+                          >
+                            -
+                          </button>
+                          <input
+                            type="range"
+                            min="0"
+                            max="0.8"
+                            step="0.05"
+                            value={bubbleTopBottomCrop}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setBubbleTopBottomCrop(val);
+                              renderCompositeBubble({ topBottomCrop: val });
+                            }}
+                            className="flex-1 accent-emerald-600 cursor-pointer"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const val = Math.min(0.8, Math.round((bubbleTopBottomCrop + 0.05) * 100) / 100);
+                              setBubbleTopBottomCrop(val);
+                              renderCompositeBubble({ topBottomCrop: val });
+                            }}
+                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
+                            title="增加底部裁剪 5%"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                          {[
+                            { val: 0, label: '0% 原图' },
+                            { val: 0.15, label: '裁 15%' },
+                            { val: 0.3, label: '裁 30%' },
+                            { val: 0.45, label: '裁 45%' },
+                            { val: 0.6, label: '裁 60%' },
+                          ].map((item) => (
+                            <button
+                              key={item.val}
+                              type="button"
+                              onClick={() => {
+                                setBubbleTopBottomCrop(item.val);
+                                renderCompositeBubble({ topBottomCrop: item.val });
+                              }}
+                              className={`text-[9px] px-2 py-0.5 rounded-md border font-bold transition-all cursor-pointer ${
+                                Math.abs(bubbleTopBottomCrop - item.val) < 0.03
+                                  ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
+                                  : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-emerald-800 bg-emerald-50/80 p-2 rounded-lg border border-emerald-200/70 leading-relaxed mt-1">
+                          ✨ <strong>去除底部空白原理</strong>：若小熊原图底部留有白边或阴影，滑动此项可直接切除底部空隙，小熊身体与爪子将即刻下沉、贴齐 96px 红包顶边，并能在 0~96px 空间内完整<strong>放大至最大化</strong>！
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -2836,7 +3084,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           B
                         </span>
                         <span className="font-bold text-xs text-neutral-900">底部垂饰挂件</span>
-                        <span className="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">底部 312~384px</span>
+                        <span className="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">标准高度 72px (312~384px)</span>
                       </div>
                       {bubbleBottomImg && (
                         <button
@@ -2881,7 +3129,10 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     {/* Scale Controls (20% to 500%) with [+] and [-] fine-tuning */}
                     <div className="space-y-1.5 pt-2 border-t border-neutral-200/70 text-xs">
                       <div className="flex items-center justify-between font-bold text-neutral-700">
-                        <span>缩放大小 (最大500%)</span>
+                        <div className="flex items-center gap-1.5">
+                          <span>缩放大小</span>
+                          <span className="text-[10px] text-neutral-400 font-normal">基准高 72px (100% 完整显示在 312~384px 内)</span>
+                        </div>
                         <span className="font-mono text-emerald-800 font-black">{Math.round(bubbleBottomScale * 100)}%</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -2927,22 +3178,31 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         </button>
                       </div>
                       <div className="flex items-center gap-1 pt-1 flex-wrap">
-                        {[0.5, 1.0, 1.5, 2.5, 3.5, 5.0].map((val) => (
+                        {[
+                          { val: 0.5, label: '50%' },
+                          { val: 0.8, label: '80%' },
+                          { val: 1.0, label: '100% 满高 (72px)' },
+                          { val: 1.2, label: '120%' },
+                          { val: 1.5, label: '150%' },
+                          { val: 2.0, label: '200%' },
+                        ].map((item) => (
                           <button
-                            key={val}
+                            key={item.val}
                             type="button"
                             onClick={() => {
-                              setBubbleBottomScale(val);
+                              setBubbleBottomScale(item.val);
                               setBubbleActivePart('bottom');
-                              renderCompositeBubble({ bottomScale: val });
+                              renderCompositeBubble({ bottomScale: item.val });
                             }}
                             className={`text-[9px] px-1.5 py-0.5 rounded-md border font-bold transition-all cursor-pointer ${
-                              Math.abs(bubbleBottomScale - val) < 0.05
-                                ? 'bg-emerald-600 text-white border-emerald-600'
+                              Math.abs(bubbleBottomScale - item.val) < 0.05
+                                ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
+                                : item.val === 1.0
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold'
                                 : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
                             }`}
                           >
-                            {Math.round(val * 100)}%
+                            {item.label}
                           </button>
                         ))}
                       </div>
@@ -3214,12 +3474,12 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </div>
                     </div>
 
-                    {/* 2. Authentic WeChat Red Packet Bubble Card inside the 216px zone (Height: 180px centered, 46.875%) */}
+                    {/* 2. Authentic WeChat Red Packet Bubble Card inside the 216px zone (Exact Y: 96 ~ 312px, top: 25%, height: 56.25%) */}
                     <div
                       className="absolute inset-x-3 bg-gradient-to-r from-[#fa9d3b] to-[#f97316] rounded-xl border border-[#ea580c]/60 pointer-events-none z-5 flex flex-col justify-between shadow-xs overflow-hidden"
                       style={{
-                        top: '29.6875%', // centered vertically inside 96~312px (Y = 114px, 18px margin from 96px)
-                        height: '46.875%', // exactly 180px in 384px
+                        top: '25%', // 紧贴 Y = 96px 上分界线（与小熊下沿 96px 完美无缝紧贴）
+                        height: '56.25%', // 铺满 96px ~ 312px 整个主体卡片区 (216px)
                       }}
                     >
                       <div className="p-2 flex items-center justify-between">
@@ -3229,10 +3489,10 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </div>
                           <div className="space-y-0.5 text-left">
                             <div className="text-[10px] font-bold text-white leading-tight">恭喜发财，大吉大利</div>
-                            <div className="text-[8px] text-amber-100/90 font-medium">微信红包气泡 (卡片实际高约180px)</div>
+                            <div className="text-[8px] text-amber-100/90 font-medium">微信红包气泡卡片 (顶边紧贴 Y = 96px)</div>
                           </div>
                         </div>
-                        <span className="text-[8px] text-amber-100/80 font-mono font-bold bg-black/10 px-1 py-0.5 rounded">卡片高180px</span>
+                        <span className="text-[8px] text-amber-100/80 font-mono font-bold bg-black/10 px-1 py-0.5 rounded">卡片区 96~312px</span>
                       </div>
                       <div className="bg-white/95 px-2.5 py-0.5 flex items-center justify-between text-[8px] text-neutral-500 font-medium border-t border-amber-600/30">
                         <span>微信红包</span>
@@ -3281,66 +3541,129 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </div>
                         )}
 
-                        {/* 3. Dynamic Moving Dashed Line for Top Part (小熊下沿移动对齐虚线) */}
-                        {(bubbleTopImg || bubbleActivePart === 'top') && (
-                          <div
-                            className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
-                            style={{
-                              top: `${((96 + bubbleTopOffsetY) / 384) * 100}%`,
-                            }}
-                          >
-                            <div className="w-full border-t-2 border-dashed border-emerald-600 shadow-xs" />
-                            <div
-                              className={`absolute px-2 py-0.5 rounded-full text-[9px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
-                                (96 + bubbleTopOffsetY) === 96
-                                  ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-300'
-                                  : (96 + bubbleTopOffsetY) > 96
-                                  ? 'bg-red-600 text-white border-red-400 ring-2 ring-red-300'
-                                  : 'bg-emerald-700 text-white border-emerald-500'
-                              }`}
-                            >
-                              <span>🐻 小熊下沿对齐线: {96 + bubbleTopOffsetY}px</span>
-                              {(96 + bubbleTopOffsetY) === 96 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐96px</span>
-                              )}
-                              {(96 + bubbleTopOffsetY) > 96 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入不可编辑区 +{bubbleTopOffsetY}px</span>
-                              )}
-                              {(96 + bubbleTopOffsetY) < 96 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded">距上沿 {-(bubbleTopOffsetY)}px</span>
-                              )}
-                            </div>
-                          </div>
-                        )}
+                        {/* 3. Dynamic Moving Dashed Line for Top Part (小熊下沿与上沿对齐与越界辅助) */}
+                        {(bubbleTopImg || bubbleActivePart === 'top') && (() => {
+                          const topBottomY = 96 + bubbleTopOffsetY;
+                          const approxH = Math.round(96 * bubbleTopScale);
+                          const topTopY = topBottomY - approxH;
+                          const isTopOverflow = topTopY < 0; // 越过顶部 0px
+                          const isBottomIntrusion = topBottomY > 96; // 侵入中间不可编辑区
+                          
+                          return (
+                            <>
+                              {/* 头部顶边缘参考线（当接近或越过 0px 时提醒） */}
+                              <div
+                                className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
+                                style={{
+                                  top: `${Math.max(0, Math.min(100, (topTopY / 384) * 100))}%`,
+                                }}
+                              >
+                                <div className={`w-full border-t-2 border-dashed ${isTopOverflow ? 'border-amber-500 shadow-xs' : 'border-emerald-400/60'}`} />
+                                <div
+                                  className={`absolute px-1.5 py-0.5 rounded-full text-[8px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
+                                    isTopOverflow
+                                      ? 'bg-amber-600 text-white border-amber-300 ring-2 ring-amber-300'
+                                      : topTopY === 0
+                                      ? 'bg-emerald-600 text-white border-emerald-400'
+                                      : 'bg-neutral-800 text-neutral-200 border-neutral-600'
+                                  }`}
+                                >
+                                  <span>顶沿: {topTopY}px</span>
+                                  {isTopOverflow && (
+                                    <span className="text-[7px] bg-black/30 px-1 rounded font-bold">⚠️ 超出画板顶部 {Math.abs(topTopY)}px</span>
+                                  )}
+                                  {topTopY === 0 && (
+                                    <span className="text-[7px] bg-white/20 px-1 rounded font-bold">🎯 顶沿贴齐0px</span>
+                                  )}
+                                </div>
+                              </div>
 
-                        {/* 4. Dynamic Moving Dashed Line for Bottom Part (垂饰上沿移动对齐虚线) */}
-                        {(bubbleBottomImg || bubbleActivePart === 'bottom') && (
-                          <div
-                            className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
-                            style={{
-                              top: `${((312 + bubbleBottomOffsetY) / 384) * 100}%`,
-                            }}
-                          >
-                            <div className="w-full border-t-2 border-dashed border-emerald-600 shadow-xs" />
-                            <div
-                              className={`absolute px-2 py-0.5 rounded-full text-[9px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
-                                (312 + bubbleBottomOffsetY) === 312
-                                  ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-300'
-                                  : (312 + bubbleBottomOffsetY) < 312
-                                  ? 'bg-red-600 text-white border-red-400 ring-2 ring-red-300'
-                                  : 'bg-emerald-700 text-white border-emerald-500'
-                              }`}
-                            >
-                              <span>🎋 垂饰上沿对齐线: {312 + bubbleBottomOffsetY}px</span>
-                              {(312 + bubbleBottomOffsetY) === 312 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐312px</span>
+                              {/* 小熊下边缘移动对齐虚线 */}
+                              <div
+                                className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
+                                style={{
+                                  top: `${((topBottomY) / 384) * 100}%`,
+                                }}
+                              >
+                                <div className={`w-full border-t-2 border-dashed ${isBottomIntrusion ? 'border-red-500' : 'border-emerald-600'} shadow-xs`} />
+                                <div
+                                  className={`absolute px-2 py-0.5 rounded-full text-[9px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
+                                    topBottomY === 96
+                                      ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-300'
+                                      : isBottomIntrusion
+                                      ? 'bg-red-600 text-white border-red-400 ring-2 ring-red-300'
+                                      : 'bg-emerald-700 text-white border-emerald-500'
+                                  }`}
+                                >
+                                  <span>🐻 小熊下沿对齐线: {topBottomY}px</span>
+                                  {topBottomY === 96 && (
+                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐96px</span>
+                                  )}
+                                  {isBottomIntrusion && (
+                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入不可编辑区 +{bubbleTopOffsetY}px</span>
+                                  )}
+                                  {topBottomY < 96 && (
+                                    <span className="text-[8px] bg-white/20 px-1 rounded">距卡片上沿 {-(bubbleTopOffsetY)}px</span>
+                                  )}
+                                </div>
+                              </div>
+                            </>
+                          );
+                        })()}
+
+                        {/* 4. Dynamic Moving Dashed Line for Bottom Part (垂饰上沿与下沿移动对齐虚线) */}
+                        {(bubbleBottomImg || bubbleActivePart === 'bottom') && (() => {
+                          const botTopY = 312 + bubbleBottomOffsetY;
+                          const approxH = Math.round(72 * bubbleBottomScale);
+                          const botBottomY = botTopY + approxH;
+                          const isTopIntrusion = botTopY < 312;
+                          const isBottomOverflow = botBottomY > 384;
+
+                          return (
+                            <>
+                              <div
+                                className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
+                                style={{
+                                  top: `${((botTopY) / 384) * 100}%`,
+                                }}
+                              >
+                                <div className={`w-full border-t-2 border-dashed ${isTopIntrusion ? 'border-red-500' : 'border-emerald-600'} shadow-xs`} />
+                                <div
+                                  className={`absolute px-2 py-0.5 rounded-full text-[9px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
+                                    botTopY === 312
+                                      ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-300'
+                                      : isTopIntrusion
+                                      ? 'bg-red-600 text-white border-red-400 ring-2 ring-red-300'
+                                      : 'bg-emerald-700 text-white border-emerald-500'
+                                  }`}
+                                >
+                                  <span>🎋 垂饰上沿对齐线: {botTopY}px</span>
+                                  {botTopY === 312 && (
+                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐312px</span>
+                                  )}
+                                  {isTopIntrusion && (
+                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入不可编辑区 {bubbleBottomOffsetY}px</span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* 垂饰底沿提示线 */}
+                              {isBottomOverflow && (
+                                <div
+                                  className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
+                                  style={{
+                                    top: `${Math.min(100, (botBottomY / 384) * 100)}%`,
+                                  }}
+                                >
+                                  <div className="w-full border-t-2 border-dashed border-amber-500 shadow-xs" />
+                                  <div className="absolute px-1.5 py-0.5 rounded-full text-[8px] font-mono font-bold shadow-md bg-amber-600 text-white border border-amber-300">
+                                    <span>底沿: {botBottomY}px · 超出底部 {botBottomY - 384}px</span>
+                                  </div>
+                                </div>
                               )}
-                              {(312 + bubbleBottomOffsetY) < 312 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入不可编辑区 {bubbleBottomOffsetY}px</span>
-                              )}
-                            </div>
-                          </div>
-                        )}
+                            </>
+                          );
+                        })()}
                       </>
                     ) : (
                       <div className="text-neutral-400 text-xs">暂无气泡挂件</div>
@@ -3370,7 +3693,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     <div className="h-[56.25%] flex flex-col justify-center border-l-2 border-red-400 pl-2 text-red-700 bg-red-50/60 rounded-r-lg my-1">
                       <div className="font-extrabold text-red-700">中间 216px</div>
                       <div className="text-[8px] text-red-600 font-sans font-bold">🚫 主体不可编辑</div>
-                      <div className="text-[8px] text-amber-800 font-sans mt-0.5">内嵌卡片高约180px</div>
+                      <div className="text-[8px] text-amber-800 font-sans mt-0.5">红包卡片区 96~312px</div>
                       <div className="text-[8px] text-neutral-400">Y: 96 ~ 312px</div>
                     </div>
 
@@ -3384,6 +3707,36 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     </div>
                   </div>
                 </div>
+
+                {bubbleTopImg && (
+                  <div className="mt-3 px-4 py-2.5 rounded-2xl bg-amber-50/90 border border-amber-200/90 flex flex-col sm:flex-row items-center justify-between gap-2.5 max-w-xl text-xs text-amber-950 shadow-2xs">
+                    <div className="flex items-center gap-2">
+                      <Scissors className="w-4 h-4 text-amber-600 shrink-0" />
+                      <div className="text-left">
+                        <span className="font-bold">小熊与红包间有空白悬空？</span>
+                        <span className="text-[11px] text-amber-800 block sm:inline sm:ml-1">
+                          小熊原图底部含透明留白/接触阴影，点击【一键紧凑裁切】切除空白，小熊可立刻成倍放大并紧密趴在红包卡片上！
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleAutoTightTrim('bubbleTop')}
+                        className="px-3 py-1 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs"
+                      >
+                        ⚡ 一键紧凑裁切
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenCropModal('bubbleTop')}
+                        className="px-2.5 py-1 bg-white hover:bg-amber-100/50 active:scale-95 text-amber-900 border border-amber-300 font-bold text-xs rounded-xl cursor-pointer transition-all"
+                      >
+                        精准裁剪
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="mt-2 text-center space-y-1">
                   <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-3 py-0.5 rounded-full border border-emerald-200 inline-block font-mono shadow-2xs">
@@ -3671,6 +4024,129 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 <span>{processingProgress >= 95 ? '✓' : '○'}</span>
                 <span>封面故事 (750×1250)</span>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ======================================================== */}
+      {/* Interactive Crop & Blank-Removal Modal                   */}
+      {/* ======================================================== */}
+      {cropModalOpen && cropModalImg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-neutral-200 flex flex-col space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-neutral-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center">
+                  <Scissors className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-sm text-neutral-900">
+                    裁剪与去除底部空白/阴影
+                  </h3>
+                  <p className="text-[11px] text-neutral-500">
+                    切除底部留白后，小熊可立刻放大并完美紧贴 96px 红包顶沿！
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCropModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-600 flex items-center justify-center cursor-pointer text-xs font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Visual Crop Preview Canvas */}
+            <div className="relative w-full h-[240px] bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-neutral-50 rounded-2xl border border-neutral-200/90 flex items-center justify-center overflow-hidden p-2">
+              <div className="relative max-w-full max-h-full flex items-center justify-center">
+                <img
+                  src={cropModalImg.src}
+                  alt="待裁剪原图"
+                  className="max-h-[220px] max-w-[280px] object-contain select-none pointer-events-none"
+                />
+
+                {/* Bottom crop mask overlay */}
+                {cropModalBottomCrop > 0 && (
+                  <div
+                    className="absolute inset-x-0 bottom-0 bg-red-500/35 border-t-2 border-dashed border-red-500 flex items-center justify-center pointer-events-none transition-all"
+                    style={{ height: `${cropModalBottomCrop * 100}%` }}
+                  >
+                    <span className="text-[10px] font-bold text-white bg-red-600/90 px-2 py-0.5 rounded shadow-xs">
+                      已裁除底部 {Math.round(cropModalBottomCrop * 100)}% 留白/阴影
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Preset Action Buttons */}
+            <div className="space-y-2">
+              <span className="text-[11px] font-bold text-neutral-700 block">
+                快捷裁剪预设：
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { label: '原图 (0%)', val: 0 },
+                  { label: '微裁 (15%)', val: 0.15 },
+                  { label: '适中 (30%)', val: 0.3 },
+                  { label: '深切 (50%)', val: 0.5 },
+                ].map((item) => (
+                  <button
+                    key={item.val}
+                    type="button"
+                    onClick={() => setCropModalBottomCrop(item.val)}
+                    className={`py-2 px-2.5 rounded-xl text-xs font-bold transition-all border cursor-pointer text-center ${
+                      Math.abs(cropModalBottomCrop - item.val) < 0.03
+                        ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                        : 'bg-neutral-50 hover:bg-neutral-100 text-neutral-700 border-neutral-200'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Custom Bottom Crop Slider */}
+            <div className="space-y-1.5 p-3 rounded-2xl bg-neutral-50 border border-neutral-200/80">
+              <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
+                <span>自定义底部裁剪比例</span>
+                <span className="font-mono text-emerald-800 font-black">
+                  {Math.round(cropModalBottomCrop * 100)}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="0.8"
+                step="0.05"
+                value={cropModalBottomCrop}
+                onChange={(e) => setCropModalBottomCrop(parseFloat(e.target.value))}
+                className="w-full accent-emerald-600 cursor-pointer"
+              />
+              <p className="text-[10px] text-neutral-400">
+                向右拖动滑块切除底部多余留白，直到小熊双爪刚好位于裁剪虚线边缘。
+              </p>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-neutral-100">
+              <button
+                type="button"
+                onClick={() => setCropModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-neutral-600 hover:bg-neutral-100 transition-all cursor-pointer"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyCropModal}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
+              >
+                <Scissors className="w-3.5 h-3.5 text-amber-300" />
+                <span>确认并应用裁剪</span>
+              </button>
             </div>
           </div>
         </div>

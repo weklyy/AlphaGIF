@@ -153,6 +153,16 @@ export const QUICK_MEME_TEXTS: string[] = [
   '裂开',
 ];
 
+export interface EraseAction {
+  id?: string;
+  type: 'brush' | 'rect';
+  fillType: 'color' | 'transparent';
+  color: string; // Hex color if color fill
+  size: number; // brush diameter
+  points?: { x: number; y: number }[]; // for brush strokes
+  rect?: { x: number; y: number; w: number; h: number }; // for box erase
+}
+
 export interface StickerTextConfig {
   text: string;
   fontId: string;
@@ -162,11 +172,13 @@ export interface StickerTextConfig {
   strokeEnabled: boolean; // default true
   strokeColor: string; // Hex color
   strokeWidth: number; // 0 - 8
-  position: 'bottom' | 'top' | 'center' | 'custom';
+  orientation?: 'horizontal' | 'vertical'; // Horizontal or Vertical layout
+  position: 'bottom' | 'top' | 'center' | 'left' | 'right' | 'custom';
   offsetY: number; // -50 ~ 50 px
   offsetX?: number;
   textAlign?: 'center' | 'left' | 'right';
   fontWeight?: string;
+  eraseActions?: EraseAction[]; // Saved eraser operations to wipe out original text
 }
 
 export const DEFAULT_STICKER_TEXT_CONFIG: StickerTextConfig = {
@@ -178,15 +190,71 @@ export const DEFAULT_STICKER_TEXT_CONFIG: StickerTextConfig = {
   strokeEnabled: true,
   strokeColor: '#000000',
   strokeWidth: 4,
+  orientation: 'horizontal',
   position: 'bottom',
   offsetY: 0,
   offsetX: 0,
   textAlign: 'center',
   fontWeight: 'normal',
+  eraseActions: [],
 };
 
 /**
- * Cleanly draws the stylized text overlay with fill & stroke on any 2D canvas context
+ * Applies all recorded manual erase actions (brush strokes or box wipes)
+ * onto a 2D canvas context. Supports transparent punching and solid/color masking.
+ */
+export function applyEraseActions(
+  ctx: CanvasRenderingContext2D,
+  actions?: EraseAction[]
+) {
+  if (!actions || actions.length === 0) return;
+
+  for (const action of actions) {
+    ctx.save();
+    if (action.fillType === 'transparent') {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = '#000000';
+      ctx.strokeStyle = '#000000';
+    } else {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = action.color || '#ffffff';
+      ctx.strokeStyle = action.color || '#ffffff';
+    }
+
+    if (action.type === 'rect' && action.rect) {
+      const { x, y, w, h } = action.rect;
+      const rx = Math.min(x, x + w);
+      const ry = Math.min(y, y + h);
+      const rw = Math.abs(w);
+      const rh = Math.abs(h);
+      ctx.fillRect(rx, ry, rw, rh);
+    } else if (action.type === 'brush' && action.points && action.points.length > 0) {
+      const pts = action.points;
+      const radius = Math.max(1, (action.size || 16) / 2);
+
+      if (pts.length === 1) {
+        ctx.beginPath();
+        ctx.arc(pts[0].x, pts[0].y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.lineWidth = action.size || 16;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+}
+
+/**
+ * Cleanly draws the stylized text overlay with fill & stroke on any 2D canvas context.
+ * Supports both horizontal (横排) and vertical (竖排) layouts.
  */
 export function drawStickerText(
   ctx: CanvasRenderingContext2D,
@@ -196,54 +264,125 @@ export function drawStickerText(
 ) {
   if (!config.text || config.text.trim().length === 0) return;
 
-  const text = config.text.trim();
   const fontPreset = OPEN_SOURCE_FONTS.find((f) => f.id === config.fontId) || OPEN_SOURCE_FONTS[0];
   const fontFamily = config.fontFamily || fontPreset.cssFamily;
   const weight = config.fontWeight || fontPreset.defaultWeight;
   const fontSize = Math.max(10, config.fontSize || 24);
+  const orientation = config.orientation || 'horizontal';
 
   ctx.save();
   ctx.font = `${weight} ${fontSize}px ${fontFamily}`;
-  ctx.textAlign = (config.textAlign || 'center') as CanvasTextAlign;
-  ctx.textBaseline = 'alphabetic';
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.miterLimit = 2;
 
-  // Determine X coordinate
-  let textX = canvasWidth / 2;
-  if (config.textAlign === 'left') {
-    textX = 16;
-  } else if (config.textAlign === 'right') {
-    textX = canvasWidth - 16;
-  }
-  if (config.offsetX) {
-    textX += config.offsetX;
-  }
+  if (orientation === 'vertical') {
+    // -------------------------------------------------------------
+    // VERTICAL LAYOUT (竖排文字)
+    // -------------------------------------------------------------
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
 
-  // Determine Y coordinate based on position
-  let textY = canvasHeight - 12; // default bottom
-  if (config.position === 'top') {
-    textY = fontSize + 8;
-  } else if (config.position === 'center') {
-    textY = Math.round(canvasHeight / 2 + fontSize / 3);
-  } else if (config.position === 'bottom') {
-    textY = canvasHeight - 10;
-  }
-  if (config.offsetY) {
-    textY += config.offsetY;
-  }
+    // Support multiline (\n) or single line vertical column
+    const rawLines = config.text.split('\n');
+    const lines = rawLines.length > 0 ? rawLines : [config.text];
+    const colStepX = Math.round(fontSize * 1.25);
+    const charStepY = Math.round(fontSize * 1.12);
 
-  // Draw stroke outline if enabled
-  if (config.strokeEnabled && config.strokeWidth > 0) {
-    ctx.lineWidth = Math.max(1, config.strokeWidth * 2); // 2x because stroke is centered on glyph boundary
-    ctx.strokeStyle = config.strokeColor || '#000000';
-    ctx.strokeText(text, textX, textY);
-  }
+    // Compute base X coordinate
+    // For vertical Chinese, default right side or centered
+    let startX = canvasWidth - 18 - fontSize / 2; // default right side
+    if (config.position === 'left') {
+      startX = 18 + fontSize / 2 + (lines.length - 1) * colStepX;
+    } else if (config.position === 'center' || config.position === 'top' || config.position === 'bottom') {
+      const totalColsW = (lines.length - 1) * colStepX;
+      startX = Math.round((canvasWidth + totalColsW) / 2);
+    } else if (config.position === 'right') {
+      startX = canvasWidth - 18 - fontSize / 2;
+    }
 
-  // Draw solid fill
-  ctx.fillStyle = config.color || '#ffffff';
-  ctx.fillText(text, textX, textY);
+    if (config.offsetX) {
+      startX += config.offsetX;
+    }
+
+    // Draw each vertical column (standard right-to-left column progression)
+    lines.forEach((line, colIdx) => {
+      const colX = startX - colIdx * colStepX;
+      const chars = Array.from(line);
+      if (chars.length === 0) return;
+
+      const totalColH = chars.length * charStepY;
+
+      // Base Y coordinate
+      let startY = Math.round((canvasHeight - totalColH) / 2) + charStepY / 2; // default center
+      if (config.position === 'top') {
+        startY = 14 + charStepY / 2;
+      } else if (config.position === 'bottom') {
+        startY = canvasHeight - totalColH + charStepY / 2 - 12;
+      }
+      if (config.offsetY) {
+        startY += config.offsetY;
+      }
+
+      chars.forEach((char, charIdx) => {
+        const charY = startY + charIdx * charStepY;
+
+        // Outline stroke
+        if (config.strokeEnabled && config.strokeWidth > 0) {
+          ctx.lineWidth = Math.max(1, config.strokeWidth * 2);
+          ctx.strokeStyle = config.strokeColor || '#000000';
+          ctx.strokeText(char, colX, charY);
+        }
+
+        // Solid fill
+        ctx.fillStyle = config.color || '#ffffff';
+        ctx.fillText(char, colX, charY);
+      });
+    });
+  } else {
+    // -------------------------------------------------------------
+    // HORIZONTAL LAYOUT (横排文字)
+    // -------------------------------------------------------------
+    const text = config.text.trim();
+    ctx.textAlign = (config.textAlign || 'center') as CanvasTextAlign;
+    ctx.textBaseline = 'alphabetic';
+
+    // Determine X coordinate
+    let textX = canvasWidth / 2;
+    if (config.position === 'left' || config.textAlign === 'left') {
+      textX = 16;
+    } else if (config.position === 'right' || config.textAlign === 'right') {
+      textX = canvasWidth - 16;
+    }
+    if (config.offsetX) {
+      textX += config.offsetX;
+    }
+
+    // Determine Y coordinate based on position
+    let textY = canvasHeight - 12; // default bottom
+    if (config.position === 'top') {
+      textY = fontSize + 8;
+    } else if (config.position === 'center') {
+      textY = Math.round(canvasHeight / 2 + fontSize / 3);
+    } else if (config.position === 'bottom') {
+      textY = canvasHeight - 10;
+    }
+    if (config.offsetY) {
+      textY += config.offsetY;
+    }
+
+    // Draw stroke outline if enabled
+    if (config.strokeEnabled && config.strokeWidth > 0) {
+      ctx.lineWidth = Math.max(1, config.strokeWidth * 2); // 2x because stroke is centered on glyph boundary
+      ctx.strokeStyle = config.strokeColor || '#000000';
+      ctx.strokeText(text, textX, textY);
+    }
+
+    // Draw solid fill
+    ctx.fillStyle = config.color || '#ffffff';
+    ctx.fillText(text, textX, textY);
+  }
 
   ctx.restore();
 }
+

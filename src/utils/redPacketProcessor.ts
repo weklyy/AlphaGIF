@@ -113,26 +113,26 @@ export const WECHAT_EDITABLE_ZONES = {
   bubblePendant: {
     width: 480,
     height: 384,
-    // 微信官方规范：气泡挂件总尺寸 480×384
-    // 颈部可编辑区：上面 96 像素 (Y: 0 ~ 96)
-    // 消息底座不可编辑区：中间 216 像素 (Y: 96 ~ 312)
-    // 底部可编辑区：底部 72 像素 (Y: 312 ~ 384)
+    // 微信官方气泡挂件平台规范（480×384）：
+    // 顶部挂件核心展示区：Y: 0 ~ 96 (高 96px，小熊趴气泡/探头，下沿严格不得超过 96px 以免遮挡气泡)
+    // 中间消息气泡底座不可编辑区：Y: 96 ~ 312 (高 216px，微信红包消息气泡主体，平台机审严禁遮挡)
+    // 底部垂饰区：Y: 312 ~ 384 (高 72px，底部流苏/饰品挂件)
     topZone: {
-      name: '上侧颈部可编辑区 (趴气泡/探头)',
-      minX: 40,
-      maxX: 440,
+      name: '上侧挂件主展示区 (0~96px，头顶Y=0，下沿Y=96，高96px)',
+      minX: 20,
+      maxX: 460,
       minY: 0,
       maxY: 96,
       defaultAnchorX: 240,
-      defaultAnchorY: 48,
+      defaultAnchorY: 96,
     },
     middleForbiddenZone: {
       minY: 96,
       maxY: 312,
-      desc: '气泡主体不可编辑区 (中间 216 像素)',
+      desc: '微信红包气泡卡片主体 (Y: 96 ~ 312，高 216px，平台严禁遮挡)',
     },
     bottomZone: {
-      name: '下侧底部可编辑区 (底部垂饰)',
+      name: '下侧底部可编辑区 (312~384px，底部垂饰/流苏)',
       minX: 40,
       maxX: 440,
       minY: 312,
@@ -141,7 +141,7 @@ export const WECHAT_EDITABLE_ZONES = {
       defaultAnchorY: 348,
     },
     defaultAnchorX: 240,
-    defaultAnchorY: 48,
+    defaultAnchorY: 96,
   },
 };
 
@@ -646,6 +646,7 @@ export interface PendantPartConfig {
   offsetX?: number;
   offsetY?: number;
   bottomCropPercent?: number; // 0% ~ 80% 去除底部留白
+  baseHeight?: number; // 基准高度 (气泡大比例默认为 192px)
 }
 
 /**
@@ -842,8 +843,9 @@ export async function createCompositeBubblePendant(options: {
     ctx.drawImage(trans, 0, 0, targetW, targetH);
   }
 
-  // 2. Top Part (顶部 96px 颈部可编辑区, Y: 0 ~ 96)
-  // 微信官方平台真实展示特性：挂件在聊天框中与气泡卡片等比例渲染，顶部探头/小熊双爪自然搭在气泡边缘
+  // 2. Top Part (顶部挂件核心展示区: Y: 0 ~ 96, 微信官方平台规范)
+  // 微信官方平台严格规范：小熊/挂件下沿严禁超过 96 像素，否则上传机审会被驳回
+  // 基准高度 96px：100% 满幅缩放下，小熊头顶 Y=0，下边缘 Y=96，总高刚好 96px，零截断且完全合规！
   let topDrawY = 0;
   let topDrawH = 0;
   if (topPart && topPart.source) {
@@ -858,16 +860,22 @@ export async function createCompositeBubblePendant(options: {
     const drawSource = trimmed.canvas;
 
     if (bbox.hasContent) {
-      // WeChat Red Packet bubble pendant top proportion: base height 96px matches official WeChat template (0 ~ 96px zone)
-      const baseH = 96;
+      // 官方气泡挂件基准高度: 96px (100% 缩放下，头顶至下沿刚好 96px)
+      const baseH = topPart.baseHeight || 96;
       const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
       topDrawH = Math.round(baseH * effectiveScale);
       const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
       const topDrawX = Math.round((targetW - topDrawW) / 2 + (topPart.offsetX || 0));
-      // 基准：爪子/底部搭在 Y = 96 边缘，配合 offsetY 精准上下调整
-      topDrawY = Math.round(96 - topDrawH + (topPart.offsetY || 0));
+      // 基准：爪子/下沿紧贴气泡卡片上沿（Y = 96px），配合 offsetY 微调
+      const anchorBaseY = topPart.offsetY !== undefined ? (96 + topPart.offsetY) : 96;
+      topDrawY = Math.round(anchorBaseY - topDrawH);
 
       ctx.save();
+      // 严格限制在顶部挂件核心区 (Y: 0 ~ 96px)，杜绝任何抗锯齿或模糊溢出至 96px 不可编辑区
+      ctx.beginPath();
+      ctx.rect(0, 0, targetW, 96);
+      ctx.clip();
+
       if (addGlow) {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
@@ -877,23 +885,26 @@ export async function createCompositeBubblePendant(options: {
     }
   }
 
-  // 3. Bottom Part (底部 72px 可编辑区, Y: 312 ~ 384)
-  // 用户直观心智：垂饰最顶端默认重合在不可编辑区域下沿 Y = 312，标准高度 72px
+  // 3. Bottom Part (底部可选垂饰挂件区, Y: 312 ~ 384, 高 72px)
   let bottomDrawY = 312;
   let bottomDrawH = 0;
   if (bottomPart && bottomPart.source) {
     const trans = await ensureTransparentSubject(bottomPart.source);
     const bbox = getAlphaBoundingBox(trans);
     if (bbox.hasContent) {
-      const baseH = 72;
-      const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 5.0);
+      const baseH = 64;
+      const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 3.0);
       bottomDrawH = Math.round(baseH * effectiveScale);
       const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
       const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (bottomPart.offsetX || 0));
-      // 顶部重合基准：Y = 312
       bottomDrawY = Math.round(312 + (bottomPart.offsetY || 0));
 
       ctx.save();
+      // 严格限制在底部垂饰区 (Y: 312 ~ 384px)
+      ctx.beginPath();
+      ctx.rect(0, 312, targetW, 72);
+      ctx.clip();
+
       if (addGlow) {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
@@ -903,17 +914,11 @@ export async function createCompositeBubblePendant(options: {
     }
   }
 
-  // 微信官方严格审核：中间 216px (Y: 96 ~ 312) 绝对不可编辑区，100% 彻底抹除！
+  // 微信红包封面平台机审终极保障：
+  // 气泡挂件中间不可编辑区（Y: 96 ~ 312px，高度 216px）必须保持绝对 100% 透明！
+  // 任何透明度 alpha > 0 的像素点都会触发微信“进入不可编辑区”驳回。
+  // 此处做强制彻底清空，完全消除所有微小抗锯齿、阴影晕染或坐标浮点溢出，确保 100% 机审合规通过！
   ctx.clearRect(0, 96, targetW, 216);
-
-  if (!bottomPart && !fullSource) {
-    // 仅顶部时，确保 Y >= 96 全部清空
-    ctx.clearRect(0, 96, targetW, targetH - 96);
-  }
-  if (!topPart && !fullSource) {
-    // 仅底部时，确保 Y < 312 全部清空
-    ctx.clearRect(0, 0, targetW, 312);
-  }
 
   const blob = await compressPngStrictUnderLimit(canvas, 280 * 1024);
   const url = URL.createObjectURL(blob);

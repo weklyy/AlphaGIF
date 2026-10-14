@@ -332,12 +332,12 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                   {/* Authentic WeChat Red Packet Bubble Card with Attached Pendant (480 x 384 Frame) */}
                   <div className="flex items-start justify-end gap-2.5 w-full pr-1">
                     <div className="relative w-[230px] aspect-[480/384]">
-                      {/* Authentic WeChat Red Packet Card occupies middle zone (Card height exactly 96~312px, seamless with 96px top boundary) */}
+                      {/* Authentic WeChat Red Packet Card occupies middle zone (Y: 96 ~ 312px, top: 25%, height: 56.25%, seamless with 96px top boundary) */}
                       <div
                         className="absolute inset-x-2 bg-[#fa9d3b] text-white rounded-2xl rounded-tr-xs overflow-hidden shadow-sm border border-[#e58a27] cursor-pointer active:opacity-90 z-10 flex flex-col justify-between"
                         style={{
-                          top: '25%', // 紧贴 Y = 96px，与小熊下沿无缝紧密贴合
-                          height: '56.25%', // 完整贴合中间 216px 红包卡片区 (96~312px)
+                          top: '25%', // 紧贴 Y = 96px，与小熊/主体下沿完美紧密贴合
+                          height: '56.25%', // 贴合 96~312px 红包卡片区 (216px)
                         }}
                       >
                         <div className="p-3 flex items-center gap-2.5">
@@ -378,7 +378,7 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                                 style={{ height: '25%' }}
                               >
                                 <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
-                                  颈部可编辑区 (高96px · 趴气泡)
+                                  顶部挂件区 (高96px · 下沿不得超96)
                                 </span>
                               </div>
                               {/* Bottom Editable Area (312~384px, 18.75%) */}
@@ -387,7 +387,7 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                                 style={{ height: '18.75%' }}
                               >
                                 <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
-                                  底部可编辑区 (72px)
+                                  底部垂饰区 (72px)
                                 </span>
                               </div>
                             </div>

@@ -688,19 +688,19 @@ async function generateCuteBearTheme() {
   // Clean forbidden area Y: 342..1650
   pctx.clearRect(96, 342, 861, 1308);
 
-  // 3. 气泡挂件 (480 x 384) - 微信官方严格规范
-  // 小熊双爪刚好趴在对话框气泡卡片顶缘 (Y = 96，爪子贴齐 Y = 96，严禁侵入 Y > 96)
+  // 3. 气泡挂件 (480 x 384) - 微信真机大比例规范 (主挂件高度 192~210px)
+  // 小熊双爪刚好趴在对话框气泡卡片顶缘 (Y = 196，爪子贴齐 Y = 196，在微信真实聊天中醒目大方)
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
   const bctx = bubbleCanvas.getContext('2d')!;
   bctx.clearRect(0, 0, 480, 384);
 
-  // Draw cute bear with paws directly resting on Y = 96 (card top edge)
-  drawCuteBearOnBubble(bctx, 240, 48, 106, 96);
+  // Draw cute bear with paws directly resting on Y = 196 (card top edge), size = 210px
+  drawCuteBearOnBubble(bctx, 240, 98, 210, 196);
 
-  // Strict clear of non-editable middle (96~312) and bottom
-  bctx.clearRect(0, 96, 480, 288);
+  // Clear middle card area Y: 196~342
+  bctx.clearRect(0, 196, 480, 146);
 
   // 4. 封面故事 (750 x 1250)
   const storyCanvas = document.createElement('canvas');

@@ -417,14 +417,14 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         const res = await createCompositeBubblePendant({
           topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY, bottomCropPercent: tCrop } : null,
           bottomPart: bImg ? { source: bImg, scale: bScale, offsetX: bOffX, offsetY: bOffY } : null,
-          addGlow: true,
+          addGlow: false,
         });
         setBubbleResult(res);
       } else {
         if (!fImg) return;
         const res = await createCompositeBubblePendant({
           fullSource: fImg,
-          addGlow: true,
+          addGlow: false,
         });
         setBubbleResult(res);
       }
@@ -607,7 +607,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     if (bubbleUploadMode === 'full') {
       part = 'full';
     } else {
-      part = clickY >= 204 ? 'bottom' : 'top';
+      part = clickY >= 260 ? 'bottom' : 'top';
       setBubbleActivePart(part);
     }
 
@@ -746,6 +746,72 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       const nextY = bubbleOffsetY + deltaY;
       setBubbleOffsetY(nextY);
       renderCompositeBubble({ fullOffY: nextY });
+    }
+  };
+
+  const handleBubbleStepFineTuneX = (deltaX: number) => {
+    if (bubbleUploadMode === 'split') {
+      if (bubbleActivePart === 'top') {
+        const nextX = bubbleTopOffsetX + deltaX;
+        setBubbleTopOffsetX(nextX);
+        renderCompositeBubble({ topOffX: nextX });
+      } else {
+        const nextX = bubbleBottomOffsetX + deltaX;
+        setBubbleBottomOffsetX(nextX);
+        renderCompositeBubble({ bottomOffX: nextX });
+      }
+    } else {
+      const nextX = bubbleOffsetX + deltaX;
+      setBubbleOffsetX(nextX);
+      renderCompositeBubble({ fullOffX: nextX });
+    }
+  };
+
+  const handleBubbleStepScale = (deltaScale: number) => {
+    if (bubbleUploadMode === 'split') {
+      if (bubbleActivePart === 'top') {
+        const nextScale = Math.min(2.5, Math.max(0.2, Math.round((bubbleTopScale + deltaScale) * 100) / 100));
+        setBubbleTopScale(nextScale);
+        renderCompositeBubble({ topScale: nextScale });
+      } else {
+        const nextScale = Math.min(2.5, Math.max(0.2, Math.round((bubbleBottomScale + deltaScale) * 100) / 100));
+        setBubbleBottomScale(nextScale);
+        renderCompositeBubble({ bottomScale: nextScale });
+      }
+    } else {
+      const nextScale = Math.min(2.5, Math.max(0.2, Math.round((bubbleScale + deltaScale) * 100) / 100));
+      setBubbleScale(nextScale);
+      renderCompositeBubble({ fullScale: nextScale });
+    }
+  };
+
+  const handleBubbleResetScale100 = () => {
+    if (bubbleUploadMode === 'split') {
+      if (bubbleActivePart === 'top') {
+        setBubbleTopScale(1.0);
+        renderCompositeBubble({ topScale: 1.0 });
+      } else {
+        setBubbleBottomScale(1.0);
+        renderCompositeBubble({ bottomScale: 1.0 });
+      }
+    } else {
+      setBubbleScale(1.0);
+      renderCompositeBubble({ fullScale: 1.0 });
+    }
+  };
+
+  const handleBubbleResetCenter = () => {
+    if (bubbleUploadMode === 'split') {
+      if (bubbleActivePart === 'top') {
+        setBubbleTopOffsetX(0);
+        renderCompositeBubble({ topOffX: 0 });
+      } else {
+        setBubbleBottomOffsetX(0);
+        renderCompositeBubble({ bottomOffX: 0 });
+      }
+    } else {
+      setBubbleOffsetX(0);
+      renderCompositeBubble({ fullOffX: 0 });
     }
   };
 
@@ -1136,6 +1202,24 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // 满格合规 96px (头顶 Y=0，下沿 Y=96，高 96px，零截除零遮挡)
+  const handleResetStandard96 = () => {
+    setBubbleTopScale(1.0);
+    setBubbleTopOffsetY(0);
+    setBubbleTopOffsetX(0);
+    setBubbleActivePart('top');
+    renderCompositeBubble({ topScale: 1.0, topOffY: 0, topOffX: 0 });
+    onNotification('🎯 已重置为微信官方 96px 满格规范：小熊高 96px，头顶对齐 Y=0，下沿贴齐 Y=96 气泡卡片，完全合规零截断！');
+  };
+
+  // 一键贴齐 96px 下沿 (下沿精准 <= 96px，防止平台驳回)
+  const handleSnapTo96 = () => {
+    setBubbleTopOffsetY(0);
+    setBubbleActivePart('top');
+    renderCompositeBubble({ topOffY: 0 });
+    onNotification('✅ 已一键贴齐 96px 气泡卡片顶边！下沿精准对齐 Y=96px，符合微信审核规范。');
   };
 
   const handleOpenCropModal = (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom') => {
@@ -2599,900 +2683,236 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
           )}
 
           {/* ======================================================== */}
-          {/* TAB 3: 气泡挂件 (480 × 384) - 分段设计 + 自动合成一张图 */}
+          {/* TAB 3: 气泡挂件 1:1 像素级工作台 (480 × 384 px)          */}
           {/* ======================================================== */}
           {activeTab === 'bubble' && (
-            <div className="bg-white rounded-3xl p-5 sm:p-6 border border-neutral-200/80 shadow-[0_4px_24px_rgba(0,0,0,0.03)] space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="bg-white rounded-3xl p-5 sm:p-6 border border-neutral-200/80 shadow-[0_4px_24px_rgba(0,0,0,0.03)] space-y-4">
+              {/* 1. Header & Title Bar */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-100">
                 <div>
                   <h3 className="text-sm font-bold text-neutral-900 flex items-center gap-2">
-                    <span>③ 气泡挂件画板 · 480 × 384</span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-mono">透明PNG</span>
+                    <span>③ 气泡挂件 1:1 像素级工作台 · 480 × 384 px</span>
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-mono font-bold">1:1 精准视窗</span>
                   </h3>
                   <p className="text-[11px] text-neutral-400 mt-0.5">
-                    微信平台为单张图片。您可<strong>分开上传顶部与底部两张图片</strong>分别调整，下载时<strong>自动合成一张标准图</strong>！
+                    微信平台规范：气泡挂件 480×384。顶部挂件展示区 0~96px，<strong>小熊下沿严禁超过 96 像素</strong>。默认 100% 满格标准为<strong>高 96px（头顶 Y=0，下沿 Y=96）</strong>。
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={() => setShowGuides((v) => !v)}
                     className={`text-xs px-3 py-1.5 rounded-xl border font-semibold transition-all cursor-pointer ${
-                      showGuides ? 'bg-emerald-50 text-emerald-800 border-emerald-300' : 'bg-white text-neutral-500 border-neutral-200'
+                      showGuides ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-2xs' : 'bg-white text-neutral-500 border-neutral-200'
                     }`}
                   >
-                    {showGuides ? '隐藏参考标线' : '显示可编辑区'}
+                    {showGuides ? '隐藏参考标线' : '显示微信标线'}
                   </button>
                 </div>
               </div>
 
-              {/* Mode Switcher: 分段组合设计 vs 完整单图 */}
-              <div className="flex items-center justify-between p-1.5 bg-neutral-100 rounded-2xl border border-neutral-200/80 text-xs gap-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBubbleUploadMode('split');
-                    renderCompositeBubble({ mode: 'split' });
-                  }}
-                  className={`flex-1 py-2 px-3 rounded-xl font-bold transition-all cursor-pointer text-center ${
-                    bubbleUploadMode === 'split'
-                      ? 'bg-white text-emerald-900 shadow-xs border border-emerald-200'
-                      : 'text-neutral-600 hover:text-neutral-900'
-                  }`}
-                >
-                  🧩 分段设计模式（推荐：分别上传顶部趴贴 + 底部垂饰，合成单张图）
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBubbleUploadMode('full');
-                    renderCompositeBubble({ mode: 'full' });
-                  }}
-                  className={`flex-1 py-2 px-3 rounded-xl font-bold transition-all cursor-pointer text-center ${
-                    bubbleUploadMode === 'full'
-                      ? 'bg-white text-emerald-900 shadow-xs border border-emerald-200'
-                      : 'text-neutral-600 hover:text-neutral-900'
-                  }`}
-                >
-                  🖼️ 整张单图模式（直接上传已排版好的 480×384 透明图）
-                </button>
-              </div>
+              {/* 2. Real-Time WeChat Compliance Indicator Banner */}
+              {(() => {
+                const currentBottomY = 96 + bubbleTopOffsetY;
+                const approxH = Math.round(96 * bubbleTopScale);
+                const currentTopY = currentBottomY - approxH;
+                const isBottomOver96 = currentBottomY > 96;
+                const isTopOverCanvas = currentTopY < 0;
 
-              {/* Upload Slots Section */}
-              {bubbleUploadMode === 'split' ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Slot A: Top Part */}
-                  <div className={`p-4 rounded-2xl border transition-all ${
-                    bubbleActivePart === 'top'
-                      ? 'bg-emerald-50/40 border-emerald-400 ring-2 ring-emerald-400/20'
-                      : 'bg-neutral-50/60 border-neutral-200 hover:border-neutral-300'
+                return (
+                  <div className={`p-3 rounded-2xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs ${
+                    isBottomOver96
+                      ? 'bg-red-50/90 border-red-300 text-red-950'
+                      : isTopOverCanvas
+                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                      : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
                   }`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] font-bold flex items-center justify-center">
-                          A
-                        </span>
-                        <span className="font-bold text-xs text-neutral-900">顶部趴贴挂件</span>
-                        <span className="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">标准高度 96px (0~96px)</span>
-                      </div>
-                      {bubbleTopImg && (
-                        <button
-                          type="button"
-                          onClick={() => handleClearBubbleSlot('top')}
-                          className="text-[10px] text-red-500 hover:text-red-700 font-medium cursor-pointer"
-                        >
-                          清除
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-3 mb-3">
-                      <div className="w-14 h-14 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
-                        {bubbleTopImg ? (
-                          <img src={bubbleTopImg.src} alt="顶部挂件" className="w-full h-full object-contain p-1" />
-                        ) : (
-                          <Smile className="w-5 h-5 text-neutral-300" />
-                        )}
-                      </div>
-                      <div className="flex-1 space-y-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                            <Upload className="w-3.5 h-3.5" />
-                            <span>{bubbleTopImg ? '替换顶部图片' : '上传顶部图片'}</span>
-                            <input
-                              type="file"
-                              accept="image/png,image/jpeg,image/webp"
-                              className="hidden"
-                              onChange={(e) => {
-                                if (e.target.files && e.target.files[0]) {
-                                  handleUploadBubbleSlot(e.target.files[0], 'top');
-                                }
-                              }}
-                            />
-                          </label>
-
-                          {bubbleTopImg && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleAutoTightTrim('bubbleTop')}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 active:scale-95 text-emerald-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-emerald-300 shadow-2xs"
-                                title="一键识别小熊身体轮廓，切除所有外围空白与阴影"
-                              >
-                                <Scissors className="w-3 h-3 text-emerald-700" />
-                                <span>智能紧凑去留白</span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleOpenCropModal('bubbleTop')}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-xs rounded-xl cursor-pointer transition-all border border-neutral-200 shadow-2xs"
-                                title="打开精确可视化裁剪工具"
-                              >
-                                <Crop className="w-3 h-3 text-neutral-600" />
-                                <span>手动裁剪</span>
-                              </button>
-                            </>
-                          )}
-                        </div>
-                        <p className="text-[10px] text-neutral-400 truncate">
-                          {bubbleTopFileName || '如：趴气泡小熊、探头吉祥物'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Scale Controls (20% to 500%) with [+] and [-] fine-tuning */}
-                    <div className="space-y-1.5 pt-2 border-t border-neutral-200/70 text-xs">
-                      <div className="flex items-center justify-between font-bold text-neutral-700">
-                        <div className="flex items-center gap-1.5">
-                          <span>缩放大小</span>
-                          <span className="text-[10px] text-neutral-400 font-normal">基准高 96px (100% 完整显示在 0~96px 内)</span>
-                        </div>
-                        <span className="font-mono text-emerald-800 font-black">{Math.round(bubbleTopScale * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const val = Math.max(0.2, Math.round((bubbleTopScale - 0.05) * 100) / 100);
-                            setBubbleTopScale(val);
-                            setBubbleActivePart('top');
-                            renderCompositeBubble({ topScale: val });
-                          }}
-                          className="w-6 h-6 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                          title="缩小 5%"
-                        >
-                          -
-                        </button>
-                        <input
-                          type="range"
-                          min="0.2"
-                          max="5.0"
-                          step="0.05"
-                          value={bubbleTopScale}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            setBubbleTopScale(val);
-                            setBubbleActivePart('top');
-                            renderCompositeBubble({ topScale: val });
-                          }}
-                          className="flex-1 accent-emerald-600 cursor-pointer"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const val = Math.min(5.0, Math.round((bubbleTopScale + 0.05) * 100) / 100);
-                            setBubbleTopScale(val);
-                            setBubbleActivePart('top');
-                            renderCompositeBubble({ topScale: val });
-                          }}
-                          className="w-6 h-6 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                          title="放大 5%"
-                        >
-                          +
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-1 pt-1 flex-wrap">
-                        {[
-                          { val: 0.5, label: '50%' },
-                          { val: 0.8, label: '80%' },
-                          { val: 1.0, label: '100% 满高 (96px)' },
-                          { val: 1.2, label: '120%' },
-                          { val: 1.5, label: '150%' },
-                          { val: 2.0, label: '200%' },
-                        ].map((item) => (
-                          <button
-                            key={item.val}
-                            type="button"
-                            onClick={() => {
-                              setBubbleTopScale(item.val);
-                              setBubbleActivePart('top');
-                              renderCompositeBubble({ topScale: item.val });
-                            }}
-                            className={`text-[9px] px-1.5 py-0.5 rounded-md border font-bold transition-all cursor-pointer ${
-                              Math.abs(bubbleTopScale - item.val) < 0.05
-                                ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
-                                : item.val === 1.0
-                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold'
-                                : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
-                            }`}
-                          >
-                            {item.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Position & Pixel Alignment Card (位置与像素对齐) */}
-                    <div className="bg-white/95 rounded-xl p-3 border border-neutral-200/90 shadow-2xs space-y-3 mt-2.5">
-                      <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600 border-b border-neutral-100 pb-1.5">
-                        <span className="flex items-center gap-1.5">
-                          <Move className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>位置与像素微调 (X / Y 轴)</span>
-                        </span>
-                        <span className="text-[10px] text-neutral-400 font-normal">步进 2px · 画板可直接拖动</span>
-                      </div>
-
-                      {/* 1. 水平 X 轴微调 */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
-                          <span className="text-neutral-600">水平 X 轴</span>
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-mono text-xs font-bold text-neutral-800 bg-neutral-100 px-2 py-0.5 rounded border border-neutral-200 shadow-2xs">
-                              {bubbleTopOffsetX === 0 ? '0px (居中)' : bubbleTopOffsetX > 0 ? `+${bubbleTopOffsetX}px` : `${bubbleTopOffsetX}px`}
-                            </span>
-                            {bubbleTopOffsetX !== 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBubbleTopOffsetX(0);
-                                  renderCompositeBubble({ topOffX: 0 });
-                                }}
-                                className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
-                                title="恢复水平居中"
-                              >
-                                居中
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.max(-200, bubbleTopOffsetX - 2);
-                              setBubbleTopOffsetX(val);
-                              renderCompositeBubble({ topOffX: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向左微调 2px"
-                          >
-                            <span>◀</span>
-                            <span className="text-[10px]">左移</span>
-                          </button>
-                          <input
-                            type="range"
-                            min="-200"
-                            max="200"
-                            step="1"
-                            value={bubbleTopOffsetX}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value);
-                              setBubbleTopOffsetX(val);
-                              renderCompositeBubble({ topOffX: val });
-                            }}
-                            className="flex-1 accent-emerald-600 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.min(200, bubbleTopOffsetX + 2);
-                              setBubbleTopOffsetX(val);
-                              renderCompositeBubble({ topOffX: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向右微调 2px"
-                          >
-                            <span className="text-[10px]">右移</span>
-                            <span>▶</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* 2. 垂直 Y 轴微调 (下沿对齐读数) */}
-                      <div className="space-y-1.5 pt-2 border-t border-neutral-100">
-                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
-                          <span className="text-neutral-600">垂直 Y 轴</span>
-                          <div className="flex items-center gap-1.5">
-                            <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
-                              bubbleTopOffsetY === 0
-                                ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                                : (96 + bubbleTopOffsetY) > 96
-                                ? 'bg-red-50 text-red-700 border-red-200'
-                                : 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            }`}>
-                              🐻 下沿: {96 + bubbleTopOffsetY}px
-                            </span>
-                            {bubbleTopOffsetY !== 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBubbleTopOffsetY(0);
-                                  renderCompositeBubble({ topOffY: 0 });
-                                }}
-                                className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
-                                title="重置对齐 96px 标准标线"
-                              >
-                                对齐96px
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.max(-120, bubbleTopOffsetY - 2);
-                              setBubbleTopOffsetY(val);
-                              renderCompositeBubble({ topOffY: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向上微调 2px (减少下沿读数)"
-                          >
-                            <span>▲</span>
-                            <span className="text-[10px]">上移</span>
-                          </button>
-                          <input
-                            type="range"
-                            min="-120"
-                            max="120"
-                            step="1"
-                            value={bubbleTopOffsetY}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value);
-                              setBubbleTopOffsetY(val);
-                              renderCompositeBubble({ topOffY: val });
-                            }}
-                            className="flex-1 accent-emerald-600 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.min(120, bubbleTopOffsetY + 2);
-                              setBubbleTopOffsetY(val);
-                              renderCompositeBubble({ topOffY: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向下微调 2px (增加下沿读数)"
-                          >
-                            <span className="text-[10px]">下移</span>
-                            <span>▼</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* 3. 底部空白与阴影裁剪滑块 (一键解决小熊悬空、与红包卡片脱节的痛点) */}
-                      <div className="space-y-1.5 pt-2 border-t border-neutral-100">
-                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
-                          <span className="flex items-center gap-1.5 text-emerald-800">
-                            <Scissors className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>底部留白/阴影切除</span>
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
-                              bubbleTopBottomCrop > 0
-                                ? 'bg-amber-100 text-amber-900 border-amber-300'
-                                : 'bg-neutral-100 text-neutral-600 border-neutral-200'
-                            }`}>
-                              {Math.round(bubbleTopBottomCrop * 100)}% {bubbleTopBottomCrop > 0 ? `(裁去 ${Math.round(bubbleTopBottomCrop * 100)}% 底部)` : '(未裁剪)'}
-                            </span>
-                            {bubbleTopBottomCrop > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBubbleTopBottomCrop(0);
-                                  renderCompositeBubble({ topBottomCrop: 0 });
-                                }}
-                                className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
-                                title="还原为原图完整高度"
-                              >
-                                还原原图
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.max(0, Math.round((bubbleTopBottomCrop - 0.05) * 100) / 100);
-                              setBubbleTopBottomCrop(val);
-                              renderCompositeBubble({ topBottomCrop: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                            title="减少底部裁剪 5%"
-                          >
-                            -
-                          </button>
-                          <input
-                            type="range"
-                            min="0"
-                            max="0.8"
-                            step="0.05"
-                            value={bubbleTopBottomCrop}
-                            onChange={(e) => {
-                              const val = parseFloat(e.target.value);
-                              setBubbleTopBottomCrop(val);
-                              renderCompositeBubble({ topBottomCrop: val });
-                            }}
-                            className="flex-1 accent-emerald-600 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.min(0.8, Math.round((bubbleTopBottomCrop + 0.05) * 100) / 100);
-                              setBubbleTopBottomCrop(val);
-                              renderCompositeBubble({ topBottomCrop: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                            title="增加底部裁剪 5%"
-                          >
-                            +
-                          </button>
-                        </div>
-                        <div className="flex items-center gap-1 flex-wrap pt-0.5">
-                          {[
-                            { val: 0, label: '0% 原图' },
-                            { val: 0.15, label: '裁 15%' },
-                            { val: 0.3, label: '裁 30%' },
-                            { val: 0.45, label: '裁 45%' },
-                            { val: 0.6, label: '裁 60%' },
-                          ].map((item) => (
-                            <button
-                              key={item.val}
-                              type="button"
-                              onClick={() => {
-                                setBubbleTopBottomCrop(item.val);
-                                renderCompositeBubble({ topBottomCrop: item.val });
-                              }}
-                              className={`text-[9px] px-2 py-0.5 rounded-md border font-bold transition-all cursor-pointer ${
-                                Math.abs(bubbleTopBottomCrop - item.val) < 0.03
-                                  ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
-                                  : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
-                              }`}
-                            >
-                              {item.label}
-                            </button>
-                          ))}
-                        </div>
-                        <p className="text-[10px] text-emerald-800 bg-emerald-50/80 p-2 rounded-lg border border-emerald-200/70 leading-relaxed mt-1">
-                          ✨ <strong>去除底部空白原理</strong>：若小熊原图底部留有白边或阴影，滑动此项可直接切除底部空隙，小熊身体与爪子将即刻下沉、贴齐 96px 红包顶边，并能在 0~96px 空间内完整<strong>放大至最大化</strong>！
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Slot B: Bottom Part */}
-                  <div className={`p-4 rounded-2xl border transition-all ${
-                    bubbleActivePart === 'bottom'
-                      ? 'bg-emerald-50/40 border-emerald-400 ring-2 ring-emerald-400/20'
-                      : 'bg-neutral-50/60 border-neutral-200 hover:border-neutral-300'
-                  }`}>
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-5 h-5 rounded-full bg-emerald-700 text-white text-[11px] font-bold flex items-center justify-center">
-                          B
-                        </span>
-                        <span className="font-bold text-xs text-neutral-900">底部垂饰挂件</span>
-                        <span className="text-[10px] text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded font-mono">标准高度 72px (312~384px)</span>
-                      </div>
-                      {bubbleBottomImg && (
-                        <button
-                          type="button"
-                          onClick={() => handleClearBubbleSlot('bottom')}
-                          className="text-[10px] text-red-500 hover:text-red-700 font-medium cursor-pointer"
-                        >
-                          清除
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-3 mb-3">
-                      <div className="w-14 h-14 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
-                        {bubbleBottomImg ? (
-                          <img src={bubbleBottomImg.src} alt="底部挂件" className="w-full h-full object-contain p-1" />
-                        ) : (
-                          <Sparkles className="w-5 h-5 text-neutral-300" />
-                        )}
-                      </div>
-                      <div className="flex-1 space-y-1">
-                        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                          <Upload className="w-3.5 h-3.5" />
-                          <span>{bubbleBottomImg ? '替换底部图片' : '上传底部图片'}</span>
-                          <input
-                            type="file"
-                            accept="image/png,image/jpeg,image/webp"
-                            className="hidden"
-                            onChange={(e) => {
-                              if (e.target.files && e.target.files[0]) {
-                                handleUploadBubbleSlot(e.target.files[0], 'bottom');
-                              }
-                            }}
-                          />
-                        </label>
-                        <p className="text-[10px] text-neutral-400 truncate">
-                          {bubbleBottomFileName || '如：悬挂金币、小萌爪、福袋'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Scale Controls (20% to 500%) with [+] and [-] fine-tuning */}
-                    <div className="space-y-1.5 pt-2 border-t border-neutral-200/70 text-xs">
-                      <div className="flex items-center justify-between font-bold text-neutral-700">
-                        <div className="flex items-center gap-1.5">
-                          <span>缩放大小</span>
-                          <span className="text-[10px] text-neutral-400 font-normal">基准高 72px (100% 完整显示在 312~384px 内)</span>
-                        </div>
-                        <span className="font-mono text-emerald-800 font-black">{Math.round(bubbleBottomScale * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const val = Math.max(0.2, Math.round((bubbleBottomScale - 0.05) * 100) / 100);
-                            setBubbleBottomScale(val);
-                            setBubbleActivePart('bottom');
-                            renderCompositeBubble({ bottomScale: val });
-                          }}
-                          className="w-6 h-6 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                          title="缩小 5%"
-                        >
-                          -
-                        </button>
-                        <input
-                          type="range"
-                          min="0.2"
-                          max="5.0"
-                          step="0.05"
-                          value={bubbleBottomScale}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            setBubbleBottomScale(val);
-                            setBubbleActivePart('bottom');
-                            renderCompositeBubble({ bottomScale: val });
-                          }}
-                          className="flex-1 accent-emerald-600 cursor-pointer"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const val = Math.min(5.0, Math.round((bubbleBottomScale + 0.05) * 100) / 100);
-                            setBubbleBottomScale(val);
-                            setBubbleActivePart('bottom');
-                            renderCompositeBubble({ bottomScale: val });
-                          }}
-                          className="w-6 h-6 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                          title="放大 5%"
-                        >
-                          +
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-1 pt-1 flex-wrap">
-                        {[
-                          { val: 0.5, label: '50%' },
-                          { val: 0.8, label: '80%' },
-                          { val: 1.0, label: '100% 满高 (72px)' },
-                          { val: 1.2, label: '120%' },
-                          { val: 1.5, label: '150%' },
-                          { val: 2.0, label: '200%' },
-                        ].map((item) => (
-                          <button
-                            key={item.val}
-                            type="button"
-                            onClick={() => {
-                              setBubbleBottomScale(item.val);
-                              setBubbleActivePart('bottom');
-                              renderCompositeBubble({ bottomScale: item.val });
-                            }}
-                            className={`text-[9px] px-1.5 py-0.5 rounded-md border font-bold transition-all cursor-pointer ${
-                              Math.abs(bubbleBottomScale - item.val) < 0.05
-                                ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
-                                : item.val === 1.0
-                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold'
-                                : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
-                            }`}
-                          >
-                            {item.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Position & Pixel Alignment Card (位置与像素对齐) */}
-                    <div className="bg-white/95 rounded-xl p-3 border border-neutral-200/90 shadow-2xs space-y-3 mt-2.5">
-                      <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600 border-b border-neutral-100 pb-1.5">
-                        <span className="flex items-center gap-1.5">
-                          <Move className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>位置与像素微调 (X / Y 轴)</span>
-                        </span>
-                        <span className="text-[10px] text-neutral-400 font-normal">步进 2px · 画板可直接拖动</span>
-                      </div>
-
-                      {/* 1. 水平 X 轴微调 */}
-                      <div className="space-y-1.5">
-                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
-                          <span className="text-neutral-600">水平 X 轴</span>
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-mono text-xs font-bold text-neutral-800 bg-neutral-100 px-2 py-0.5 rounded border border-neutral-200 shadow-2xs">
-                              {bubbleBottomOffsetX === 0 ? '0px (居中)' : bubbleBottomOffsetX > 0 ? `+${bubbleBottomOffsetX}px` : `${bubbleBottomOffsetX}px`}
-                            </span>
-                            {bubbleBottomOffsetX !== 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBubbleBottomOffsetX(0);
-                                  renderCompositeBubble({ bottomOffX: 0 });
-                                }}
-                                className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
-                                title="恢复水平居中"
-                              >
-                                居中
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.max(-200, bubbleBottomOffsetX - 2);
-                              setBubbleBottomOffsetX(val);
-                              renderCompositeBubble({ bottomOffX: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向左微调 2px"
-                          >
-                            <span>◀</span>
-                            <span className="text-[10px]">左移</span>
-                          </button>
-                          <input
-                            type="range"
-                            min="-200"
-                            max="200"
-                            step="1"
-                            value={bubbleBottomOffsetX}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value);
-                              setBubbleBottomOffsetX(val);
-                              renderCompositeBubble({ bottomOffX: val });
-                            }}
-                            className="flex-1 accent-emerald-600 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.min(200, bubbleBottomOffsetX + 2);
-                              setBubbleBottomOffsetX(val);
-                              renderCompositeBubble({ bottomOffX: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向右微调 2px"
-                          >
-                            <span className="text-[10px]">右移</span>
-                            <span>▶</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* 2. 垂直 Y 轴微调 (上沿对齐读数) */}
-                      <div className="space-y-1.5 pt-2 border-t border-neutral-100">
-                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
-                          <span className="text-neutral-600">垂直 Y 轴</span>
-                          <div className="flex items-center gap-1.5">
-                            <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
-                              bubbleBottomOffsetY === 0
-                                ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                                : (312 + bubbleBottomOffsetY) < 312
-                                ? 'bg-red-50 text-red-700 border-red-200'
-                                : 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            }`}>
-                              🎋 上沿: {312 + bubbleBottomOffsetY}px
-                            </span>
-                            {bubbleBottomOffsetY !== 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setBubbleBottomOffsetY(0);
-                                  renderCompositeBubble({ bottomOffY: 0 });
-                                }}
-                                className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
-                                title="重置对齐 312px 标准标线"
-                              >
-                                对齐312px
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.max(-60, bubbleBottomOffsetY - 2);
-                              setBubbleBottomOffsetY(val);
-                              renderCompositeBubble({ bottomOffY: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向上微调 2px (减少上沿读数)"
-                          >
-                            <span>▲</span>
-                            <span className="text-[10px]">上移</span>
-                          </button>
-                          <input
-                            type="range"
-                            min="-60"
-                            max="60"
-                            step="1"
-                            value={bubbleBottomOffsetY}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value);
-                              setBubbleBottomOffsetY(val);
-                              renderCompositeBubble({ bottomOffY: val });
-                            }}
-                            className="flex-1 accent-emerald-600 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.min(60, bubbleBottomOffsetY + 2);
-                              setBubbleBottomOffsetY(val);
-                              renderCompositeBubble({ bottomOffY: val });
-                            }}
-                            className="h-7 px-2.5 rounded-lg bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-bold text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs gap-1"
-                            title="向下微调 2px (增加上沿读数)"
-                          >
-                            <span className="text-[10px]">下移</span>
-                            <span>▼</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                /* Full Single Image Upload Card */
-                <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="font-bold text-xs text-neutral-900">完整透明气泡挂件图片 (480 × 384)</h4>
-                      <p className="text-[11px] text-neutral-400 mt-0.5">上传已在设计软件中排版好的完整透明背景 PNG</p>
-                    </div>
-                    <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{bubbleFullImg ? '替换整张挂件' : '上传完整挂件图片'}</span>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
-                        className="hidden"
-                        onChange={(e) => {
-                          if (e.target.files && e.target.files[0]) {
-                            handleUploadBubbleSlot(e.target.files[0], 'full');
-                          }
-                        }}
-                      />
-                    </label>
-                  </div>
-                </div>
-              )}
-
-              {/* Interactive Visual Canvas with Direct Dragging (No crosshair dot, smooth 2D movement) */}
-              <div className="flex flex-col items-center pt-1">
-                <div className="flex items-center justify-center gap-3 w-full">
-                  {/* Left Vertical Fine-Tuning Control Bar */}
-                  <div className="flex flex-col items-center justify-between h-[256px] py-2 px-1.5 bg-neutral-100/90 rounded-2xl border border-neutral-200/90 shadow-2xs select-none shrink-0 w-12">
-                    <button
-                      type="button"
-                      onClick={() => handleBubbleStepFineTune(-6)}
-                      title="向上微调 (往上走 6px)"
-                      className="w-8 h-8 rounded-xl bg-white hover:bg-neutral-50 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-xs font-black text-neutral-800 transition-all cursor-pointer"
-                    >
-                      ▲
-                    </button>
-
-                    <div className="flex-1 flex flex-col items-center justify-center my-1 relative group py-1 w-full">
-                      <span className="text-[9px] font-mono font-bold text-emerald-800 bg-white/95 px-1 py-0.5 rounded border border-neutral-200 shadow-2xs whitespace-nowrap text-center mb-2">
-                        {bubbleActivePart === 'top' ? `${96 + bubbleTopOffsetY}px` : `${312 + bubbleBottomOffsetY}px`}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold flex items-center gap-1 font-mono">
+                        {isBottomOver96 ? '🚨 平台驳回风险' : isTopOverCanvas ? '⚠️ 顶沿溢出提醒' : '✅ 微信审核合规'}
                       </span>
+                      <span className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] ${
+                        isBottomOver96 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
+                      }`}>
+                        下沿: {currentBottomY}px {isBottomOver96 ? `(超标 ${currentBottomY - 96}px 必拒)` : '(<= 96px 合规)'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-white/90 border border-neutral-200 font-mono text-[11px] text-neutral-700">
+                        小熊高度: {approxH}px (缩放 {Math.round(bubbleTopScale * 100)}%)
+                      </span>
+                      <span className={`px-2 py-0.5 rounded-full font-mono text-[11px] ${
+                        isTopOverCanvas ? 'bg-amber-500 text-white font-bold' : 'bg-white/90 border border-neutral-200 text-neutral-600'
+                      }`}>
+                        头顶: Y={currentTopY}px {isTopOverCanvas ? `(裁切 ${Math.abs(currentTopY)}px)` : ''}
+                      </span>
+                    </div>
 
-                      <div
-                        ref={bubbleTrackRef}
-                        onPointerDown={(e) => {
-                          e.currentTarget.setPointerCapture(e.pointerId);
-                          setIsDraggingBubbleSlider(true);
-                          handleBubbleSliderTrackPointer(e.clientY, false);
-                        }}
-                        onPointerMove={(e) => {
-                          if (!isDraggingBubbleSlider) return;
-                          handleBubbleSliderTrackPointer(e.clientY, false);
-                        }}
-                        onPointerUp={(e) => {
-                          setIsDraggingBubbleSlider(false);
-                          try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
-                          handleBubbleSliderTrackPointer(e.clientY, true);
-                        }}
-                        className="relative w-3.5 h-[120px] bg-neutral-200 rounded-full cursor-ns-resize flex flex-col justify-end p-0.5 select-none touch-none shadow-inner group-hover:bg-neutral-300/80 transition-colors"
-                        title="按住上下拖动微调当前部位高度"
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isBottomOver96 && (
+                        <button
+                          type="button"
+                          onClick={handleSnapTo96}
+                          className="px-2.5 py-1 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer shadow-xs transition-all"
+                        >
+                          🎯 一键贴齐 96px 下沿
+                        </button>
+                      )}
+                      {(isTopOverCanvas || bubbleTopScale !== 1.0 || bubbleTopOffsetY !== 0) && (
+                        <button
+                          type="button"
+                          onClick={handleResetStandard96}
+                          className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer shadow-xs transition-all flex items-center gap-1"
+                          title="恢复 100% 满格标准：高 96px，头顶 Y=0，下沿 Y=96"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          <span>⭐ 100% 满格标准 (96px)</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* 3. FRONT-AND-CENTER: 1:1 Pixel Canvas & Ruler (横向480px, 竖向384px) */}
+              <div className="flex flex-col items-center p-3 sm:p-4 rounded-2xl bg-neutral-50/90 border border-neutral-200/90 shadow-2xs">
+                <div className="w-full flex items-center justify-between mb-2 text-xs text-neutral-500 px-1 font-medium">
+                  <span className="flex items-center gap-1.5 font-bold text-neutral-700">
+                    <Move className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>1:1 真实视窗 (480 × 384 px) · 可直接在画板上拖动小熊平移</span>
+                  </span>
+                  <span className="font-mono text-[11px] text-neutral-400">
+                    {bubbleActivePart === 'top' ? '当前编辑: 顶部小熊' : '当前编辑: 底部挂饰'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-center gap-2 sm:gap-3 w-full overflow-x-auto pb-1">
+                  {/* Left 4-Direction Control Pad (上下左右方向键，控制小熊平移) */}
+                  <div className="flex flex-col items-center justify-between h-[307px] sm:h-[384px] py-3 px-1.5 bg-white rounded-2xl border border-neutral-200/90 shadow-2xs select-none shrink-0 w-16 sm:w-20">
+                    <div className="flex flex-col items-center gap-0.5">
+                      <span className="text-[10px] font-bold text-neutral-700 font-sans">平移微调</span>
+                      <span className="text-[8px] text-neutral-400 font-mono">2px/步</span>
+                    </div>
+
+                    {/* D-Pad Buttons (Up, Left, Center/Reset, Right, Down) */}
+                    <div className="flex flex-col items-center gap-1.5 my-auto">
+                      {/* 上方向键 */}
+                      <button
+                        type="button"
+                        onClick={() => handleBubbleStepFineTune(-2)}
+                        title="向上微调 2px"
+                        className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-neutral-100 hover:bg-emerald-100 hover:text-emerald-900 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-xs font-black text-neutral-700 transition-all cursor-pointer"
                       >
-                        <div
-                          className="w-full bg-emerald-500 rounded-full pointer-events-none transition-all duration-75"
-                          style={{
-                            height: `${Math.max(10, Math.min(90, 50 - (bubbleActivePart === 'top' ? bubbleTopOffsetY : bubbleBottomOffsetY) / 1.0))}%`,
+                        ▲
+                      </button>
+
+                      {/* 中间行：左、中心重置、右 */}
+                      <div className="flex items-center gap-1.5">
+                        {/* 左方向键 */}
+                        <button
+                          type="button"
+                          onClick={() => handleBubbleStepFineTuneX(-2)}
+                          title="向左微调 2px"
+                          className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-neutral-100 hover:bg-emerald-100 hover:text-emerald-900 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-xs font-black text-neutral-700 transition-all cursor-pointer"
+                        >
+                          ◀
+                        </button>
+
+                        {/* 中心归位/贴齐按钮 */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (bubbleActivePart === 'top') {
+                              handleSnapTo96();
+                            } else {
+                              handleBubbleResetCenter();
+                            }
                           }}
-                        />
+                          title={bubbleActivePart === 'top' ? "🎯 一键贴齐 96px 卡片顶边" : "🎯 一键恢复居中"}
+                          className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-50 hover:bg-emerald-200 active:scale-90 border border-emerald-300 shadow-2xs flex items-center justify-center text-[10px] font-black text-emerald-800 transition-all cursor-pointer"
+                        >
+                          🎯
+                        </button>
+
+                        {/* 右方向键 */}
+                        <button
+                          type="button"
+                          onClick={() => handleBubbleStepFineTuneX(2)}
+                          title="向右微调 2px"
+                          className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-neutral-100 hover:bg-emerald-100 hover:text-emerald-900 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-xs font-black text-neutral-700 transition-all cursor-pointer"
+                        >
+                          ▶
+                        </button>
                       </div>
 
-                      <span className="text-[9px] font-bold text-neutral-500 mt-2 whitespace-nowrap">
-                        {bubbleActivePart === 'top' ? '顶部' : '底部'}
-                      </span>
+                      {/* 下方向键 */}
+                      <button
+                        type="button"
+                        onClick={() => handleBubbleStepFineTune(2)}
+                        title="向下微调 2px"
+                        className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-neutral-100 hover:bg-emerald-100 hover:text-emerald-900 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-xs font-black text-neutral-700 transition-all cursor-pointer"
+                      >
+                        ▼
+                      </button>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleBubbleStepFineTune(6)}
-                      title="向下微调 (往下走 6px)"
-                      className="w-8 h-8 rounded-xl bg-white hover:bg-neutral-50 active:scale-90 border border-neutral-200 shadow-2xs flex items-center justify-center text-xs font-black text-neutral-800 transition-all cursor-pointer"
-                    >
-                      ▼
-                    </button>
+                    {/* 坐标实时读数 */}
+                    <div className="flex flex-col items-center gap-0.5 text-center w-full">
+                      <span className={`text-[9px] font-mono font-bold px-1 py-0.5 rounded border shadow-2xs w-full truncate ${
+                        (96 + bubbleTopOffsetY) > 96
+                          ? 'bg-red-100 text-red-900 border-red-300'
+                          : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      }`}>
+                        {bubbleActivePart === 'top' ? `Y:${96 + bubbleTopOffsetY}` : `Y:${312 + bubbleBottomOffsetY}`}
+                      </span>
+                      <span className="text-[8px] text-neutral-400 font-mono">
+                        {bubbleActivePart === 'top' ? `X:${bubbleTopOffsetX}` : `X:${bubbleBottomOffsetX}`}
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Interactive Visual Canvas (Exact 480 x 384 Coordinate Frame) */}
+                  {/* 1:1 Canvas: width 480px, height 384px */}
                   <div
                     ref={bubbleCanvasRef}
                     onPointerDown={handleBubblePointerDown}
                     onPointerMove={handleBubblePointerMove}
                     onPointerUp={handleBubblePointerUp}
-                    className={`relative w-[320px] aspect-[480/384] rounded-2xl bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-white border border-neutral-200/90 flex items-center justify-center overflow-hidden shadow-xs select-none touch-none ${
-                      isDraggingBubble ? 'cursor-grabbing ring-2 ring-emerald-400' : 'cursor-grab hover:ring-1 hover:ring-neutral-300'
+                    className={`relative w-[340px] sm:w-[480px] aspect-[480/384] rounded-2xl bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-white border border-neutral-300 flex items-center justify-center overflow-hidden shadow-sm select-none touch-none ${
+                      isDraggingBubble ? 'cursor-grabbing ring-2 ring-emerald-500' : 'cursor-grab hover:ring-1 hover:ring-neutral-400'
                     }`}
-                    title="在上方或下方直接按住拖拽，支持上下左右全向自由平移"
+                    title="按住鼠标拖拽，可在 480×384 画布内自由平移微调"
                   >
-                    {/* 1. Official Middle Forbidden Zone (Y: 96 ~ 312 out of 384, exact height 216px, 56.25%) */}
+                    {/* Zone 1: Top 96px zone (0~96px, 25%) */}
                     <div
-                      className="absolute inset-x-0 bg-red-500/5 border-y-2 border-dashed border-red-400/80 pointer-events-none z-0 flex flex-col justify-between"
-                      style={{
-                        top: '25%', // Y: 96px in 384px (25.0%)
-                        height: '56.25%', // Y: 216px in 384px (56.25%)
-                      }}
+                      className="absolute inset-x-0 top-0 border-b-2 border-dashed border-emerald-500/80 bg-emerald-500/5 pointer-events-none z-0 flex items-start justify-between px-2 pt-1"
+                      style={{ height: '25%' }}
                     >
-                      <div className="px-2 pt-0.5 flex items-center justify-between text-[7px] text-red-500/90 font-mono font-bold">
-                        <span>↑ 96px 禁止侵入上分界线</span>
-                        <span>中间 216px 不可编辑区</span>
-                      </div>
-                      <div className="px-2 pb-0.5 flex items-center justify-between text-[7px] text-red-500/90 font-mono font-bold">
-                        <span>↓ 312px 禁止侵入下分界线</span>
-                        <span>微信严禁挂件图案侵入</span>
-                      </div>
+                      <span className="text-[8px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs border border-emerald-200 font-mono">
+                        ✅ 顶部挂件核心区 (0~96px · 高96px)
+                      </span>
+                      <span className="text-[7px] text-emerald-700/80 font-mono">
+                        下沿不得超过 Y=96px
+                      </span>
                     </div>
 
-                    {/* 2. Authentic WeChat Red Packet Bubble Card inside the 216px zone (Exact Y: 96 ~ 312px, top: 25%, height: 56.25%) */}
+                    {/* Zone 2: Middle 216px WeChat Red Packet Bubble Card (96~312px, 56.25%) */}
                     <div
                       className="absolute inset-x-3 bg-gradient-to-r from-[#fa9d3b] to-[#f97316] rounded-xl border border-[#ea580c]/60 pointer-events-none z-5 flex flex-col justify-between shadow-xs overflow-hidden"
                       style={{
-                        top: '25%', // 紧贴 Y = 96px 上分界线（与小熊下沿 96px 完美无缝紧贴）
-                        height: '56.25%', // 铺满 96px ~ 312px 整个主体卡片区 (216px)
+                        top: '25%', // 紧贴 Y = 96px 顶部分界线
+                        height: '56.25%', // 贴合 96~312px 整个卡片区 (216px)
                       }}
                     >
-                      <div className="p-2 flex items-center justify-between">
+                      <div className="p-2 sm:p-2.5 flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 rounded-lg bg-[#c23636] text-white flex items-center justify-center text-xs shadow-xs border border-white/20">
+                          <div className="w-7 h-7 rounded-lg bg-[#c23636] text-white flex items-center justify-center text-xs shadow-xs border border-white/20">
                             🧧
                           </div>
                           <div className="space-y-0.5 text-left">
-                            <div className="text-[10px] font-bold text-white leading-tight">恭喜发财，大吉大利</div>
-                            <div className="text-[8px] text-amber-100/90 font-medium">微信红包气泡卡片 (顶边紧贴 Y = 96px)</div>
+                            <div className="text-[11px] font-bold text-white leading-tight">恭喜发财，大吉大利</div>
+                            <div className="text-[8px] text-amber-100/90 font-medium">微信红包气泡卡片主体 (顶沿 Y = 96px)</div>
                           </div>
                         </div>
-                        <span className="text-[8px] text-amber-100/80 font-mono font-bold bg-black/10 px-1 py-0.5 rounded">卡片区 96~312px</span>
+                        <span className="text-[8px] text-amber-100/80 font-mono font-bold bg-black/10 px-1 py-0.5 rounded">卡片 96~312px</span>
                       </div>
                       <div className="bg-white/95 px-2.5 py-0.5 flex items-center justify-between text-[8px] text-neutral-500 font-medium border-t border-amber-600/30">
                         <span>微信红包</span>
@@ -3500,6 +2920,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </div>
                     </div>
 
+                    {/* Zone 3: Bottom 72px zone (312~384px, 18.75%) */}
+                    <div
+                      className="absolute inset-x-0 bottom-0 border-t-2 border-dashed border-emerald-500/80 bg-emerald-500/5 pointer-events-none z-0 flex items-end justify-between px-2 pb-1"
+                      style={{ height: '18.75%' }}
+                    >
+                      <span className="text-[8px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs border border-emerald-200 font-mono">
+                        ✅ 底部垂饰区 (312~384px · 高72px)
+                      </span>
+                    </div>
+
+                    {/* Rendered Composite Result Overlay */}
                     {bubbleResult ? (
                       <>
                         <img
@@ -3508,77 +2939,44 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           className="w-full h-full object-contain drop-shadow-md z-10 pointer-events-none"
                         />
 
-                        {/* WeChat 480x384 Guides: Top 96px, Middle 216px, Bottom 72px */}
-                        {showGuides && (
-                          <div className="absolute inset-0 pointer-events-none z-20">
-                            {/* 1. Top Editable Area (0~96px out of 384, height 25%) */}
-                            <div
-                              className={`absolute inset-x-0 top-0 border border-dashed rounded-t-xl flex items-center justify-center transition-all ${
-                                bubbleActivePart === 'top'
-                                  ? 'border-emerald-500 bg-emerald-500/10'
-                                  : 'border-emerald-400/50 bg-emerald-500/5'
-                              }`}
-                              style={{ height: '25%' }}
-                            >
-                              <span className="absolute top-1 left-2 text-[8px] font-bold text-emerald-800 bg-white/95 px-1.5 py-0.5 rounded shadow-2xs border border-emerald-200">
-                                ✅ 上面 96px · 颈部可编辑区 (趴气泡/探头)
-                              </span>
-                            </div>
-
-                            {/* 2. Bottom Editable Area (312~384px out of 384, height 18.75%) */}
-                            <div
-                              className={`absolute inset-x-0 bottom-0 border border-dashed rounded-b-xl flex items-center justify-center transition-all ${
-                                bubbleActivePart === 'bottom'
-                                  ? 'border-emerald-500 bg-emerald-500/10'
-                                  : 'border-emerald-400/50 bg-emerald-500/5'
-                              }`}
-                              style={{ height: '18.75%' }}
-                            >
-                              <span className="absolute bottom-1 left-2 text-[8px] font-bold text-emerald-800 bg-white/95 px-1.5 py-0.5 rounded shadow-2xs border border-emerald-200">
-                                ✅ 下面 72px · 底部可编辑区 (底部垂饰)
-                              </span>
-                            </div>
-                          </div>
-                        )}
-
-                        {/* 3. Dynamic Moving Dashed Line for Top Part (小熊下沿与上沿对齐与越界辅助) */}
+                        {/* Top Moving Dashed Line Indicators */}
                         {(bubbleTopImg || bubbleActivePart === 'top') && (() => {
                           const topBottomY = 96 + bubbleTopOffsetY;
                           const approxH = Math.round(96 * bubbleTopScale);
                           const topTopY = topBottomY - approxH;
-                          const isTopOverflow = topTopY < 0; // 越过顶部 0px
-                          const isBottomIntrusion = topBottomY > 96; // 侵入中间不可编辑区
-                          
+                          const isTopOverflow = topTopY < 0;
+                          const isBottomIntrusion = topBottomY > 96;
+
                           return (
                             <>
-                              {/* 头部顶边缘参考线（当接近或越过 0px 时提醒） */}
+                              {/* 头部顶沿移动虚线 */}
                               <div
                                 className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
                                 style={{
                                   top: `${Math.max(0, Math.min(100, (topTopY / 384) * 100))}%`,
                                 }}
                               >
-                                <div className={`w-full border-t-2 border-dashed ${isTopOverflow ? 'border-amber-500 shadow-xs' : 'border-emerald-400/60'}`} />
+                                <div className={`w-full border-t-2 border-dashed ${isTopOverflow ? 'border-amber-500' : 'border-emerald-400/80'}`} />
                                 <div
                                   className={`absolute px-1.5 py-0.5 rounded-full text-[8px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
                                     isTopOverflow
-                                      ? 'bg-amber-600 text-white border-amber-300 ring-2 ring-amber-300'
+                                      ? 'bg-amber-600 text-white border-amber-300 ring-1 ring-amber-300'
                                       : topTopY === 0
                                       ? 'bg-emerald-600 text-white border-emerald-400'
                                       : 'bg-neutral-800 text-neutral-200 border-neutral-600'
                                   }`}
                                 >
-                                  <span>顶沿: {topTopY}px</span>
+                                  <span>顶沿: Y={topTopY}px</span>
                                   {isTopOverflow && (
                                     <span className="text-[7px] bg-black/30 px-1 rounded font-bold">⚠️ 超出画板顶部 {Math.abs(topTopY)}px</span>
                                   )}
                                   {topTopY === 0 && (
-                                    <span className="text-[7px] bg-white/20 px-1 rounded font-bold">🎯 顶沿贴齐0px</span>
+                                    <span className="text-[7px] bg-white/20 px-1 rounded font-bold">🎯 满格对齐 0px</span>
                                   )}
                                 </div>
                               </div>
 
-                              {/* 小熊下边缘移动对齐虚线 */}
+                              {/* 小熊下边缘移动虚线 */}
                               <div
                                 className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
                                 style={{
@@ -3595,183 +2993,613 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                                       : 'bg-emerald-700 text-white border-emerald-500'
                                   }`}
                                 >
-                                  <span>🐻 小熊下沿对齐线: {topBottomY}px</span>
+                                  <span>🐻 下沿对齐线: {topBottomY}px</span>
                                   {topBottomY === 96 && (
-                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐96px</span>
+                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美贴齐96px卡片顶边</span>
                                   )}
                                   {isBottomIntrusion && (
-                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入不可编辑区 +{bubbleTopOffsetY}px</span>
+                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🚨 超过96px (微信必拒)</span>
                                   )}
                                   {topBottomY < 96 && (
-                                    <span className="text-[8px] bg-white/20 px-1 rounded">距卡片上沿 {-(bubbleTopOffsetY)}px</span>
+                                    <span className="text-[8px] bg-white/20 px-1 rounded">悬空 {96 - topBottomY}px</span>
                                   )}
                                 </div>
                               </div>
-                            </>
-                          );
-                        })()}
-
-                        {/* 4. Dynamic Moving Dashed Line for Bottom Part (垂饰上沿与下沿移动对齐虚线) */}
-                        {(bubbleBottomImg || bubbleActivePart === 'bottom') && (() => {
-                          const botTopY = 312 + bubbleBottomOffsetY;
-                          const approxH = Math.round(72 * bubbleBottomScale);
-                          const botBottomY = botTopY + approxH;
-                          const isTopIntrusion = botTopY < 312;
-                          const isBottomOverflow = botBottomY > 384;
-
-                          return (
-                            <>
-                              <div
-                                className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
-                                style={{
-                                  top: `${((botTopY) / 384) * 100}%`,
-                                }}
-                              >
-                                <div className={`w-full border-t-2 border-dashed ${isTopIntrusion ? 'border-red-500' : 'border-emerald-600'} shadow-xs`} />
-                                <div
-                                  className={`absolute px-2 py-0.5 rounded-full text-[9px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
-                                    botTopY === 312
-                                      ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-300'
-                                      : isTopIntrusion
-                                      ? 'bg-red-600 text-white border-red-400 ring-2 ring-red-300'
-                                      : 'bg-emerald-700 text-white border-emerald-500'
-                                  }`}
-                                >
-                                  <span>🎋 垂饰上沿对齐线: {botTopY}px</span>
-                                  {botTopY === 312 && (
-                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐312px</span>
-                                  )}
-                                  {isTopIntrusion && (
-                                    <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入不可编辑区 {bubbleBottomOffsetY}px</span>
-                                  )}
-                                </div>
-                              </div>
-
-                              {/* 垂饰底沿提示线 */}
-                              {isBottomOverflow && (
-                                <div
-                                  className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
-                                  style={{
-                                    top: `${Math.min(100, (botBottomY / 384) * 100)}%`,
-                                  }}
-                                >
-                                  <div className="w-full border-t-2 border-dashed border-amber-500 shadow-xs" />
-                                  <div className="absolute px-1.5 py-0.5 rounded-full text-[8px] font-mono font-bold shadow-md bg-amber-600 text-white border border-amber-300">
-                                    <span>底沿: {botBottomY}px · 超出底部 {botBottomY - 384}px</span>
-                                  </div>
-                                </div>
-                              )}
                             </>
                           );
                         })()}
                       </>
                     ) : (
-                      <div className="text-neutral-400 text-xs">暂无气泡挂件</div>
+                      <div className="text-neutral-400 text-xs">请上传顶部小熊图片</div>
                     )}
 
                     {/* Dragging HUD */}
                     {isDraggingBubble && (
                       <div className="absolute top-2 bg-neutral-900/90 text-white text-[10px] px-3 py-1 rounded-full backdrop-blur-md font-mono z-30 flex items-center gap-1.5">
                         <Move className="w-3 h-3 text-emerald-400" />
-                        <span>正在平移: {bubbleActivePart === 'top' ? '顶部趴贴' : '底部垂饰'}</span>
+                        <span>正在平移: {bubbleActivePart === 'top' ? '顶部小熊' : '底部垂饰'}</span>
                       </div>
                     )}
                   </div>
 
-                  {/* Right Height Dimension Ruler (上面96px · 中间216px · 下面72px) */}
-                  <div className="flex flex-col justify-between h-[256px] py-1 text-[9px] font-mono select-none shrink-0 w-28">
-                    {/* Top 96px Bracket */}
-                    <div className="h-[25%] flex flex-col justify-center border-l-2 border-emerald-500 pl-2 text-emerald-800 bg-emerald-50/70 rounded-r-lg">
-                      <div className="font-extrabold flex items-center gap-1">
-                        <span>上面 96px</span>
+                  {/* Right: Zoom Control Bar (上是放大，下是缩小) + Height Dimension Ruler */}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* Vertical Zoom Controls (上是放大，下是缩小) */}
+                    <div className="flex flex-col items-center justify-between h-[307px] sm:h-[384px] py-3 px-1.5 bg-white rounded-2xl border border-neutral-200/90 shadow-2xs select-none w-14 sm:w-16">
+                      <div className="flex flex-col items-center gap-0.5">
+                        <span className="text-[10px] font-bold text-neutral-700 font-sans">缩放</span>
+                        <span className="text-[8px] text-neutral-400 font-mono">5%/步</span>
                       </div>
-                      <div className="text-[8px] text-emerald-700 font-sans">颈部可编辑区</div>
-                      <div className="text-[8px] text-neutral-400">Y: 0 ~ 96px</div>
+
+                      {/* Zoom Buttons: 上是放大，下是缩小 */}
+                      <div className="flex flex-col items-center gap-2 my-auto w-full">
+                        {/* 上：放大按键 */}
+                        <button
+                          type="button"
+                          onClick={() => handleBubbleStepScale(0.05)}
+                          title="放大 5%"
+                          className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-900 active:scale-90 border border-emerald-300 shadow-2xs flex flex-col items-center justify-center text-neutral-800 transition-all cursor-pointer font-bold gap-0.5"
+                        >
+                          <span className="text-sm font-black leading-none">＋</span>
+                          <span className="text-[7px] font-extrabold text-emerald-800">放大</span>
+                        </button>
+
+                        {/* 中间显示当前比例 & 快速 100% 满格 */}
+                        <button
+                          type="button"
+                          onClick={handleBubbleResetScale100}
+                          title="点击快速重置为 100% 满格标准 (96px)"
+                          className="px-1.5 py-1 rounded-lg bg-neutral-100 hover:bg-emerald-50 border border-neutral-200 flex flex-col items-center justify-center cursor-pointer transition-all w-full shadow-2xs"
+                        >
+                          <span className="text-[10px] font-black font-mono text-emerald-900">
+                            {Math.round((bubbleActivePart === 'top' ? bubbleTopScale : bubbleBottomScale) * 100)}%
+                          </span>
+                          <span className="text-[7px] text-emerald-700 font-bold">100%</span>
+                        </button>
+
+                        {/* 下：缩小按键 */}
+                        <button
+                          type="button"
+                          onClick={() => handleBubbleStepScale(-0.05)}
+                          title="缩小 5%"
+                          className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-neutral-100 hover:bg-emerald-50 hover:text-emerald-900 active:scale-90 border border-neutral-200 shadow-2xs flex flex-col items-center justify-center text-neutral-700 transition-all cursor-pointer font-bold gap-0.5"
+                        >
+                          <span className="text-sm font-black leading-none">－</span>
+                          <span className="text-[7px] font-extrabold text-neutral-600">缩小</span>
+                        </button>
+                      </div>
+
+                      <div className="text-[8px] font-mono text-neutral-400 text-center">
+                        {Math.round((bubbleActivePart === 'top' ? 96 * bubbleTopScale : 72 * bubbleBottomScale))}px
+                      </div>
                     </div>
 
-                    {/* Middle 216px Bracket */}
-                    <div className="h-[56.25%] flex flex-col justify-center border-l-2 border-red-400 pl-2 text-red-700 bg-red-50/60 rounded-r-lg my-1">
-                      <div className="font-extrabold text-red-700">中间 216px</div>
-                      <div className="text-[8px] text-red-600 font-sans font-bold">🚫 主体不可编辑</div>
-                      <div className="text-[8px] text-amber-800 font-sans mt-0.5">红包卡片区 96~312px</div>
-                      <div className="text-[8px] text-neutral-400">Y: 96 ~ 312px</div>
-                    </div>
-
-                    {/* Bottom 72px Bracket */}
-                    <div className="h-[18.75%] flex flex-col justify-center border-l-2 border-emerald-500 pl-2 text-emerald-800 bg-emerald-50/70 rounded-r-lg">
-                      <div className="font-extrabold flex items-center gap-1">
-                        <span>下面 72px</span>
+                    {/* Right Height Dimension Ruler (96px · 216px · 72px) */}
+                    <div className="flex flex-col justify-between h-[307px] sm:h-[384px] py-1 text-[9px] font-mono select-none w-20 sm:w-24">
+                      {/* Top 96px Bracket */}
+                      <div className="h-[25%] flex flex-col justify-center border-l-2 border-emerald-500 pl-1.5 text-emerald-800 bg-emerald-50/70 rounded-r-lg">
+                        <div className="font-extrabold flex items-center gap-0.5">
+                          <span>上 96px</span>
+                        </div>
+                        <div className="text-[8px] text-emerald-700 font-sans font-bold">顶部挂件区</div>
+                        <div className="text-[7px] text-neutral-400">0~96px</div>
                       </div>
-                      <div className="text-[8px] text-emerald-700 font-sans">底部可编辑区</div>
-                      <div className="text-[8px] text-neutral-400">Y: 312 ~ 384px</div>
+
+                      {/* Middle 216px Bracket */}
+                      <div className="h-[56.25%] flex flex-col justify-center border-l-2 border-red-400 pl-1.5 text-red-700 bg-red-50/60 rounded-r-lg my-1">
+                        <div className="font-extrabold text-red-700">中 216px</div>
+                        <div className="text-[8px] text-red-600 font-sans font-bold leading-tight">🚫 不可编辑区</div>
+                        <div className="text-[7px] text-amber-800 font-sans mt-0.5">红包卡片</div>
+                        <div className="text-[7px] text-neutral-400">96~312px</div>
+                      </div>
+
+                      {/* Bottom 72px Bracket */}
+                      <div className="h-[18.75%] flex flex-col justify-center border-l-2 border-emerald-500 pl-1.5 text-emerald-800 bg-emerald-50/70 rounded-r-lg">
+                        <div className="font-extrabold flex items-center gap-0.5">
+                          <span>下 72px</span>
+                        </div>
+                        <div className="text-[8px] text-emerald-700 font-sans">底部垂饰区</div>
+                        <div className="text-[7px] text-neutral-400">312~384px</div>
+                      </div>
                     </div>
                   </div>
                 </div>
+              </div>
 
-                {bubbleTopImg && (
-                  <div className="mt-3 px-4 py-2.5 rounded-2xl bg-amber-50/90 border border-amber-200/90 flex flex-col sm:flex-row items-center justify-between gap-2.5 max-w-xl text-xs text-amber-950 shadow-2xs">
-                    <div className="flex items-center gap-2">
-                      <Scissors className="w-4 h-4 text-amber-600 shrink-0" />
-                      <div className="text-left">
-                        <span className="font-bold">小熊与红包间有空白悬空？</span>
-                        <span className="text-[11px] text-amber-800 block sm:inline sm:ml-1">
-                          小熊原图底部含透明留白/接触阴影，点击【一键紧凑裁切】切除空白，小熊可立刻成倍放大并紧密趴在红包卡片上！
-                        </span>
+              {/* 4. UNIFIED COMPACT CONTROL DECK (紧密排布在画板正下方，双列并排，无需上下大范围滚动) */}
+              <div className="space-y-3">
+                {/* Mode Selector Tabs */}
+                <div className="flex items-center justify-between p-1 bg-neutral-100 rounded-xl border border-neutral-200/80 text-xs gap-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBubbleUploadMode('split');
+                      setBubbleActivePart('top');
+                      renderCompositeBubble({ mode: 'split' });
+                    }}
+                    className={`flex-1 py-1.5 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
+                      bubbleUploadMode === 'split' && bubbleActivePart === 'top'
+                        ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200'
+                        : 'text-neutral-600 hover:text-neutral-900'
+                    }`}
+                  >
+                    <span>🐻 顶部趴贴小熊 (核心 96px)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBubbleUploadMode('split');
+                      setBubbleActivePart('bottom');
+                      renderCompositeBubble({ mode: 'split' });
+                    }}
+                    className={`flex-1 py-1.5 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
+                      bubbleUploadMode === 'split' && bubbleActivePart === 'bottom'
+                        ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200'
+                        : 'text-neutral-600 hover:text-neutral-900'
+                    }`}
+                  >
+                    <span>🎋 底部垂饰 (选填 72px)</span>
+                    {bubbleBottomImg && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBubbleUploadMode('full');
+                      renderCompositeBubble({ mode: 'full' });
+                    }}
+                    className={`py-1.5 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs ${
+                      bubbleUploadMode === 'full'
+                        ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200'
+                        : 'text-neutral-600 hover:text-neutral-900'
+                    }`}
+                  >
+                    🖼️ 整张单图 (480×384)
+                  </button>
+                </div>
+
+                {/* Sub-Panel 1: 顶部趴贴小熊 (Core Active Part) */}
+                {bubbleUploadMode === 'split' && bubbleActivePart === 'top' && (
+                  <div className="space-y-3">
+                    {/* Material Quick Bar */}
+                    <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-11 h-11 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:6px_6px]">
+                          {bubbleTopImg ? (
+                            <img src={bubbleTopImg.src} alt="小熊素材" className="w-full h-full object-contain p-0.5" />
+                          ) : (
+                            <Smile className="w-5 h-5 text-neutral-300" />
+                          )}
+                        </div>
+                        <div className="space-y-0.5">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-xs text-neutral-900">
+                              {bubbleTopFileName ? bubbleTopFileName : '顶部小熊主素材'}
+                            </span>
+                            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-mono px-1.5 py-0.2 rounded font-bold">
+                              基准高 96px
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-neutral-400">
+                            裁剪后默认 100% 满格标准为高 96px，头顶 Y=0，下沿 Y=96 贴合气泡卡片
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-wrap shrink-0">
+                        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>{bubbleTopImg ? '替换小熊' : '上传小熊图片'}</span>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/webp"
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files[0]) {
+                                handleUploadBubbleSlot(e.target.files[0], 'top');
+                              }
+                            }}
+                          />
+                        </label>
+
+                        {bubbleTopImg && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleAutoTightTrim('bubbleTop')}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 active:scale-95 text-emerald-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-emerald-300 shadow-2xs"
+                              title="一键识别小熊身体轮廓，切除所有外围空白与阴影，让小熊贴齐 96px 顶沿"
+                            >
+                              <Scissors className="w-3 h-3 text-emerald-700" />
+                              <span>智能紧凑去留白</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCropModal('bubbleTop')}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-xs rounded-xl cursor-pointer transition-all border border-neutral-200 shadow-2xs"
+                              title="打开精确可视化裁剪工具"
+                            >
+                              <Crop className="w-3 h-3 text-neutral-600" />
+                              <span>手动裁剪</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleClearBubbleSlot('top')}
+                              className="text-[10px] text-red-500 hover:text-red-700 font-medium cursor-pointer px-1 py-1"
+                            >
+                              清除
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleAutoTightTrim('bubbleTop')}
-                        className="px-3 py-1 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs"
-                      >
-                        ⚡ 一键紧凑裁切
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenCropModal('bubbleTop')}
-                        className="px-2.5 py-1 bg-white hover:bg-amber-100/50 active:scale-95 text-amber-900 border border-amber-300 font-bold text-xs rounded-xl cursor-pointer transition-all"
-                      >
-                        精准裁剪
-                      </button>
+
+                    {/* Dual-Column Immediate Controls (尺寸缩放 vs 位置对齐) */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {/* Left Column: 尺寸与缩放 */}
+                      <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/80 space-y-2.5 text-xs">
+                        <div className="flex items-center justify-between font-bold text-neutral-700 border-b border-neutral-200/60 pb-1.5">
+                          <span className="flex items-center gap-1 text-emerald-900">
+                            <span>小熊缩放大小</span>
+                          </span>
+                          <span className="font-mono text-emerald-800 font-black">
+                            {Math.round(bubbleTopScale * 100)}% (高 {Math.round(96 * bubbleTopScale)}px)
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const val = Math.max(0.2, Math.round((bubbleTopScale - 0.05) * 100) / 100);
+                              setBubbleTopScale(val);
+                              renderCompositeBubble({ topScale: val });
+                            }}
+                            className="w-7 h-7 rounded-xl bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
+                            title="缩小 5%"
+                          >
+                            -
+                          </button>
+                          <input
+                            type="range"
+                            min="0.2"
+                            max="2.5"
+                            step="0.05"
+                            value={bubbleTopScale}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setBubbleTopScale(val);
+                              renderCompositeBubble({ topScale: val });
+                            }}
+                            className="flex-1 accent-emerald-600 cursor-pointer"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const val = Math.min(2.5, Math.round((bubbleTopScale + 0.05) * 100) / 100);
+                              setBubbleTopScale(val);
+                              renderCompositeBubble({ topScale: val });
+                            }}
+                            className="w-7 h-7 rounded-xl bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
+                            title="放大 5%"
+                          >
+                            +
+                          </button>
+                        </div>
+
+                        {/* Scale Presets */}
+                        <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                          {[
+                            { val: 0.8, label: '80% (77px)' },
+                            { val: 0.9, label: '90% (86px)' },
+                            { val: 1.0, label: '⭐ 100% 满格 (96px 官方标准)' },
+                            { val: 1.1, label: '110% (106px)' },
+                          ].map((item) => (
+                            <button
+                              key={item.val}
+                              type="button"
+                              onClick={() => {
+                                setBubbleTopScale(item.val);
+                                renderCompositeBubble({ topScale: item.val });
+                              }}
+                              className={`text-[10px] px-2 py-1 rounded-lg border font-bold transition-all cursor-pointer ${
+                                Math.abs(bubbleTopScale - item.val) < 0.03
+                                  ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
+                                  : item.val === 1.0
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold shadow-2xs'
+                                  : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* 底部留白/阴影切除 (解决悬空与缝隙) */}
+                        <div className="pt-2 border-t border-neutral-200/60 space-y-1.5">
+                          <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600">
+                            <span className="flex items-center gap-1">
+                              <Scissors className="w-3 h-3 text-emerald-600" />
+                              <span>去除底部空隙与阴影</span>
+                            </span>
+                            <span className="font-mono text-neutral-700 font-bold">
+                              {bubbleTopBottomCrop > 0 ? `裁 ${Math.round(bubbleTopBottomCrop * 100)}%` : '0% (原图)'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="range"
+                              min="0"
+                              max="0.8"
+                              step="0.05"
+                              value={bubbleTopBottomCrop}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                setBubbleTopBottomCrop(val);
+                                renderCompositeBubble({ topBottomCrop: val });
+                              }}
+                              className="flex-1 accent-emerald-600 cursor-pointer"
+                            />
+                            <div className="flex items-center gap-1 shrink-0">
+                              {[0, 0.15, 0.3, 0.45].map((cp) => (
+                                <button
+                                  key={cp}
+                                  type="button"
+                                  onClick={() => {
+                                    setBubbleTopBottomCrop(cp);
+                                    renderCompositeBubble({ topBottomCrop: cp });
+                                  }}
+                                  className={`text-[9px] px-1.5 py-0.5 rounded border font-mono ${
+                                    Math.abs(bubbleTopBottomCrop - cp) < 0.03
+                                      ? 'bg-emerald-600 text-white border-emerald-600'
+                                      : 'bg-white text-neutral-600 border-neutral-200'
+                                  }`}
+                                >
+                                  {cp === 0 ? '原图' : `${Math.round(cp * 100)}%`}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Right Column: 位置与对齐 (X / Y 轴) */}
+                      <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/80 space-y-2.5 text-xs">
+                        {/* 1. 垂直 Y 轴 (卡片顶沿 Y=96) */}
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between font-bold text-neutral-700 border-b border-neutral-200/60 pb-1.5">
+                            <span className="text-neutral-700">垂直 Y 轴 (卡片顶沿 Y=96)</span>
+                            <div className="flex items-center gap-1">
+                              <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
+                                (96 + bubbleTopOffsetY) > 96
+                                  ? 'bg-red-100 text-red-900 border-red-300'
+                                  : 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                              }`}>
+                                下沿: {96 + bubbleTopOffsetY}px {(96 + bubbleTopOffsetY) > 96 ? '🚨' : '✓'}
+                              </span>
+                              {bubbleTopOffsetY !== 0 && (
+                                <button
+                                  type="button"
+                                  onClick={handleSnapTo96}
+                                  className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-white px-1.5 py-0.5 rounded border border-emerald-300 cursor-pointer font-bold"
+                                  title="贴齐 96px"
+                                >
+                                  贴齐96
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-neutral-400 font-mono w-7 text-right">-80</span>
+                            <input
+                              type="range"
+                              min="-80"
+                              max="80"
+                              step="1"
+                              value={bubbleTopOffsetY}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value);
+                                setBubbleTopOffsetY(val);
+                                renderCompositeBubble({ topOffY: val });
+                              }}
+                              className="flex-1 accent-emerald-600 cursor-pointer"
+                            />
+                            <span className="text-[10px] text-neutral-400 font-mono w-7">+80</span>
+                          </div>
+                        </div>
+
+                        {/* 2. 水平 X 轴微调 */}
+                        <div className="space-y-1.5 pt-2 border-t border-neutral-200/60">
+                          <div className="flex items-center justify-between font-bold text-neutral-700">
+                            <span className="text-neutral-700">水平 X 轴平移</span>
+                            <div className="flex items-center gap-1">
+                              <span className="font-mono text-xs font-bold text-neutral-800 bg-white px-2 py-0.5 rounded border border-neutral-200 shadow-2xs">
+                                {bubbleTopOffsetX === 0 ? '0px (居中)' : bubbleTopOffsetX > 0 ? `+${bubbleTopOffsetX}px` : `${bubbleTopOffsetX}px`}
+                              </span>
+                              {bubbleTopOffsetX !== 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setBubbleTopOffsetX(0);
+                                    renderCompositeBubble({ topOffX: 0 });
+                                  }}
+                                  className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-white px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
+                                  title="恢复居中"
+                                >
+                                  居中
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-neutral-400 font-mono w-7 text-right">-150</span>
+                            <input
+                              type="range"
+                              min="-150"
+                              max="150"
+                              step="1"
+                              value={bubbleTopOffsetX}
+                              onChange={(e) => {
+                                const val = parseInt(e.target.value);
+                                setBubbleTopOffsetX(val);
+                                renderCompositeBubble({ topOffX: val });
+                              }}
+                              className="flex-1 accent-emerald-600 cursor-pointer"
+                            />
+                            <span className="text-[10px] text-neutral-400 font-mono w-7">+150</span>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
 
-                <div className="mt-2 text-center space-y-1">
-                  <span className="text-[11px] font-bold text-emerald-800 bg-emerald-50 px-3 py-0.5 rounded-full border border-emerald-200 inline-block font-mono shadow-2xs">
-                    ✅ 480×384 规范：上面96px颈部与下面72px垂饰 · 中间216px主体严格留空（内嵌红包高约180px）✓
-                  </span>
-                  <p className="text-[10px] text-neutral-400">
-                    💡 提示：在上方画板上直接按住鼠标拖动，绿色移动虚线实时显示对齐像素数
-                  </p>
-                </div>
-              </div>
-
-              {/* Dedicated Synthesis Download Box */}
-              {bubbleResult && (
-                <div className="p-4 rounded-2xl bg-emerald-50/50 border border-emerald-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                  <div className="space-y-0.5">
-                    <div className="flex items-center gap-2">
-                      <span className="font-extrabold text-emerald-950 text-sm">微信标准气泡挂件已合成</span>
-                      <span className="font-mono text-[10px] bg-white px-2 py-0.5 rounded-full border border-emerald-300 text-emerald-800 font-bold">
-                        480 × 384 PNG · {Math.round(bubbleResult.size / 1024)} KB ✓
-                      </span>
+                {/* Sub-Panel 2: 底部垂饰挂件 (Optional Secondary Part) */}
+                {bubbleUploadMode === 'split' && bubbleActivePart === 'bottom' && (
+                  <div className="p-4 rounded-2xl bg-neutral-50/80 border border-neutral-200 space-y-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-emerald-700 text-white text-[11px] font-bold flex items-center justify-center">
+                          B
+                        </span>
+                        <div>
+                          <div className="font-bold text-xs text-neutral-900">底部垂饰挂件 (选填 · 312~384px)</div>
+                          <div className="text-[10px] text-neutral-400">悬挂在红包卡片下方的流苏、金币或小吊坠，基准高 72px</div>
+                        </div>
+                      </div>
+                      {bubbleBottomImg && (
+                        <button
+                          type="button"
+                          onClick={() => handleClearBubbleSlot('bottom')}
+                          className="text-[10px] text-red-500 hover:text-red-700 font-medium cursor-pointer"
+                        >
+                          清除
+                        </button>
+                      )}
                     </div>
-                    <p className="text-[11px] text-emerald-900/70">
-                      已将顶部与底部图片合成为一张透明PNG，中间216px严禁侵入区域严格留空，大小 &le; 300KB，可直接提交微信红包开放平台审核。
-                    </p>
+
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
+                        {bubbleBottomImg ? (
+                          <img src={bubbleBottomImg.src} alt="底部挂件" className="w-full h-full object-contain p-1" />
+                        ) : (
+                          <Sparkles className="w-5 h-5 text-neutral-300" />
+                        )}
+                      </div>
+                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{bubbleBottomImg ? '替换底部图片' : '上传底部垂饰图片'}</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          className="hidden"
+                          onChange={(e) => {
+                            if (e.target.files && e.target.files[0]) {
+                              handleUploadBubbleSlot(e.target.files[0], 'bottom');
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    {bubbleBottomImg && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-neutral-200/80">
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between font-bold text-neutral-700">
+                            <span>缩放大小</span>
+                            <span className="font-mono text-emerald-800">{Math.round(bubbleBottomScale * 100)}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.2"
+                            max="2.0"
+                            step="0.05"
+                            value={bubbleBottomScale}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              setBubbleBottomScale(val);
+                              renderCompositeBubble({ bottomScale: val });
+                            }}
+                            className="w-full accent-emerald-600 cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between font-bold text-neutral-700">
+                            <span>垂直位置 Y 轴</span>
+                            <span className="font-mono text-neutral-700">{312 + bubbleBottomOffsetY}px</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="-50"
+                            max="50"
+                            step="1"
+                            value={bubbleBottomOffsetY}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              setBubbleBottomOffsetY(val);
+                              renderCompositeBubble({ bottomOffY: val });
+                            }}
+                            className="w-full accent-emerald-600 cursor-pointer"
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadSingle(bubbleResult.blob, '03_气泡挂件_480x384_微信标准合成图.png')}
-                    className="px-5 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm shrink-0 active:scale-95"
-                  >
-                    <Download className="w-4 h-4 text-emerald-300" />
-                    <span>下载合成气泡挂件 (480×384)</span>
-                  </button>
-                </div>
-              )}
+                )}
+
+                {/* Sub-Panel 3: 整张单图模式 */}
+                {bubbleUploadMode === 'full' && (
+                  <div className="p-4 rounded-2xl bg-neutral-50/80 border border-neutral-200 space-y-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h4 className="font-bold text-xs text-neutral-900">完整透明气泡挂件图片 (480 × 384)</h4>
+                        <p className="text-[11px] text-neutral-400 mt-0.5">上传已在设计软件中排版好的完整透明背景 PNG</p>
+                      </div>
+                      <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{bubbleFullImg ? '替换整张挂件' : '上传完整挂件图片'}</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          className="hidden"
+                          onChange={(e) => {
+                            if (e.target.files && e.target.files[0]) {
+                              handleUploadBubbleSlot(e.target.files[0], 'full');
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {/* 5. Dedicated Synthesis Download Box */}
+                {bubbleResult && (
+                  <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2">
+                        <span className="font-extrabold text-emerald-950 text-sm">微信标准气泡挂件已就绪</span>
+                        <span className="font-mono text-[10px] bg-white px-2 py-0.5 rounded-full border border-emerald-300 text-emerald-800 font-bold">
+                          480 × 384 PNG · {Math.round(bubbleResult.size / 1024)} KB ✓
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-emerald-900/70">
+                        100% 遵循微信官方气泡挂件 480×384 规范，小熊下沿严格对齐 ≤ 96px，可直接上传平台机审。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadSingle(bubbleResult.blob, '03_气泡挂件_480x384_微信标准合成图.png')}
+                      className="px-5 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm shrink-0 active:scale-95"
+                    >
+                      <Download className="w-4 h-4 text-emerald-300" />
+                      <span>下载 480×384 规范图</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

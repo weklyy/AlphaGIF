@@ -326,6 +326,9 @@ export interface ManualTransparencyConfig {
   feather: number; // 0 ~ 12
   defringe: number; // 0 ~ 3 (收缩去白边/杂边像素)
   customColor?: string; // hex e.g. '#ffffff'
+  customColors?: string[]; // 支持叠加多色吸取
+  contiguous?: boolean; // 连续 (从点击处连通漫水) vs 不连续 (全图同色清除)
+  seedPoint?: { x: number; y: number }; // 鼠标吸管点击坐标
 }
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } {
@@ -352,7 +355,7 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
  * - 'global': Global color distance keying across the entire image
  * - 'white': Removes white/light background (#ffffff)
  * - 'black': Removes black/dark background (#000000)
- * - 'custom': Removes user-picked color (via eyedropper)
+ * - 'custom': Removes user-picked color (via eyedropper) with contiguous or global mode, and multi-color accumulation
  * - 'keep': Keeps original alpha channel untouched
  */
 export async function processImageTransparency(
@@ -365,10 +368,22 @@ export async function processImageTransparency(
     feather = 10,
     defringe = 1,
     customColor,
+    customColors = [],
+    contiguous = true,
+    seedPoint,
   } = config;
 
-  const w = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
-  const h = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
+  let rawW = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
+  let rawH = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
+
+  // Protect against browser freeze: downscale working canvas if larger than 1280px
+  let w = rawW;
+  let h = rawH;
+  if (w > 1280 || h > 1280) {
+    const scale = 1280 / Math.max(w, h);
+    w = Math.round(w * scale);
+    h = Math.round(h * scale);
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, w);
@@ -386,7 +401,7 @@ export async function processImageTransparency(
       transparentPixels++;
     }
   }
-  const hadTransparency = transparentPixels / totalPixels >= 0.12;
+  const hadTransparency = transparentPixels / totalPixels >= 0.08;
 
   // Sample border/corner colors to detect background color
   const samplePoints = [
@@ -429,30 +444,51 @@ export async function processImageTransparency(
     return { canvas, img, detectedBgHex, hadTransparency };
   }
 
-  let targetR = bgR;
-  let targetG = bgG;
-  let targetB = bgB;
+  // Compile list of target colors to remove (supporting multi-color additive picking)
+  const targetRgbList: Array<{ r: number; g: number; b: number }> = [];
 
   if (mode === 'white') {
-    targetR = 252;
-    targetG = 252;
-    targetB = 252;
+    targetRgbList.push({ r: 252, g: 252, b: 252 });
   } else if (mode === 'black') {
-    targetR = 8;
-    targetG = 8;
-    targetB = 8;
-  } else if (customColor) {
-    const rgb = hexToRgb(customColor);
-    targetR = rgb.r;
-    targetG = rgb.g;
-    targetB = rgb.b;
+    targetRgbList.push({ r: 8, g: 8, b: 8 });
+  } else if (mode === 'custom') {
+    if (customColors && customColors.length > 0) {
+      for (const hex of customColors) {
+        targetRgbList.push(hexToRgb(hex));
+      }
+    } else if (customColor) {
+      targetRgbList.push(hexToRgb(customColor));
+    } else {
+      targetRgbList.push({ r: bgR, g: bgG, b: bgB });
+    }
+  } else {
+    targetRgbList.push({ r: bgR, g: bgG, b: bgB });
   }
 
-  const useFloodFill = mode === 'auto' || mode === 'flood';
   const featherRange = Math.max(2, feather * 3);
 
+  // Helper: check if pixel (r, g, b) matches any target color within tolerance
+  const matchesTargetColor = (r: number, g: number, b: number, tol = tolerance): boolean => {
+    for (const target of targetRgbList) {
+      const dist = Math.sqrt((r - target.r) ** 2 + (g - target.g) ** 2 + (b - target.b) ** 2);
+      if (dist <= tol) return true;
+    }
+    return false;
+  };
+
+  const getMinColorDist = (r: number, g: number, b: number): number => {
+    let minDist = 9999;
+    for (const target of targetRgbList) {
+      const dist = Math.sqrt((r - target.r) ** 2 + (g - target.g) ** 2 + (b - target.b) ** 2);
+      if (dist < minDist) minDist = dist;
+    }
+    return minDist;
+  };
+
+  // Determine if flood fill (contiguous) should be used
+  const useFloodFill = (mode === 'auto' || mode === 'flood' || (mode === 'custom' && contiguous));
+
   if (useFloodFill) {
-    // Edge-connected BFS flood fill so interior white/colored parts of the bear are preserved!
     const visited = new Uint8Array(totalPixels);
     const queue = new Int32Array(totalPixels);
     let head = 0;
@@ -469,28 +505,34 @@ export async function processImageTransparency(
         queue[tail++] = pIdx;
         return;
       }
-      const dist = Math.sqrt((d[idx] - targetR) ** 2 + (d[idx + 1] - targetG) ** 2 + (d[idx + 2] - targetB) ** 2);
-      if (dist <= tolerance) {
+      if (matchesTargetColor(d[idx], d[idx + 1], d[idx + 2], tolerance)) {
         visited[pIdx] = 1;
         d[idx + 3] = 0;
         queue[tail++] = pIdx;
       }
     };
 
-    // Seed all 4 borders
-    for (let x = 0; x < w; x++) {
-      pushIfBg(x, 0);
-      pushIfBg(x, h - 1);
-    }
-    for (let y = 1; y < h - 1; y++) {
-      pushIfBg(0, y);
-      pushIfBg(w - 1, y);
+    if (mode === 'custom' && contiguous && seedPoint) {
+      // Seed ONLY from user clicked point! This guarantees only the clicked connected area (e.g. area A) is erased, leaving area B intact!
+      const sx = Math.max(0, Math.min(w - 1, Math.round(seedPoint.x * (w / rawW))));
+      const sy = Math.max(0, Math.min(h - 1, Math.round(seedPoint.y * (h / rawH))));
+      pushIfBg(sx, sy);
+    } else {
+      // Seed all 4 borders
+      for (let x = 0; x < w; x++) {
+        pushIfBg(x, 0);
+        pushIfBg(x, h - 1);
+      }
+      for (let y = 1; y < h - 1; y++) {
+        pushIfBg(0, y);
+        pushIfBg(w - 1, y);
+      }
     }
 
     while (head < tail) {
       const curr = queue[head++];
       const cx = curr % w;
-      const cy = (curr - cx) / w;
+      const cy = Math.floor(curr / w);
       pushIfBg(cx - 1, cy);
       pushIfBg(cx + 1, cy);
       pushIfBg(cx, cy - 1);
@@ -502,7 +544,6 @@ export async function processImageTransparency(
       for (let x = 1; x < w - 1; x++) {
         const pIdx = y * w + x;
         if (visited[pIdx]) continue;
-        // Check if adjacent to a transparent/visited background pixel
         const hasBgNeighbor =
           visited[pIdx - 1] ||
           visited[pIdx + 1] ||
@@ -515,7 +556,7 @@ export async function processImageTransparency(
 
         if (hasBgNeighbor) {
           const idx = pIdx * 4;
-          const dist = Math.sqrt((d[idx] - targetR) ** 2 + (d[idx + 1] - targetG) ** 2 + (d[idx + 2] - targetB) ** 2);
+          const dist = getMinColorDist(d[idx], d[idx + 1], d[idx + 2]);
           if (dist <= tolerance + featherRange) {
             const factor = Math.max(0, Math.min(1, (dist - tolerance) / featherRange));
             d[idx + 3] = Math.round(d[idx + 3] * factor);
@@ -524,12 +565,12 @@ export async function processImageTransparency(
       }
     }
   } else {
-    // Global color distance keying across all pixels
+    // Discontiguous / Global color distance keying across all pixels
     for (let i = 0; i < d.length; i += 4) {
       const r = d[i];
       const g = d[i + 1];
       const b = d[i + 2];
-      const dist = Math.sqrt((r - targetR) ** 2 + (g - targetG) ** 2 + (b - targetB) ** 2);
+      const dist = getMinColorDist(r, g, b);
       if (dist <= tolerance) {
         d[i + 3] = 0;
       } else if (dist <= tolerance + featherRange) {
@@ -539,7 +580,7 @@ export async function processImageTransparency(
     }
   }
 
-  // Optional edge defringe / choke to remove stubborn 1~3px white/gray anti-alias halo
+  // Edge defringe / choke to remove stubborn 1~3px anti-alias fringe
   if (defringe > 0) {
     for (let pass = 0; pass < defringe; pass++) {
       const alphaCopy = new Uint8ClampedArray(totalPixels);
@@ -558,7 +599,7 @@ export async function processImageTransparency(
           );
           if (minNeighborAlpha < 30) {
             const idx = p * 4;
-            const dist = Math.sqrt((d[idx] - targetR) ** 2 + (d[idx + 1] - targetG) ** 2 + (d[idx + 2] - targetB) ** 2);
+            const dist = getMinColorDist(d[idx], d[idx + 1], d[idx + 2]);
             if (dist < tolerance + 55) {
               d[idx + 3] = Math.round(alphaCopy[p] * 0.25);
             } else {
@@ -577,20 +618,74 @@ export async function processImageTransparency(
 
 /**
  * Ensures an image or canvas has transparent background pixels required by WeChat Red Packet.
- * If less than 12% of pixels are transparent, automatically detects corner background color
- * and removes it cleanly.
+ * Downscales giant images to max 1200px to ensure non-blocking high-speed execution.
  */
 export async function ensureTransparentSubject(
   source: HTMLImageElement | HTMLCanvasElement,
   tolerance = 36
 ): Promise<HTMLCanvasElement> {
-  const res = await processImageTransparency(source, {
+  const w = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
+  const h = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
+
+  let effectiveSource = source;
+  if (w > 1200 || h > 1200) {
+    const scale = 1200 / Math.max(w, h);
+    const nw = Math.round(w * scale);
+    const nh = Math.round(h * scale);
+    const downCanvas = document.createElement('canvas');
+    downCanvas.width = nw;
+    downCanvas.height = nh;
+    const dctx = downCanvas.getContext('2d')!;
+    dctx.drawImage(source, 0, 0, nw, nh);
+    effectiveSource = downCanvas;
+  }
+
+  const res = await processImageTransparency(effectiveSource, {
     mode: 'auto',
     tolerance,
     feather: 8,
     defringe: 1,
   });
   return res.canvas;
+}
+
+export interface NormalizedCropBox {
+  x: number; // 0 ~ 1 (left)
+  y: number; // 0 ~ 1 (top)
+  width: number; // 0 ~ 1 (width)
+  height: number; // 0 ~ 1 (height)
+}
+
+/**
+ * Crop any rectangular region from image based on normalized 0~1 coordinates.
+ * Supports arbitrary top, bottom, left, right cropping with visual box selection.
+ */
+export async function cropImageByBox(
+  source: HTMLImageElement | HTMLCanvasElement,
+  box: NormalizedCropBox
+): Promise<{ canvas: HTMLCanvasElement; img: HTMLImageElement; width: number; height: number }> {
+  const sw = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
+  const sh = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
+
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+  const normX = clamp(box.x, 0, 0.99);
+  const normY = clamp(box.y, 0, 0.99);
+  const normW = clamp(box.width, 0.01, 1 - normX);
+  const normH = clamp(box.height, 0.01, 1 - normY);
+
+  const sx = Math.round(normX * sw);
+  const sy = Math.round(normY * sh);
+  const cw = Math.max(1, Math.round(normW * sw));
+  const ch = Math.max(1, Math.round(normH * sh));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(source, sx, sy, cw, ch, 0, 0, cw, ch);
+
+  const img = await loadImageElement(canvas.toDataURL('image/png'));
+  return { canvas, img, width: cw, height: ch };
 }
 
 /**

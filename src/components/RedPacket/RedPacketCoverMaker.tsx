@@ -45,6 +45,8 @@ import {
   Pipette,
   Eraser,
   Paintbrush,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import {
   WECHAT_RED_PACKET_SPECS,
@@ -54,6 +56,7 @@ import {
   PendantPartConfig,
   ManualTransparencyConfig,
   FullBubbleSplitConfig,
+  NormalizedCropBox,
   fitImageToTarget,
   createCoverPendant,
   createBubblePendant,
@@ -66,6 +69,7 @@ import {
   loadImageElement,
   ensureTransparentSubject,
   processImageTransparency,
+  cropImageByBox,
   splitSingleImageIntoTopAndBottom,
   trimImageTransparentBorders,
   getAlphaBoundingBox,
@@ -253,14 +257,19 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     }
   }, [activeBottomLayer]);
 
-  // Crop & Trim Modal States
+  // Crop & Trim Modal States (Arbitrary 4-Sided Rectangular Box Selection)
   const [cropModalOpen, setCropModalOpen] = useState(false);
   const [cropModalTarget, setCropModalTarget] = useState<'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom'>('bubbleTop');
   const [cropModalImg, setCropModalImg] = useState<HTMLImageElement | null>(null);
-  const [cropModalBottomCrop, setCropModalBottomCrop] = useState<number>(0);
-  const [cropModalTopCrop, setCropModalTopCrop] = useState<number>(0);
+  const [cropBox, setCropBox] = useState<NormalizedCropBox>({ x: 0, y: 0, width: 1, height: 1 });
+  const [cropImgRect, setCropImgRect] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [isDraggingCropBox, setIsDraggingCropBox] = useState(false);
+  const [activeCropHandle, setActiveCropHandle] = useState<'move' | 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se' | null>(null);
+  const cropDragStartRef = useRef<{ clientX: number; clientY: number; startBox: NormalizedCropBox; boxPixelWidth: number; boxPixelHeight: number } | null>(null);
+  const cropContainerRef = useRef<HTMLDivElement | null>(null);
+  const cropImgRef = useRef<HTMLImageElement | null>(null);
 
-  // Manual Background Transparency Modal States (自动化透明 + 手动微调抠图器)
+  // Manual Background Transparency Modal States (自动化透明 + 吸管连通漫水/全图取色 + 叠加吸取 + 撤销历史 + 圆形笔刷)
   const [bgModalOpen, setBgModalOpen] = useState(false);
   const [bgModalTarget, setBgModalTarget] = useState<'bubbleTop' | 'bubbleBottom' | 'bubbleFull'>('bubbleTop');
   const [bgModalRawImg, setBgModalRawImg] = useState<HTMLImageElement | null>(null);
@@ -270,6 +279,14 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [bgBrushSize, setBgBrushSize] = useState<number>(22);
   const [isPaintingBgModal, setIsPaintingBgModal] = useState(false);
   const bgModalCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Requirement 1 Enhancements:
+  const [bgContiguous, setBgContiguous] = useState<boolean>(true); // 连续 (漫水连通) vs 不连续 (全图取色)
+  const [bgPickedColors, setBgPickedColors] = useState<string[]>([]); // 叠加吸取的颜色列表
+  const [bgUndoStack, setBgUndoStack] = useState<ImageData[]>([]); // 撤销历史栈
+  const [bgRedoStack, setBgRedoStack] = useState<ImageData[]>([]); // 重做历史栈
+  const [bgCursorPos, setBgCursorPos] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false });
+  const [bgAiLoading, setBgAiLoading] = useState(false);
 
   // Customization Options: Story (750x1250)
   const [storyTitle, setStoryTitle] = useState('红包故事 · 岁岁平安');
@@ -1111,28 +1128,47 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     file: File,
     progressCallback?: (p: number, msg: string) => void
   ): Promise<{ rawImg: HTMLImageElement; cutoutImg: HTMLImageElement }> => {
+    // Yield immediately to let browser render upload modal progress
+    await new Promise((r) => setTimeout(r, 20));
+    progressCallback?.(15, '正在读取并解析图片通道...');
     const rawImg = await loadImageElement(file);
+    await new Promise((r) => setTimeout(r, 20));
+
+    const rw = rawImg.naturalWidth || rawImg.width;
+    const rh = rawImg.naturalHeight || rawImg.height;
+
+    // Fast check: sample to see if image is already a transparent PNG
+    const testCanvas = document.createElement('canvas');
+    testCanvas.width = Math.min(300, rw);
+    testCanvas.height = Math.min(300, rh);
+    const testCtx = testCanvas.getContext('2d')!;
+    testCtx.drawImage(rawImg, 0, 0, testCanvas.width, testCanvas.height);
+    const testData = testCtx.getImageData(0, 0, testCanvas.width, testCanvas.height).data;
+    let transparentCount = 0;
+    for (let i = 0; i < testData.length; i += 4) {
+      if (testData[i + 3] < 24) transparentCount++;
+    }
+    const isAlreadyTransparent = transparentCount / (testCanvas.width * testCanvas.height) > 0.05;
+
     let cutoutCanvas: HTMLCanvasElement;
-    try {
-      const aiPromise = removeBackgroundWithAI(file, undefined, (p) => {
-        if (progressCallback) progressCallback(p.progress, p.message);
-      });
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('快速色阶抠图优先')), 2600)
-      );
-      const aiMatting = await Promise.race([aiPromise, timeoutPromise]);
-      cutoutCanvas = document.createElement('canvas');
-      cutoutCanvas.width = aiMatting.width;
-      cutoutCanvas.height = aiMatting.height;
-      const cctx = cutoutCanvas.getContext('2d')!;
-      cctx.putImageData(aiMatting.imageData, 0, 0);
-      // Ensure any residual solid background is also cleaned
-      cutoutCanvas = await ensureTransparentSubject(cutoutCanvas);
-    } catch {
+    if (isAlreadyTransparent) {
+      progressCallback?.(85, '检测到素材已自带透明通道，正在紧凑贴合裁边...');
+      cutoutCanvas = testCanvas.width === rw && testCanvas.height === rh ? testCanvas : document.createElement('canvas');
+      if (cutoutCanvas !== testCanvas) {
+        cutoutCanvas.width = rw;
+        cutoutCanvas.height = rh;
+        cutoutCanvas.getContext('2d')!.drawImage(rawImg, 0, 0);
+      }
+    } else {
+      progressCallback?.(50, '智能识别背景颜色与边缘轮廓...');
+      await new Promise((r) => setTimeout(r, 20));
+      // Fast, non-blocking edge-flood transparency (downscaled if > 1200px)
       const autoTrans = await processImageTransparency(rawImg, DEFAULT_BG_CONFIG);
       cutoutCanvas = autoTrans.canvas;
     }
 
+    await new Promise((r) => setTimeout(r, 20));
+    progressCallback?.(92, '消除透明冗余留白...');
     const trimmed = await trimImageTransparentBorders(cutoutCanvas, { alphaThreshold: 24, padding: 0 });
     return { rawImg, cutoutImg: trimmed.img };
   };
@@ -1142,6 +1178,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     setIsProcessing(true);
     setProcessingStatus(isVideo ? '正在解析视频并提取封面关键帧...' : '正在准备解析图片与色彩通道...');
     setProcessingProgress(15);
+    await new Promise((r) => setTimeout(r, 20));
 
     try {
       let sourceImg: HTMLImageElement;
@@ -1162,10 +1199,12 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       }
 
       setCachedSourceImg(sourceImg);
+      await new Promise((r) => setTimeout(r, 20));
 
       // 1. Cover: 957x1278
       setProcessingStatus('正在生成 957×1278 微信官方标准封面图...');
       setProcessingProgress(35);
+      await new Promise((r) => setTimeout(r, 20));
       const cover = await fitImageToTarget(sourceImg, 957, 1278, {
         mode: coverFitMode,
         zoom: coverZoom,
@@ -1174,23 +1213,27 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         maxBytes: 500 * 1024,
       });
       setCoverResult(cover);
+      await new Promise((r) => setTimeout(r, 20));
 
       // 2. Story: 750x1250
       setProcessingStatus('正在生成 750×1250 沉浸式封面故事...');
       setProcessingProgress(55);
+      await new Promise((r) => setTimeout(r, 20));
       const story = await createCoverStory(sourceImg, {
         title: storyTitle,
         subtitle: storySubtitle,
         description: storyDesc,
       });
       setStoryResult(story);
+      await new Promise((r) => setTimeout(r, 20));
 
       // 3. AI Matting for Pendants (Cover & Bubble)
       setProcessingStatus('智能抠取主体，生成透明背景挂件...');
       setProcessingProgress(70);
+      await new Promise((r) => setTimeout(r, 20));
 
       const { cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
-        setProcessingProgress(65 + Math.round(p * 0.15));
+        setProcessingProgress(60 + Math.round(p * 0.2));
         setProcessingStatus(msg);
       });
 
@@ -1660,9 +1703,57 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   };
 
   // -------------------------------------------------------------
-  // 9. Manual Background Transparency Modal Handlers
+  // 9. Manual Background Transparency Modal Handlers (Requirement 1)
   // -------------------------------------------------------------
-  const [bgAiLoading, setBgAiLoading] = useState(false);
+  const pushBgHistory = () => {
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d')!;
+    const snap = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    setBgUndoStack((prev) => [...prev.slice(-20), snap]);
+    setBgRedoStack([]);
+  };
+
+  const handleBgUndo = () => {
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas || bgUndoStack.length === 0) return;
+    const ctx = canvas.getContext('2d')!;
+    const currentSnap = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const lastSnap = bgUndoStack[bgUndoStack.length - 1];
+    setBgUndoStack((prev) => prev.slice(0, -1));
+    setBgRedoStack((prev) => [...prev, currentSnap]);
+    ctx.putImageData(lastSnap, 0, 0);
+    onNotification('↶ 已撤销上一步操作');
+  };
+
+  const handleBgRedo = () => {
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas || bgRedoStack.length === 0) return;
+    const ctx = canvas.getContext('2d')!;
+    const currentSnap = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const nextSnap = bgRedoStack[bgRedoStack.length - 1];
+    setBgRedoStack((prev) => prev.slice(0, -1));
+    setBgUndoStack((prev) => [...prev, currentSnap]);
+    ctx.putImageData(nextSnap, 0, 0);
+    onNotification('↷ 已恢复上一步操作');
+  };
+
+  // Keyboard shortcut Ctrl+Z / Cmd+Z for undo & redo inside modal
+  useEffect(() => {
+    if (!bgModalOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleBgRedo();
+        } else {
+          handleBgUndo();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [bgModalOpen, bgUndoStack, bgRedoStack]);
 
   const handleOpenBgModal = (target: 'bubbleTop' | 'bubbleBottom' | 'bubbleFull') => {
     let raw: HTMLImageElement | null = null;
@@ -1695,11 +1786,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     setBgModalRawImg(raw);
     setBgModalConfig(cfg);
     setBgModalTool('eyedropper');
+    setBgContiguous(true);
+    setBgPickedColors(cfg.customColors || (cfg.customColor ? [cfg.customColor] : []));
+    setBgUndoStack([]);
+    setBgRedoStack([]);
+    setBgCursorPos({ x: 0, y: 0, visible: false });
     setBgModalOpen(true);
   };
 
   const handleRunAiBackgroundRemovalInModal = async () => {
     if (!bgModalRawImg || bgAiLoading) return;
+    pushBgHistory();
     setBgAiLoading(true);
     try {
       const tempC = document.createElement('canvas');
@@ -1722,21 +1819,71 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         ctx.drawImage(cleaned, 0, 0);
       }
       onNotification('✨ AI 神经网络深度抠图完成！可继续使用橡皮擦或画笔微调细节。');
-    } catch (e: any) {
-      onNotification('AI 深度抠图超时或切换为智能色阶模式，请使用下方容差滑块或吸管工具微调。');
+    } catch {
+      onNotification('AI 深度抠图超时，已切换为智能色阶模式，请使用吸管或容差滑块微调。');
     } finally {
       setBgAiLoading(false);
     }
+  };
+
+  const handleRemovePickedColor = async (colorToRemove: string) => {
+    pushBgHistory();
+    const nextColors = bgPickedColors.filter((c) => c !== colorToRemove);
+    setBgPickedColors(nextColors);
+    const nextConfig: ManualTransparencyConfig = {
+      ...bgModalConfig,
+      mode: nextColors.length > 0 ? 'custom' : 'auto',
+      customColors: nextColors,
+      customColor: nextColors[nextColors.length - 1] || undefined,
+      contiguous: bgContiguous,
+    };
+    setBgModalConfig(nextConfig);
+    if (bgModalRawImg) {
+      const res = await processImageTransparency(bgModalRawImg, nextConfig);
+      const canvas = bgModalCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d')!;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(res.canvas, 0, 0);
+      }
+    }
+    onNotification(`已移除吸取颜色 ${colorToRemove.toUpperCase()}`);
+  };
+
+  const handleClearAllPickedColors = async () => {
+    pushBgHistory();
+    setBgPickedColors([]);
+    const nextConfig: ManualTransparencyConfig = {
+      ...bgModalConfig,
+      mode: 'auto',
+      customColors: [],
+      customColor: undefined,
+      seedPoint: undefined,
+    };
+    setBgModalConfig(nextConfig);
+    if (bgModalRawImg) {
+      const res = await processImageTransparency(bgModalRawImg, nextConfig);
+      const canvas = bgModalCanvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d')!;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(res.canvas, 0, 0);
+      }
+    }
+    onNotification('已重置所有吸取颜色，恢复自动去底');
   };
 
   const handleBgModalCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = bgModalCanvasRef.current;
     if (!canvas || !bgModalRawImg) return;
     const rect = canvas.getBoundingClientRect();
-    const x = Math.max(0, Math.min(canvas.width - 1, Math.round(((e.clientX - rect.left) / rect.width) * canvas.width)));
-    const y = Math.max(0, Math.min(canvas.height - 1, Math.round(((e.clientY - rect.top) / rect.height) * canvas.height)));
+    const clientX = e.clientX - rect.left;
+    const clientY = e.clientY - rect.top;
+    const x = Math.max(0, Math.min(canvas.width - 1, Math.round((clientX / rect.width) * canvas.width)));
+    const y = Math.max(0, Math.min(canvas.height - 1, Math.round((clientY / rect.height) * canvas.height)));
 
     if (bgModalTool === 'eyedropper') {
+      pushBgHistory();
       // Sample color from raw image at (x, y)
       const tempC = document.createElement('canvas');
       tempC.width = canvas.width;
@@ -1746,27 +1893,52 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       const pixel = tCtx.getImageData(x, y, 1, 1).data;
       const toHex = (n: number) => n.toString(16).padStart(2, '0');
       const pickedHex = `#${toHex(pixel[0])}${toHex(pixel[1])}${toHex(pixel[2])}`;
-      setBgModalConfig((prev) => ({
-        ...prev,
-        mode: prev.mode === 'keep' || prev.mode === 'auto' ? 'custom' : prev.mode,
+
+      const nextColors = bgPickedColors.includes(pickedHex) ? bgPickedColors : [...bgPickedColors, pickedHex];
+      setBgPickedColors(nextColors);
+
+      const nextConfig: ManualTransparencyConfig = {
+        ...bgModalConfig,
+        mode: 'custom',
         customColor: pickedHex,
-      }));
-      onNotification(`💧 已吸取背景颜色 ${pickedHex.toUpperCase()} 并自动透明化！可拖动容差滑块微调边缘。`);
+        customColors: nextColors,
+        contiguous: bgContiguous,
+        seedPoint: { x, y },
+      };
+      setBgModalConfig(nextConfig);
+
+      (async () => {
+        const res = await processImageTransparency(bgModalRawImg, nextConfig);
+        const ctx = canvas.getContext('2d')!;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(res.canvas, 0, 0);
+      })();
+
+      onNotification(
+        bgContiguous
+          ? `💧 [连续漫水] 已吸取 ${pickedHex.toUpperCase()}，仅删除该连通区域，保护主体内部同色！支持叠加继续吸色或撤销。`
+          : `💧 [全图取色] 已吸取 ${pickedHex.toUpperCase()}，全图该颜色已变透明！支持叠加继续吸色或撤销。`
+      );
       return;
     }
 
+    pushBgHistory();
     setIsPaintingBgModal(true);
     e.currentTarget.setPointerCapture(e.pointerId);
     paintOnBgModalCanvas(x, y);
   };
 
   const handleBgModalCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isPaintingBgModal) return;
     const canvas = bgModalCanvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const x = Math.max(0, Math.min(canvas.width - 1, Math.round(((e.clientX - rect.left) / rect.width) * canvas.width)));
-    const y = Math.max(0, Math.min(canvas.height - 1, Math.round(((e.clientY - rect.top) / rect.height) * canvas.height)));
+    const clientX = e.clientX - rect.left;
+    const clientY = e.clientY - rect.top;
+    setBgCursorPos({ x: clientX, y: clientY, visible: true });
+
+    if (!isPaintingBgModal) return;
+    const x = Math.max(0, Math.min(canvas.width - 1, Math.round((clientX / rect.width) * canvas.width)));
+    const y = Math.max(0, Math.min(canvas.height - 1, Math.round((clientY / rect.height) * canvas.height)));
     paintOnBgModalCanvas(x, y);
   };
 
@@ -1834,23 +2006,16 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   };
 
   // -------------------------------------------------------------
-  // 10. Interactive Crop Modal Handlers
+  // 10. Interactive 4-Sided Crop Modal Handlers (Requirement 3)
   // -------------------------------------------------------------
   const handleOpenCropModal = (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom') => {
     let img: HTMLImageElement | null = null;
-    let bottomCrop = 0;
-    let topCrop = 0;
     if (slot === 'bubbleTop') {
       img = activeTopLayer?.source || null;
-      bottomCrop = activeTopLayer?.bottomCropPercent || 0;
-      topCrop = activeTopLayer?.topCropPercent || 0;
     } else if (slot === 'bubbleBottom') {
       img = activeBottomLayer?.source || null;
-      bottomCrop = activeBottomLayer?.bottomCropPercent || 0;
-      topCrop = activeBottomLayer?.topCropPercent || 0;
     } else if (slot === 'pendantTop') {
       img = pendantTopImg;
-      bottomCrop = pendantTopBottomCrop;
     } else {
       img = pendantBottomImg;
     }
@@ -1861,20 +2026,91 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     }
     setCropModalTarget(slot);
     setCropModalImg(img);
-    setCropModalBottomCrop(bottomCrop);
-    setCropModalTopCrop(topCrop);
+    setCropBox({ x: 0, y: 0, width: 1, height: 1 });
     setCropModalOpen(true);
+  };
+
+  const handleCropPointerDown = (
+    handle: 'move' | 'n' | 's' | 'e' | 'w' | 'nw' | 'ne' | 'sw' | 'se',
+    e: React.PointerEvent
+  ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!cropImgRef.current) return;
+    const rect = cropImgRef.current.getBoundingClientRect();
+    setActiveCropHandle(handle);
+    setIsDraggingCropBox(true);
+    cropDragStartRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      startBox: { ...cropBox },
+      boxPixelWidth: rect.width,
+      boxPixelHeight: rect.height,
+    };
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const handleCropContainerPointerMove = (e: React.PointerEvent) => {
+    if (!isDraggingCropBox || !activeCropHandle || !cropDragStartRef.current) return;
+    const { clientX: startX, clientY: startY, startBox, boxPixelWidth, boxPixelHeight } = cropDragStartRef.current;
+    if (boxPixelWidth <= 0 || boxPixelHeight <= 0) return;
+
+    const dx = (e.clientX - startX) / boxPixelWidth;
+    const dy = (e.clientY - startY) / boxPixelHeight;
+
+    let { x, y, width, height } = startBox;
+    const minSize = 0.05;
+
+    if (activeCropHandle === 'move') {
+      x = Math.max(0, Math.min(1 - width, startBox.x + dx));
+      y = Math.max(0, Math.min(1 - height, startBox.y + dy));
+    } else {
+      if (activeCropHandle === 'e' || activeCropHandle === 'ne' || activeCropHandle === 'se') {
+        width = Math.max(minSize, Math.min(1 - x, startBox.width + dx));
+      }
+      if (activeCropHandle === 's' || activeCropHandle === 'se' || activeCropHandle === 'sw') {
+        height = Math.max(minSize, Math.min(1 - y, startBox.height + dy));
+      }
+      if (activeCropHandle === 'w' || activeCropHandle === 'nw' || activeCropHandle === 'sw') {
+        const maxLeftX = startBox.x + startBox.width - minSize;
+        const newX = Math.max(0, Math.min(maxLeftX, startBox.x + dx));
+        width = startBox.width - (newX - startBox.x);
+        x = newX;
+      }
+      if (activeCropHandle === 'n' || activeCropHandle === 'nw' || activeCropHandle === 'ne') {
+        const maxTopY = startBox.y + startBox.height - minSize;
+        const newY = Math.max(0, Math.min(maxTopY, startBox.y + dy));
+        height = startBox.height - (newY - startBox.y);
+        y = newY;
+      }
+    }
+
+    setCropBox({
+      x: Math.max(0, Math.min(0.95, x)),
+      y: Math.max(0, Math.min(0.95, y)),
+      width: Math.max(minSize, Math.min(1 - x, width)),
+      height: Math.max(minSize, Math.min(1 - y, height)),
+    });
+  };
+
+  const handleCropContainerPointerUp = (e: React.PointerEvent) => {
+    if (!isDraggingCropBox) return;
+    setIsDraggingCropBox(false);
+    setActiveCropHandle(null);
+    try {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {}
+    cropDragStartRef.current = null;
   };
 
   const handleApplyCropModal = async () => {
     if (!cropModalImg) return;
     setIsProcessing(true);
-    setProcessingStatus('正在应用裁剪并重新合成...');
+    setProcessingStatus('正在按框选区域裁切素材并重新合成...');
     try {
-      const trimmed = await trimImageTransparentBorders(cropModalImg, {
-        alphaThreshold: 24,
-        bottomCropPercent: cropModalBottomCrop,
-        topCropPercent: cropModalTopCrop,
+      const cropped = await cropImageByBox(cropModalImg, cropBox);
+      const trimmed = await trimImageTransparentBorders(cropped.canvas, {
+        alphaThreshold: 20,
         padding: 0,
       });
 
@@ -1884,23 +2120,23 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
           bottomCropPercent: 0,
           topCropPercent: 0,
         });
-        onNotification('🎉 裁剪完成！顶部小熊已紧密贴合红包顶边 Y=96px');
+        onNotification('🎉 裁剪完成！顶部挂件已更新并精准紧贴 Y=96px');
       } else if (cropModalTarget === 'pendantTop') {
         setPendantTopImg(trimmed.img);
         setPendantTopBottomCrop(0);
         await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0 });
-        onNotification('🎉 裁剪完成！挂件已紧密贴合');
+        onNotification('🎉 封面挂件顶部裁剪完成！');
       } else if (cropModalTarget === 'bubbleBottom') {
         updateActiveBubbleLayer('bottom', {
           source: trimmed.img,
           bottomCropPercent: 0,
           topCropPercent: 0,
         });
-        onNotification('🎉 底部垂饰裁剪完成！已紧密贴合红包底边 Y=312px');
+        onNotification('🎉 底部垂饰裁剪完成！已更新并紧贴 Y=312px');
       } else {
         setPendantBottomImg(trimmed.img);
         await renderCompositePendant({ bottomImg: trimmed.img });
-        onNotification('🎉 底部垂饰裁剪完成！');
+        onNotification('🎉 封面挂件底部裁剪完成！');
       }
       setCropModalOpen(false);
     } catch (e: any) {
@@ -4965,22 +5201,26 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       )}
 
       {/* ======================================================== */}
-      {/* Interactive Crop & Blank-Removal Modal                   */}
+      {/* 4-Sided Interactive Box Crop Modal (Requirement 3)       */}
       {/* ======================================================== */}
       {cropModalOpen && cropModalImg && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-md animate-in fade-in">
-          <div className="bg-white rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-neutral-200 flex flex-col space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-xl w-full shadow-2xl border border-neutral-200 flex flex-col space-y-3.5 max-h-[92vh] overflow-y-auto">
+            {/* Modal Header */}
             <div className="flex items-center justify-between border-b border-neutral-100 pb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center">
                   <Scissors className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-sm text-neutral-900">
-                    裁剪与去除底部空白/阴影
+                  <h3 className="font-extrabold text-sm text-neutral-900 flex items-center gap-1.5">
+                    <span>自由框选裁剪</span>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      想切哪里就切哪里 · 四向自由调节
+                    </span>
                   </h3>
                   <p className="text-[11px] text-neutral-500">
-                    切除底部留白后，小熊/垂饰可立刻放大并完美紧贴红包卡片边缘！
+                    拖动选框中间可整体平移，拖动 4 条边或 4 个角手柄可任意缩放裁剪尺寸。
                   </p>
                 </div>
               </div>
@@ -4993,88 +5233,228 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               </button>
             </div>
 
-            <div className="relative w-full h-[240px] bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-neutral-50 rounded-2xl border border-neutral-200/90 flex items-center justify-center overflow-hidden p-2">
-              <div className="relative max-w-full max-h-full flex items-center justify-center">
+            {/* Interactive Crop Viewport with Dimmed Masks & 8 Drag Handles */}
+            <div
+              ref={cropContainerRef}
+              onPointerMove={handleCropContainerPointerMove}
+              onPointerUp={handleCropContainerPointerUp}
+              className="relative w-full h-[280px] bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:10px_10px] bg-neutral-100 rounded-2xl border border-neutral-300 flex items-center justify-center overflow-hidden select-none touch-none p-2"
+            >
+              <div className="relative max-h-[260px] max-w-full flex items-center justify-center">
                 <img
+                  ref={cropImgRef}
                   src={cropModalImg.src}
-                  alt="待裁剪原图"
-                  className="max-h-[220px] max-w-[280px] object-contain select-none pointer-events-none"
+                  alt="待裁剪素材"
+                  onLoad={(e) => {
+                    const el = e.currentTarget;
+                    setCropImgRect({ width: el.clientWidth, height: el.clientHeight });
+                  }}
+                  className="max-h-[250px] max-w-full object-contain pointer-events-none select-none drop-shadow-sm"
                 />
 
-                {cropModalBottomCrop > 0 && (
+                {/* Overlaid Visual Crop Box & 4-Sided Masks */}
+                {cropImgRect.width > 0 && (
                   <div
-                    className="absolute inset-x-0 bottom-0 bg-red-500/35 border-t-2 border-dashed border-red-500 flex items-center justify-center pointer-events-none transition-all"
-                    style={{ height: `${cropModalBottomCrop * 100}%` }}
+                    className="absolute inset-0 pointer-events-none"
+                    style={{
+                      width: `${cropImgRect.width}px`,
+                      height: `${cropImgRect.height}px`,
+                      left: '50%',
+                      top: '50%',
+                      transform: 'translate(-50%, -50%)',
+                    }}
                   >
-                    <span className="text-[10px] font-bold text-white bg-red-600/90 px-2 py-0.5 rounded shadow-xs">
-                      已裁除底部 {Math.round(cropModalBottomCrop * 100)}% 留白/阴影
-                    </span>
+                    {/* Top Mask */}
+                    <div
+                      className="absolute top-0 left-0 right-0 bg-black/60 pointer-events-none transition-none"
+                      style={{ height: `${cropBox.y * 100}%` }}
+                    />
+                    {/* Bottom Mask */}
+                    <div
+                      className="absolute bottom-0 left-0 right-0 bg-black/60 pointer-events-none transition-none"
+                      style={{ height: `${(1 - (cropBox.y + cropBox.height)) * 100}%` }}
+                    />
+                    {/* Left Mask */}
+                    <div
+                      className="absolute left-0 bg-black/60 pointer-events-none transition-none"
+                      style={{
+                        top: `${cropBox.y * 100}%`,
+                        height: `${cropBox.height * 100}%`,
+                        width: `${cropBox.x * 100}%`,
+                      }}
+                    />
+                    {/* Right Mask */}
+                    <div
+                      className="absolute right-0 bg-black/60 pointer-events-none transition-none"
+                      style={{
+                        top: `${cropBox.y * 100}%`,
+                        height: `${cropBox.height * 100}%`,
+                        width: `${(1 - (cropBox.x + cropBox.width)) * 100}%`,
+                      }}
+                    />
+
+                    {/* Active Crop Box with Rule-of-Thirds Grid */}
+                    <div
+                      onPointerDown={(e) => handleCropPointerDown('move', e)}
+                      className="absolute border-2 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.4)] cursor-move pointer-events-auto transition-none select-none"
+                      style={{
+                        left: `${cropBox.x * 100}%`,
+                        top: `${cropBox.y * 100}%`,
+                        width: `${cropBox.width * 100}%`,
+                        height: `${cropBox.height * 100}%`,
+                      }}
+                    >
+                      {/* 3x3 Grid Lines */}
+                      <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 pointer-events-none">
+                        <div className="border-r border-b border-emerald-300/40" />
+                        <div className="border-r border-b border-emerald-300/40" />
+                        <div className="border-b border-emerald-300/40" />
+                        <div className="border-r border-b border-emerald-300/40" />
+                        <div className="border-r border-b border-emerald-300/40" />
+                        <div className="border-b border-emerald-300/40" />
+                        <div className="border-r border-emerald-300/40" />
+                        <div className="border-r border-emerald-300/40" />
+                        <div />
+                      </div>
+
+                      {/* 4 Corner Handles */}
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('nw', e)}
+                        className="absolute -top-1.5 -left-1.5 w-3.5 h-3.5 bg-white border-2 border-emerald-600 rounded-full cursor-nwse-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('ne', e)}
+                        className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 bg-white border-2 border-emerald-600 rounded-full cursor-nesw-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('sw', e)}
+                        className="absolute -bottom-1.5 -left-1.5 w-3.5 h-3.5 bg-white border-2 border-emerald-600 rounded-full cursor-nesw-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('se', e)}
+                        className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-white border-2 border-emerald-600 rounded-full cursor-nwse-resize shadow-md hover:scale-125 transition-transform"
+                      />
+
+                      {/* 4 Edge Handles */}
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('n', e)}
+                        className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-4 h-2.5 bg-white border-2 border-emerald-600 rounded-md cursor-ns-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('s', e)}
+                        className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-4 h-2.5 bg-white border-2 border-emerald-600 rounded-md cursor-ns-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('w', e)}
+                        className="absolute top-1/2 -left-1.5 -translate-y-1/2 w-2.5 h-4 bg-white border-2 border-emerald-600 rounded-md cursor-ew-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                      <div
+                        onPointerDown={(e) => handleCropPointerDown('e', e)}
+                        className="absolute top-1/2 -right-1.5 -translate-y-1/2 w-2.5 h-4 bg-white border-2 border-emerald-600 rounded-md cursor-ew-resize shadow-md hover:scale-125 transition-transform"
+                      />
+                    </div>
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="space-y-2">
-              <span className="text-[11px] font-bold text-neutral-700 block">
-                快捷裁剪预设：
-              </span>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {[
-                  { label: '原图 (0%)', val: 0 },
-                  { label: '微裁 (15%)', val: 0.15 },
-                  { label: '适中 (30%)', val: 0.3 },
-                  { label: '深切 (50%)', val: 0.5 },
-                ].map((item) => (
-                  <button
-                    key={item.val}
-                    type="button"
-                    onClick={() => setCropModalBottomCrop(item.val)}
-                    className={`py-2 px-2.5 rounded-xl text-xs font-bold transition-all border cursor-pointer text-center ${
-                      Math.abs(cropModalBottomCrop - item.val) < 0.03
-                        ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
-                        : 'bg-neutral-50 hover:bg-neutral-100 text-neutral-700 border-neutral-200'
-                    }`}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-1.5 p-3 rounded-2xl bg-neutral-50 border border-neutral-200/80">
-              <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
-                <span>自定义底部裁剪比例</span>
-                <span className="font-mono text-emerald-800 font-black">
-                  {Math.round(cropModalBottomCrop * 100)}%
+            {/* Real-time Dimensions & Crop Percentages */}
+            <div className="flex items-center justify-between bg-neutral-50 px-3 py-2 rounded-xl border border-neutral-200 text-xs font-mono text-neutral-700">
+              <span className="font-bold text-neutral-800 flex items-center gap-1">
+                <span>裁剪尺寸:</span>
+                <span className="text-emerald-700 font-extrabold">
+                  {Math.round(cropBox.width * (cropModalImg.naturalWidth || cropModalImg.width))} × {Math.round(cropBox.height * (cropModalImg.naturalHeight || cropModalImg.height))} px
                 </span>
+              </span>
+              <div className="flex items-center gap-2.5 text-[11px] text-neutral-500">
+                <span>上切: <strong className="text-neutral-800">{Math.round(cropBox.y * 100)}%</strong></span>
+                <span>下切: <strong className="text-neutral-800">{Math.round((1 - cropBox.y - cropBox.height) * 100)}%</strong></span>
+                <span>左切: <strong className="text-neutral-800">{Math.round(cropBox.x * 100)}%</strong></span>
+                <span>右切: <strong className="text-neutral-800">{Math.round((1 - cropBox.x - cropBox.width) * 100)}%</strong></span>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="0.8"
-                step="0.05"
-                value={cropModalBottomCrop}
-                onChange={(e) => setCropModalBottomCrop(parseFloat(e.target.value))}
-                className="w-full accent-emerald-600 cursor-pointer"
-              />
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-neutral-100">
+            {/* Quick Presets */}
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-bold text-neutral-600 block">
+                快捷裁剪预设（点击即自动框选）：
+              </span>
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setCropBox({ x: 0, y: 0, width: 1, height: 1 })}
+                  className="py-1.5 px-2 rounded-xl border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-700 font-bold cursor-pointer text-center"
+                >
+                  全选原图 (100%)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCropBox({ x: 0, y: 0, width: 1, height: 0.8 })}
+                  className="py-1.5 px-2 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold cursor-pointer text-center"
+                >
+                  切除底部 (20%)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCropBox({ x: 0, y: 0.2, width: 1, height: 0.8 })}
+                  className="py-1.5 px-2 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold cursor-pointer text-center"
+                >
+                  切除顶部 (20%)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCropBox({ x: 0.15, y: 0, width: 0.7, height: 1 })}
+                  className="py-1.5 px-2 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold cursor-pointer text-center"
+                >
+                  切除左右 (各15%)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nw = cropModalImg.naturalWidth || cropModalImg.width;
+                    const nh = cropModalImg.naturalHeight || cropModalImg.height;
+                    if (nw > nh) {
+                      const ratio = nh / nw;
+                      setCropBox({ x: (1 - ratio) / 2, y: 0, width: ratio, height: 1 });
+                    } else {
+                      const ratio = nw / nh;
+                      setCropBox({ x: 0, y: (1 - ratio) / 2, width: 1, height: ratio });
+                    }
+                  }}
+                  className="py-1.5 px-2 rounded-xl border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-700 font-bold cursor-pointer text-center"
+                >
+                  1:1 正方形
+                </button>
+              </div>
+            </div>
+
+            {/* Footer Buttons */}
+            <div className="flex items-center justify-between pt-2 border-t border-neutral-100">
               <button
                 type="button"
-                onClick={() => setCropModalOpen(false)}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-neutral-600 hover:bg-neutral-100 transition-all cursor-pointer"
+                onClick={() => setCropBox({ x: 0, y: 0, width: 1, height: 1 })}
+                className="text-xs font-bold text-neutral-500 hover:text-neutral-800 cursor-pointer"
               >
-                取消
+                重置全图框选
               </button>
-              <button
-                type="button"
-                onClick={handleApplyCropModal}
-                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
-              >
-                <Scissors className="w-3.5 h-3.5 text-amber-300" />
-                <span>确认并应用裁剪</span>
-              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCropModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-neutral-600 hover:bg-neutral-100 transition-all cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplyCropModal}
+                  className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 active:scale-95 shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <Scissors className="w-3.5 h-3.5 text-amber-300" />
+                  <span>确认并应用裁剪</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -5082,10 +5462,11 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
       {/* ======================================================== */}
       {/* Interactive Background Transparency & Manual Brush Modal */}
+      {/* Requirement 1: Contiguous vs Discontiguous, Additive Picking, Undo/Redo, Circular Brush */}
       {/* ======================================================== */}
       {bgModalOpen && bgModalRawImg && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-md animate-in fade-in">
-          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-2xl w-full shadow-2xl border border-neutral-200 flex flex-col space-y-4 max-h-[92vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-2xl w-full shadow-2xl border border-neutral-200 flex flex-col space-y-3.5 max-h-[92vh] overflow-y-auto">
             {/* Header */}
             <div className="flex items-center justify-between border-b border-neutral-100 pb-3">
               <div className="flex items-center gap-2.5">
@@ -5097,7 +5478,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     图片背景透明化处理 & 手动精修工作台
                   </h3>
                   <p className="text-[11px] text-neutral-500">
-                    支持智能去底、容差调节、吸管点击取色抠图，以及使用橡皮擦/恢复画笔在画布上手动涂抹微调。
+                    支持吸管连续漫水/全图取色、叠加继续吸色、返回上一步撤销，以及圆形橡皮擦与画笔微调。
                   </p>
                 </div>
               </div>
@@ -5113,7 +5494,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
             {/* Interactive Canvas + Brush Toolbar */}
             <div className="space-y-2">
               <div className="flex items-center justify-between flex-wrap gap-2">
-                {/* Interactive Brush Mode Selector */}
+                {/* Mode Selector */}
                 <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-xl border border-neutral-200 text-xs">
                   <button
                     type="button"
@@ -5136,7 +5517,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         ? 'bg-red-600 text-white shadow-2xs'
                         : 'text-neutral-700 hover:bg-white/60'
                     }`}
-                    title="按住鼠标涂抹即可手动擦除残留背景杂边"
+                    title="按住鼠标涂抹即可手动擦除残留背景杂边 (圆形笔刷)"
                   >
                     <Eraser className="w-3.5 h-3.5" />
                     <span>橡皮擦去杂边</span>
@@ -5149,17 +5530,41 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         ? 'bg-emerald-600 text-white shadow-2xs'
                         : 'text-neutral-700 hover:bg-white/60'
                     }`}
-                    title="按住鼠标涂抹即可恢复被误删的小熊身体细节"
+                    title="按住鼠标涂抹即可恢复被误删的小熊细节 (圆形画笔)"
                   >
                     <Paintbrush className="w-3.5 h-3.5" />
                     <span>画笔恢复原图</span>
                   </button>
                 </div>
 
+                {/* Undo / Redo Buttons (Requirement 1) */}
+                <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-xl border border-neutral-200 text-xs">
+                  <button
+                    type="button"
+                    onClick={handleBgUndo}
+                    disabled={bgUndoStack.length === 0}
+                    className="px-2 py-1 rounded-lg font-bold text-neutral-700 hover:bg-white disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-1 cursor-pointer transition-all"
+                    title="撤销上一步操作 (快捷键 Ctrl+Z)"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                    <span>返回上一步</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBgRedo}
+                    disabled={bgRedoStack.length === 0}
+                    className="px-2 py-1 rounded-lg font-bold text-neutral-700 hover:bg-white disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-1 cursor-pointer transition-all"
+                    title="恢复重做 (快捷键 Ctrl+Shift+Z)"
+                  >
+                    <Redo2 className="w-3.5 h-3.5" />
+                    <span>重做</span>
+                  </button>
+                </div>
+
                 {/* Brush Size Slider */}
                 {(bgModalTool === 'eraser' || bgModalTool === 'restore') && (
                   <div className="flex items-center gap-2 text-xs bg-neutral-50 px-3 py-1.5 rounded-xl border border-neutral-200">
-                    <span className="font-bold text-neutral-600">笔刷大小: {bgBrushSize}px</span>
+                    <span className="font-bold text-neutral-600">圆形笔刷: {bgBrushSize}px</span>
                     <input
                       type="range"
                       min="4"
@@ -5184,8 +5589,94 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 </button>
               </div>
 
-              {/* Checkerboard Interactive Canvas */}
-              <div className="relative w-full h-[270px] bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:10px_10px] bg-neutral-100 rounded-2xl border border-neutral-300 flex items-center justify-center overflow-hidden p-2 select-none touch-none">
+              {/* Eyedropper Options: Contiguous / Discontiguous Toggle & Multi-Color Accumulation (Requirement 1) */}
+              {bgModalTool === 'eyedropper' && (
+                <div className="p-2.5 rounded-2xl bg-purple-50/70 border border-purple-200 space-y-2 text-xs">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <span className="font-bold text-purple-900 flex items-center gap-1.5">
+                      <span>🎯 吸管取色选项：</span>
+                    </span>
+
+                    <div className="flex items-center gap-1 bg-white p-0.5 rounded-xl border border-purple-200">
+                      <button
+                        type="button"
+                        onClick={() => setBgContiguous(true)}
+                        className={`px-2.5 py-1 rounded-lg font-bold text-[11px] cursor-pointer transition-all ${
+                          bgContiguous
+                            ? 'bg-purple-600 text-white shadow-2xs'
+                            : 'text-neutral-700 hover:bg-neutral-100'
+                        }`}
+                        title="只删除与点击点直接相连的同色背景，保护主体内部相同颜色的细节（如小金蟾的金黄内部、眼睛等）"
+                      >
+                        ✓ 连续 (仅删除相连背景，保护主体内部)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBgContiguous(false)}
+                        className={`px-2.5 py-1 rounded-lg font-bold text-[11px] cursor-pointer transition-all ${
+                          !bgContiguous
+                            ? 'bg-purple-600 text-white shadow-2xs'
+                            : 'text-neutral-700 hover:bg-neutral-100'
+                        }`}
+                        title="全局删除全图中所有相近颜色"
+                      >
+                        🌐 不连续 (全图同色全部清除)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Additive Picked Colors Chips */}
+                  <div className="flex items-center justify-between flex-wrap gap-1.5 pt-1 border-t border-purple-100">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] font-bold text-purple-800">
+                        叠加吸取颜色 ({bgPickedColors.length}):
+                      </span>
+                      {bgPickedColors.length === 0 ? (
+                        <span className="text-[11px] text-purple-400">
+                          请在画面背景上点击即可吸取颜色（没吸干净可继续点击其他部位叠加吸取）
+                        </span>
+                      ) : (
+                        bgPickedColors.map((hex) => (
+                          <span
+                            key={hex}
+                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-purple-300 bg-white text-[11px] font-mono font-bold shadow-2xs"
+                          >
+                            <span
+                              className="w-3 h-3 rounded-full border border-neutral-300 shrink-0"
+                              style={{ backgroundColor: hex }}
+                            />
+                            <span>{hex.toUpperCase()}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemovePickedColor(hex)}
+                              className="text-neutral-400 hover:text-red-600 ml-0.5 cursor-pointer font-bold"
+                              title="移除此颜色"
+                            >
+                              ✕
+                            </button>
+                          </span>
+                        ))
+                      )}
+                    </div>
+
+                    {bgPickedColors.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearAllPickedColors}
+                        className="text-[11px] font-bold text-red-600 hover:text-red-700 hover:underline cursor-pointer"
+                      >
+                        清空所有吸色
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Checkerboard Interactive Canvas with Following Circular Brush Indicator (Requirement 1) */}
+              <div
+                className="relative w-full h-[270px] bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:10px_10px] bg-neutral-100 rounded-2xl border border-neutral-300 flex items-center justify-center overflow-hidden p-2 select-none touch-none"
+                onPointerLeave={() => setBgCursorPos((p) => ({ ...p, visible: false }))}
+              >
                 <canvas
                   ref={bgModalCanvasRef}
                   onPointerDown={handleBgModalCanvasPointerDown}
@@ -5194,15 +5685,32 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                   className={`max-h-[250px] max-w-full object-contain shadow-sm rounded-lg ${
                     bgModalTool === 'eyedropper'
                       ? 'cursor-crosshair'
-                      : 'cursor-cell'
+                      : 'cursor-none'
                   }`}
                 />
+
+                {/* Real-time Circular Brush Cursor Follower (告别十字形，所见即所得真实圆形笔刷) */}
+                {bgCursorPos.visible && (bgModalTool === 'eraser' || bgModalTool === 'restore') && (
+                  <div
+                    className="pointer-events-none absolute rounded-full border-2 shadow-[0_0_8px_rgba(0,0,0,0.6)] z-30 transition-none"
+                    style={{
+                      left: `${bgCursorPos.x}px`,
+                      top: `${bgCursorPos.y}px`,
+                      width: `${bgBrushSize * 2}px`,
+                      height: `${bgBrushSize * 2}px`,
+                      transform: 'translate(-50%, -50%)',
+                      borderColor: bgModalTool === 'eraser' ? '#ef4444' : '#10b981',
+                      backgroundColor: bgModalTool === 'eraser' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.25)',
+                    }}
+                  />
+                )}
+
                 <div className="absolute bottom-2 left-2.5 bg-neutral-900/80 text-white text-[10px] px-2.5 py-1 rounded-full backdrop-blur-xs pointer-events-none font-mono">
                   {bgModalTool === 'eyedropper'
-                    ? '💡 点击画面中需要变透明的背景区域即可吸取颜色并自动抠除'
+                    ? `💡 吸管模式：点击需要变透明的背景（当前：${bgContiguous ? '连续漫水' : '全图取色'}，支持叠加吸取与 Ctrl+Z 撤销）`
                     : bgModalTool === 'eraser'
-                    ? '💡 在画面上按住拖动即可手动擦除背景残留'
-                    : '💡 在画面上按住拖动即可恢复原图细节'}
+                    ? `💡 圆形橡皮擦：按住鼠标涂抹即可擦除杂边（光圈大小为擦除范围）`
+                    : '💡 圆形恢复画笔：按住鼠标涂抹即可恢复原图被误删细节'}
                 </div>
               </div>
             </div>

@@ -44,6 +44,42 @@ export async function removeBackgroundWithAI(
   });
 
   try {
+    // Pre-downscale large images to max 1200px so ONNX WebAssembly / Canvas operations don't freeze the browser
+    let processedSource: Blob | File | string = imageSource as any;
+    if (imageSource instanceof HTMLImageElement || imageSource instanceof File || imageSource instanceof Blob) {
+      let srcImg: HTMLImageElement;
+      if (imageSource instanceof HTMLImageElement) {
+        srcImg = imageSource;
+      } else {
+        const u = URL.createObjectURL(imageSource);
+        srcImg = new Image();
+        srcImg.crossOrigin = 'anonymous';
+        await new Promise<void>((res, rej) => {
+          srcImg.onload = () => res();
+          srcImg.onerror = () => rej(new Error('无法读取源图'));
+          srcImg.src = u;
+        });
+        URL.revokeObjectURL(u);
+      }
+
+      const sw = srcImg.naturalWidth || srcImg.width;
+      const sh = srcImg.naturalHeight || srcImg.height;
+      if (sw > 1200 || sh > 1200) {
+        const scale = 1200 / Math.max(sw, sh);
+        const nw = Math.round(sw * scale);
+        const nh = Math.round(sh * scale);
+        const downCanvas = document.createElement('canvas');
+        downCanvas.width = nw;
+        downCanvas.height = nh;
+        const dctx = downCanvas.getContext('2d')!;
+        dctx.drawImage(srcImg, 0, 0, nw, nh);
+        processedSource = await new Promise<Blob>((res) => downCanvas.toBlob((b) => res(b!), 'image/png'));
+      }
+    }
+
+    // Allow UI to breathe before launching AI operations
+    await new Promise((r) => setTimeout(r, 16));
+
     const config: Config = {
       model: 'isnet_fp16',
       output: {
@@ -69,7 +105,7 @@ export async function removeBackgroundWithAI(
     };
 
     // If source is ImageData, convert to Blob first
-    let inputSource: Blob | File | string = imageSource as any;
+    let inputSource: Blob | File | string = processedSource;
     if (imageSource instanceof ImageData) {
       const c = document.createElement('canvas');
       c.width = imageSource.width;
@@ -85,7 +121,12 @@ export async function removeBackgroundWithAI(
       message: 'AI 正在智能分离主体人物与阴影背景...',
     });
 
-    const outputBlob = await imglyRemoveBackground(inputSource, config);
+    // Run with a 5000ms safety timeout to avoid hanging if network model download fails
+    const aiExecutionPromise = imglyRemoveBackground(inputSource, config);
+    const timeoutPromise = new Promise<Blob>((_, reject) =>
+      setTimeout(() => reject(new Error('AI 模型加载超时，自动平滑切换至自适应色阶算法')), 4500)
+    );
+    const outputBlob = await Promise.race([aiExecutionPromise, timeoutPromise]);
 
     onProgress?.({
       stage: 'finishing',

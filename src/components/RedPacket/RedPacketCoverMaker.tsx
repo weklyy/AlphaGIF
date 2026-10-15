@@ -38,11 +38,22 @@ import {
   FileCheck,
   Scissors,
   Crop,
+  Plus,
+  Trash2,
+  Copy,
+  FlipHorizontal,
+  Pipette,
+  Eraser,
+  Paintbrush,
 } from 'lucide-react';
 import {
   WECHAT_RED_PACKET_SPECS,
+  BUBBLE_PENDANT_COORDS,
   MaterialResult,
   VideoAnalysisResult,
+  PendantPartConfig,
+  ManualTransparencyConfig,
+  FullBubbleSplitConfig,
   fitImageToTarget,
   createCoverPendant,
   createBubblePendant,
@@ -54,6 +65,8 @@ import {
   packageAllRedPacketAssets,
   loadImageElement,
   ensureTransparentSubject,
+  processImageTransparency,
+  splitSingleImageIntoTopAndBottom,
   trimImageTransparentBorders,
   getAlphaBoundingBox,
   AlphaBoundingBox,
@@ -61,6 +74,27 @@ import {
 import { removeBackgroundWithAI } from '../../utils/aiBackgroundRemoval';
 import { DEMO_RED_PACKET_THEMES } from '../../utils/demoRedPackets';
 import { RedPacketPreviewMockup } from './RedPacketPreviewMockup';
+
+export interface BubbleLayerItem {
+  id: string;
+  name: string;
+  rawSource: HTMLImageElement;
+  source: HTMLImageElement;
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  flipX: boolean;
+  bottomCropPercent: number;
+  topCropPercent: number;
+  bgConfig: ManualTransparencyConfig;
+}
+
+const DEFAULT_BG_CONFIG: ManualTransparencyConfig = {
+  mode: 'auto',
+  tolerance: 38,
+  feather: 8,
+  defringe: 1,
+};
 
 /**
  * Helper: Crop a specific rectangle region from an image/canvas
@@ -137,27 +171,87 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [pendantFullFileName, setPendantFullFileName] = useState('');
   const [pendantAddGlow, setPendantAddGlow] = useState(true);
 
-  // Customization Options: Bubble Pendant (480x384) - Supporting Split (Top + Bottom) & Full Modes
+  // Customization Options: Bubble Pendant (480x384) - Multi-Layer Top + Bottom & Full Mid-Split Modes
   const [bubbleUploadMode, setBubbleUploadMode] = useState<'split' | 'full'>('split');
   const [bubbleActivePart, setBubbleActivePart] = useState<'top' | 'bottom'>('top');
+
+  // Multi-image Layer Lists for Top (顶部趴贴小熊) & Bottom (底部垂饰)
+  const [bubbleTopLayers, setBubbleTopLayers] = useState<BubbleLayerItem[]>([]);
+  const [bubbleActiveTopId, setBubbleActiveTopId] = useState<string>('');
+  const [bubbleBottomLayers, setBubbleBottomLayers] = useState<BubbleLayerItem[]>([]);
+  const [bubbleActiveBottomId, setBubbleActiveBottomId] = useState<string>('');
+
+  // Full Single Image + Mid-Split State
+  const [bubbleFullRawImg, setBubbleFullRawImg] = useState<HTMLImageElement | null>(null);
+  const [bubbleFullImg, setBubbleFullImg] = useState<HTMLImageElement | null>(null);
+  const [bubbleFullFileName, setBubbleFullFileName] = useState('');
+  const [bubbleFullBgConfig, setBubbleFullBgConfig] = useState<ManualTransparencyConfig>(DEFAULT_BG_CONFIG);
+  const [bubbleFullSplitConfig, setBubbleFullSplitConfig] = useState<FullBubbleSplitConfig>({
+    enabled: true, // 默认支持从中间截开调整位置
+    splitRatio: 0.5, // 默认从 50% 正中间截开
+    topScale: 1.0,
+    topOffsetX: 0,
+    topOffsetY: 0,
+    bottomScale: 1.0,
+    bottomOffsetX: 0,
+    bottomOffsetY: 0,
+    fullScale: 1.0,
+    fullOffsetX: 0,
+    fullOffsetY: 0,
+  });
+  const [bubbleFullEditPart, setBubbleFullEditPart] = useState<'top' | 'bottom'>('top');
+
+  // Backwards-compatible convenience state synced with active layer
   const [bubbleTopImg, setBubbleTopImg] = useState<HTMLImageElement | null>(null);
   const [bubbleBottomImg, setBubbleBottomImg] = useState<HTMLImageElement | null>(null);
-  const [bubbleFullImg, setBubbleFullImg] = useState<HTMLImageElement | null>(null);
   const [bubbleTopScale, setBubbleTopScale] = useState<number>(1.0);
   const [bubbleTopOffsetX, setBubbleTopOffsetX] = useState<number>(0);
   const [bubbleTopOffsetY, setBubbleTopOffsetY] = useState<number>(0);
-  const [bubbleTopBottomCrop, setBubbleTopBottomCrop] = useState<number>(0); // 0 ~ 0.8 (底部空白裁切百分比)
+  const [bubbleTopBottomCrop, setBubbleTopBottomCrop] = useState<number>(0);
   const [bubbleBottomScale, setBubbleBottomScale] = useState<number>(1.0);
   const [bubbleBottomOffsetX, setBubbleBottomOffsetX] = useState<number>(0);
   const [bubbleBottomOffsetY, setBubbleBottomOffsetY] = useState<number>(0);
+  const [bubbleBottomTopCrop, setBubbleBottomTopCrop] = useState<number>(0);
   const [bubblePlacement, setBubblePlacement] = useState<'top' | 'bottom'>('top');
   const [bubbleScale, setBubbleScale] = useState(1.0);
   const [bubbleOffsetX, setBubbleOffsetX] = useState(0);
   const [bubbleOffsetY, setBubbleOffsetY] = useState(0);
   const [bubbleTopFileName, setBubbleTopFileName] = useState('');
   const [bubbleBottomFileName, setBubbleBottomFileName] = useState('');
-  const [bubbleFullFileName, setBubbleFullFileName] = useState('');
   const [showGuides, setShowGuides] = useState(true);
+
+  // Derived active layers for Top and Bottom
+  const activeTopLayer = bubbleTopLayers.find((l) => l.id === bubbleActiveTopId) || bubbleTopLayers[0] || null;
+  const activeBottomLayer = bubbleBottomLayers.find((l) => l.id === bubbleActiveBottomId) || bubbleBottomLayers[0] || null;
+
+  // Keep legacy states synced when activeTopLayer or activeBottomLayer changes
+  useEffect(() => {
+    if (activeTopLayer) {
+      setBubbleTopImg(activeTopLayer.source);
+      setBubbleTopFileName(activeTopLayer.name);
+      setBubbleTopScale(activeTopLayer.scale);
+      setBubbleTopOffsetX(activeTopLayer.offsetX);
+      setBubbleTopOffsetY(activeTopLayer.offsetY);
+      setBubbleTopBottomCrop(activeTopLayer.bottomCropPercent);
+    } else {
+      setBubbleTopImg(null);
+      setBubbleTopFileName('');
+    }
+  }, [activeTopLayer]);
+
+  useEffect(() => {
+    if (activeBottomLayer) {
+      setBubbleBottomImg(activeBottomLayer.source);
+      setBubbleBottomFileName(activeBottomLayer.name);
+      setBubbleBottomScale(activeBottomLayer.scale);
+      setBubbleBottomOffsetX(activeBottomLayer.offsetX);
+      setBubbleBottomOffsetY(activeBottomLayer.offsetY);
+      setBubbleBottomTopCrop(activeBottomLayer.topCropPercent);
+    } else {
+      setBubbleBottomImg(null);
+      setBubbleBottomFileName('');
+    }
+  }, [activeBottomLayer]);
 
   // Crop & Trim Modal States
   const [cropModalOpen, setCropModalOpen] = useState(false);
@@ -165,6 +259,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [cropModalImg, setCropModalImg] = useState<HTMLImageElement | null>(null);
   const [cropModalBottomCrop, setCropModalBottomCrop] = useState<number>(0);
   const [cropModalTopCrop, setCropModalTopCrop] = useState<number>(0);
+
+  // Manual Background Transparency Modal States (自动化透明 + 手动微调抠图器)
+  const [bgModalOpen, setBgModalOpen] = useState(false);
+  const [bgModalTarget, setBgModalTarget] = useState<'bubbleTop' | 'bubbleBottom' | 'bubbleFull'>('bubbleTop');
+  const [bgModalRawImg, setBgModalRawImg] = useState<HTMLImageElement | null>(null);
+  const [bgModalConfig, setBgModalConfig] = useState<ManualTransparencyConfig>(DEFAULT_BG_CONFIG);
+  const [bgModalDetectedHex, setBgModalDetectedHex] = useState<string>('#ffffff');
+  const [bgModalTool, setBgModalTool] = useState<'eyedropper' | 'eraser' | 'restore'>('eyedropper');
+  const [bgBrushSize, setBgBrushSize] = useState<number>(22);
+  const [isPaintingBgModal, setIsPaintingBgModal] = useState(false);
+  const bgModalCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Customization Options: Story (750x1250)
   const [storyTitle, setStoryTitle] = useState('红包故事 · 岁岁平安');
@@ -198,7 +303,15 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [isDraggingPendant, setIsDraggingPendant] = useState(false);
   const pendantDragStartRef = useRef<{ clientX: number; clientY: number; startOffX: number; startOffY: number; part: 'top' | 'bottom' | 'full' } | null>(null);
   const [isDraggingBubble, setIsDraggingBubble] = useState(false);
-  const bubbleDragStartRef = useRef<{ clientX: number; clientY: number; startOffX: number; startOffY: number; part: 'top' | 'bottom' | 'full' } | null>(null);
+  const bubbleDragStartRef = useRef<{
+    clientX: number;
+    clientY: number;
+    startOffX: number;
+    startOffY: number;
+    part: 'top' | 'bottom' | 'full';
+    layerId?: string;
+    fullSubPart?: 'top' | 'bottom';
+  } | null>(null);
   const [isDraggingCover, setIsDraggingCover] = useState(false);
   const [dragStartY, setDragStartY] = useState(0);
   const [dragStartPanY, setDragStartPanY] = useState(0);
@@ -209,6 +322,28 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       handleLoadDemoTheme('theme-cute-bear', false);
     }
   }, []);
+
+  // Re-render bgModalCanvas whenever bgModalOpen, bgModalRawImg, or bgModalConfig changes
+  useEffect(() => {
+    if (!bgModalOpen || !bgModalRawImg) return;
+    let cancelled = false;
+    (async () => {
+      const res = await processImageTransparency(bgModalRawImg, bgModalConfig);
+      if (cancelled) return;
+      setBgModalDetectedHex(res.detectedBgHex);
+      const canvas = bgModalCanvasRef.current;
+      if (canvas) {
+        canvas.width = res.canvas.width;
+        canvas.height = res.canvas.height;
+        const ctx = canvas.getContext('2d')!;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(res.canvas, 0, 0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bgModalOpen, bgModalRawImg, bgModalConfig]);
 
   // -------------------------------------------------------------
   // 1. One-click Demo Themes
@@ -248,19 +383,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         anchorY: 200,
       });
 
-      setBubbleResult({
-        blob: bubbleBlob,
-        url: URL.createObjectURL(bubbleBlob),
-        size: bubbleBlob.size,
-        width: 480,
-        height: 384,
-        format: 'PNG',
-        isCompliant: true,
-        warnings: [],
-        anchorX: 240,
-        anchorY: 48,
-      });
-
       setStoryResult({
         blob: storyBlob,
         url: URL.createObjectURL(storyBlob),
@@ -287,6 +409,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       setPendantFullFileName('完整示范封面挂件.png');
       const bubbleImg = await loadImageElement(bubbleBlob);
       setCachedBubbleImg(bubbleImg);
+      setBubbleFullRawImg(bubbleImg);
       setBubbleFullImg(bubbleImg);
       setBubbleFullFileName('完整示范气泡挂件.png');
 
@@ -306,12 +429,56 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         setPendantBottomOffsetX(0);
         setPendantBottomOffsetY(0);
 
-        const bTop = await cropImageRegion(bubbleImg, 0, 0, 480, 96);
-        setBubbleTopImg(bTop);
-        setBubbleTopFileName('趴气泡小熊 (颈部96px)');
-        setBubbleTopScale(1.0);
-        setBubbleTopOffsetX(0);
-        setBubbleTopOffsetY(0);
+        const bTopRaw = await cropImageRegion(bubbleImg, 0, 0, 480, 96);
+        const bTopTrimmed = await trimImageTransparentBorders(bTopRaw, { alphaThreshold: 24, padding: 0 });
+        const initTopLayer: BubbleLayerItem = {
+          id: 'top-demo-1',
+          name: '趴气泡小熊 #1',
+          rawSource: bTopTrimmed.img,
+          source: bTopTrimmed.img,
+          scale: 1.0,
+          offsetX: 0,
+          offsetY: 0,
+          flipX: false,
+          bottomCropPercent: 0,
+          topCropPercent: 0,
+          bgConfig: { ...DEFAULT_BG_CONFIG },
+        };
+        setBubbleTopLayers([initTopLayer]);
+        setBubbleActiveTopId(initTopLayer.id);
+
+        // Check if demo bubble has bottom ornament in 312~384px
+        const bBottomRaw = await cropImageRegion(bubbleImg, 0, 312, 480, 72);
+        const bBottomTrimmed = await trimImageTransparentBorders(bBottomRaw, { alphaThreshold: 24, padding: 0 });
+        let initBottomLayers: BubbleLayerItem[] = [];
+        if (bBottomTrimmed.bbox.hasContent) {
+          const initBotLayer: BubbleLayerItem = {
+            id: 'bot-demo-1',
+            name: '底部迎福垂饰 #1',
+            rawSource: bBottomTrimmed.img,
+            source: bBottomTrimmed.img,
+            scale: 1.0,
+            offsetX: 0,
+            offsetY: 0,
+            flipX: false,
+            bottomCropPercent: 0,
+            topCropPercent: 0,
+            bgConfig: { ...DEFAULT_BG_CONFIG },
+          };
+          initBottomLayers = [initBotLayer];
+          setBubbleBottomLayers(initBottomLayers);
+          setBubbleActiveBottomId(initBotLayer.id);
+        } else {
+          setBubbleBottomLayers([]);
+          setBubbleActiveBottomId('');
+        }
+
+        const compBubble = await createCompositeBubblePendant({
+          topLayers: [initTopLayer],
+          bottomLayers: initBottomLayers,
+          addGlow: false,
+        });
+        setBubbleResult(compBubble);
       } catch (cropErr) {
         console.warn('Auto-split demo parts warning:', cropErr);
       }
@@ -383,40 +550,45 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   };
 
   const renderCompositeBubble = async (opts?: {
-    topScale?: number;
-    topOffX?: number;
-    topOffY?: number;
-    bottomScale?: number;
-    bottomOffX?: number;
-    bottomOffY?: number;
-    fullScale?: number;
-    fullOffX?: number;
-    fullOffY?: number;
-    topImg?: HTMLImageElement | null;
-    bottomImg?: HTMLImageElement | null;
+    topLayers?: BubbleLayerItem[];
+    bottomLayers?: BubbleLayerItem[];
     fullImg?: HTMLImageElement | null;
+    fullSplitConfig?: FullBubbleSplitConfig;
     mode?: 'split' | 'full';
-    topBottomCrop?: number;
   }) => {
     const mode = opts?.mode ?? bubbleUploadMode;
-    const tImg = opts?.topImg !== undefined ? opts.topImg : bubbleTopImg;
-    const bImg = opts?.bottomImg !== undefined ? opts.bottomImg : bubbleBottomImg;
+    const tLayers = opts?.topLayers ?? bubbleTopLayers;
+    const bLayers = opts?.bottomLayers ?? bubbleBottomLayers;
     const fImg = opts?.fullImg !== undefined ? opts.fullImg : (bubbleFullImg || cachedBubbleImg || cachedCutoutImg);
-
-    const tScale = opts?.topScale ?? bubbleTopScale;
-    const tOffX = opts?.topOffX ?? bubbleTopOffsetX;
-    const tOffY = opts?.topOffY ?? bubbleTopOffsetY;
-    const tCrop = opts?.topBottomCrop !== undefined ? opts.topBottomCrop : bubbleTopBottomCrop;
-
-    const bScale = opts?.bottomScale ?? bubbleBottomScale;
-    const bOffX = opts?.bottomOffX ?? bubbleBottomOffsetX;
-    const bOffY = opts?.bottomOffY ?? bubbleBottomOffsetY;
+    const fSplit = opts?.fullSplitConfig ?? bubbleFullSplitConfig;
 
     try {
       if (mode === 'split') {
         const res = await createCompositeBubblePendant({
-          topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY, bottomCropPercent: tCrop } : null,
-          bottomPart: bImg ? { source: bImg, scale: bScale, offsetX: bOffX, offsetY: bOffY } : null,
+          topLayers: tLayers.map((l) => ({
+            id: l.id,
+            name: l.name,
+            source: l.source,
+            scale: l.scale,
+            offsetX: l.offsetX,
+            offsetY: l.offsetY,
+            flipX: l.flipX,
+            bottomCropPercent: l.bottomCropPercent,
+            topCropPercent: l.topCropPercent,
+            baseHeight: 96,
+          })),
+          bottomLayers: bLayers.map((l) => ({
+            id: l.id,
+            name: l.name,
+            source: l.source,
+            scale: l.scale,
+            offsetX: l.offsetX,
+            offsetY: l.offsetY,
+            flipX: l.flipX,
+            bottomCropPercent: l.bottomCropPercent,
+            topCropPercent: l.topCropPercent,
+            baseHeight: 72,
+          })),
           addGlow: false,
         });
         setBubbleResult(res);
@@ -424,12 +596,34 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         if (!fImg) return;
         const res = await createCompositeBubblePendant({
           fullSource: fImg,
+          fullSplitConfig: fSplit,
           addGlow: false,
         });
         setBubbleResult(res);
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  /**
+   * Helper to update the currently active layer in Top or Bottom and re-render immediately
+   */
+  const updateActiveBubbleLayer = (
+    part: 'top' | 'bottom',
+    patch: Partial<BubbleLayerItem>,
+    targetLayerId?: string
+  ) => {
+    if (part === 'top') {
+      const targetId = targetLayerId || activeTopLayer?.id;
+      const nextLayers = bubbleTopLayers.map((l) => (l.id === targetId ? { ...l, ...patch } : l));
+      setBubbleTopLayers(nextLayers);
+      renderCompositeBubble({ topLayers: nextLayers });
+    } else {
+      const targetId = targetLayerId || activeBottomLayer?.id;
+      const nextLayers = bubbleBottomLayers.map((l) => (l.id === targetId ? { ...l, ...patch } : l));
+      setBubbleBottomLayers(nextLayers);
+      renderCompositeBubble({ bottomLayers: nextLayers });
     }
   };
 
@@ -465,44 +659,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       if (overrideOffsetY !== undefined) setPendantOffsetY(overrideOffsetY);
       if (overrideScale !== undefined) setPendantScale(overrideScale);
       await renderCompositePendant({
-        fullOffX: overrideOffsetX,
-        fullOffY: overrideOffsetY,
-        fullScale: overrideScale,
-      });
-    }
-  };
-
-  const handleUpdateBubble = async (
-    overrideOffsetX?: number,
-    overrideOffsetY?: number,
-    overrideScale?: number,
-    overridePlacement?: 'top' | 'bottom'
-  ) => {
-    if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        if (overrideOffsetX !== undefined) setBubbleTopOffsetX(overrideOffsetX);
-        if (overrideOffsetY !== undefined) setBubbleTopOffsetY(overrideOffsetY);
-        if (overrideScale !== undefined) setBubbleTopScale(overrideScale);
-        await renderCompositeBubble({
-          topOffX: overrideOffsetX,
-          topOffY: overrideOffsetY,
-          topScale: overrideScale,
-        });
-      } else {
-        if (overrideOffsetX !== undefined) setBubbleBottomOffsetX(overrideOffsetX);
-        if (overrideOffsetY !== undefined) setBubbleBottomOffsetY(overrideOffsetY);
-        if (overrideScale !== undefined) setBubbleBottomScale(overrideScale);
-        await renderCompositeBubble({
-          bottomOffX: overrideOffsetX,
-          bottomOffY: overrideOffsetY,
-          bottomScale: overrideScale,
-        });
-      }
-    } else {
-      if (overrideOffsetX !== undefined) setBubbleOffsetX(overrideOffsetX);
-      if (overrideOffsetY !== undefined) setBubbleOffsetY(overrideOffsetY);
-      if (overrideScale !== undefined) setBubbleScale(overrideScale);
-      await renderCompositeBubble({
         fullOffX: overrideOffsetX,
         fullOffY: overrideOffsetY,
         fullScale: overrideScale,
@@ -597,30 +753,68 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
   // -------------------------------------------------------------
   // 4. Direct Smooth Delta Drag-and-Drop Handlers for 气泡挂件 (480 x 384)
+  // Supports Multi-Layer Hit-Testing on Canvas + Full Mid-Split Dragging
   // -------------------------------------------------------------
   const handleBubblePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!bubbleCanvasRef.current) return;
     const rect = bubbleCanvasRef.current.getBoundingClientRect();
+    const clickXRelCenter = ((e.clientX - rect.left) / rect.width) * 480 - 240;
     const clickY = ((e.clientY - rect.top) / rect.height) * 384;
 
-    let part: 'top' | 'bottom' | 'full' = 'top';
     if (bubbleUploadMode === 'full') {
-      part = 'full';
+      const subPart: 'top' | 'bottom' = clickY >= 204 ? 'bottom' : 'top';
+      setBubbleFullEditPart(subPart);
+      const startOffX = bubbleFullSplitConfig.enabled
+        ? (subPart === 'top' ? bubbleFullSplitConfig.topOffsetX : bubbleFullSplitConfig.bottomOffsetX)
+        : (bubbleFullSplitConfig.fullOffsetX || 0);
+      const startOffY = bubbleFullSplitConfig.enabled
+        ? (subPart === 'top' ? bubbleFullSplitConfig.topOffsetY : bubbleFullSplitConfig.bottomOffsetY)
+        : (bubbleFullSplitConfig.fullOffsetY || 0);
+
+      bubbleDragStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        startOffX,
+        startOffY,
+        part: 'full',
+        fullSubPart: subPart,
+      };
     } else {
-      part = clickY >= 260 ? 'bottom' : 'top';
+      let part: 'top' | 'bottom' = clickY >= 204 ? 'bottom' : 'top';
+      if (part === 'bottom' && bubbleBottomLayers.length === 0 && bubbleTopLayers.length > 0) {
+        part = 'top';
+      } else if (part === 'top' && bubbleTopLayers.length === 0 && bubbleBottomLayers.length > 0) {
+        part = 'bottom';
+      }
       setBubbleActivePart(part);
+
+      const layers = part === 'top' ? bubbleTopLayers : bubbleBottomLayers;
+      if (layers.length === 0) return;
+
+      // Auto-select the layer in that zone closest horizontally to where the user clicked!
+      let chosenLayer = part === 'top' ? (activeTopLayer || layers[0]) : (activeBottomLayer || layers[0]);
+      if (layers.length > 1) {
+        let minDist = Infinity;
+        for (const l of layers) {
+          const dist = Math.abs(l.offsetX - clickXRelCenter);
+          if (dist < minDist) {
+            minDist = dist;
+            chosenLayer = l;
+          }
+        }
+        if (part === 'top') setBubbleActiveTopId(chosenLayer.id);
+        else setBubbleActiveBottomId(chosenLayer.id);
+      }
+
+      bubbleDragStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        startOffX: chosenLayer.offsetX,
+        startOffY: chosenLayer.offsetY,
+        part,
+        layerId: chosenLayer.id,
+      };
     }
-
-    const startOffX = part === 'top' ? bubbleTopOffsetX : (part === 'bottom' ? bubbleBottomOffsetX : bubbleOffsetX);
-    const startOffY = part === 'top' ? bubbleTopOffsetY : (part === 'bottom' ? bubbleBottomOffsetY : bubbleOffsetY);
-
-    bubbleDragStartRef.current = {
-      clientX: e.clientX,
-      clientY: e.clientY,
-      startOffX,
-      startOffY,
-      part,
-    };
 
     setIsDraggingBubble(true);
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -632,31 +826,47 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     const dx = ((e.clientX - bubbleDragStartRef.current.clientX) / rect.width) * 480;
     const dy = ((e.clientY - bubbleDragStartRef.current.clientY) / rect.height) * 384;
 
-    const part = bubbleDragStartRef.current.part;
+    const { part, layerId, fullSubPart } = bubbleDragStartRef.current;
     const nextOffX = Math.round(bubbleDragStartRef.current.startOffX + dx);
     const nextOffY = Math.round(bubbleDragStartRef.current.startOffY + dy);
 
     if (part === 'top') {
-      setBubbleTopOffsetX(nextOffX);
-      setBubbleTopOffsetY(nextOffY);
+      const nextLayers = bubbleTopLayers.map((l) =>
+        l.id === layerId ? { ...l, offsetX: nextOffX, offsetY: nextOffY } : l
+      );
+      setBubbleTopLayers(nextLayers);
       if (bubbleDebounceTimerRef.current) clearTimeout(bubbleDebounceTimerRef.current);
       bubbleDebounceTimerRef.current = setTimeout(() => {
-        renderCompositeBubble({ topOffX: nextOffX, topOffY: nextOffY });
-      }, 50);
+        renderCompositeBubble({ topLayers: nextLayers });
+      }, 35);
     } else if (part === 'bottom') {
-      setBubbleBottomOffsetX(nextOffX);
-      setBubbleBottomOffsetY(nextOffY);
+      const nextLayers = bubbleBottomLayers.map((l) =>
+        l.id === layerId ? { ...l, offsetX: nextOffX, offsetY: nextOffY } : l
+      );
+      setBubbleBottomLayers(nextLayers);
       if (bubbleDebounceTimerRef.current) clearTimeout(bubbleDebounceTimerRef.current);
       bubbleDebounceTimerRef.current = setTimeout(() => {
-        renderCompositeBubble({ bottomOffX: nextOffX, bottomOffY: nextOffY });
-      }, 50);
+        renderCompositeBubble({ bottomLayers: nextLayers });
+      }, 35);
     } else {
-      setBubbleOffsetX(nextOffX);
-      setBubbleOffsetY(nextOffY);
+      const nextSplit: FullBubbleSplitConfig = { ...bubbleFullSplitConfig };
+      if (nextSplit.enabled) {
+        if (fullSubPart === 'bottom') {
+          nextSplit.bottomOffsetX = nextOffX;
+          nextSplit.bottomOffsetY = nextOffY;
+        } else {
+          nextSplit.topOffsetX = nextOffX;
+          nextSplit.topOffsetY = nextOffY;
+        }
+      } else {
+        nextSplit.fullOffsetX = nextOffX;
+        nextSplit.fullOffsetY = nextOffY;
+      }
+      setBubbleFullSplitConfig(nextSplit);
       if (bubbleDebounceTimerRef.current) clearTimeout(bubbleDebounceTimerRef.current);
       bubbleDebounceTimerRef.current = setTimeout(() => {
-        renderCompositeBubble({ fullOffX: nextOffX, fullOffY: nextOffY });
-      }, 50);
+        renderCompositeBubble({ fullSplitConfig: nextSplit });
+      }, 35);
     }
   };
 
@@ -668,20 +878,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     } catch {}
 
     if (bubbleDragStartRef.current) {
-      const part = bubbleDragStartRef.current.part;
-      if (part === 'top') {
-        await renderCompositeBubble({ topOffX: bubbleTopOffsetX, topOffY: bubbleTopOffsetY });
-      } else if (part === 'bottom') {
-        await renderCompositeBubble({ bottomOffX: bubbleBottomOffsetX, bottomOffY: bubbleBottomOffsetY });
-      } else {
-        await renderCompositeBubble({ fullOffX: bubbleOffsetX, fullOffY: bubbleOffsetY });
-      }
+      await renderCompositeBubble();
       bubbleDragStartRef.current = null;
     }
   };
 
   // -------------------------------------------------------------
-  // 5. Vertical fine-tuning handlers for 封面挂件 (Slider + [+] / [-])
+  // 5. Vertical fine-tuning handlers for 封面挂件
   // -------------------------------------------------------------
   const handlePendantStepFineTune = (deltaY: number) => {
     if (pendantUploadMode === 'split') {
@@ -705,7 +908,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     if (!pendantTrackRef.current) return;
     const rect = pendantTrackRef.current.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height));
-    // Center is 0.5 -> offset = 0. ratio 1 -> offset -60, ratio 0 -> offset +60
     const deltaY = Math.round((0.5 - ratio) * 120);
 
     if (pendantUploadMode === 'split') {
@@ -729,115 +931,110 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   };
 
   // -------------------------------------------------------------
-  // 6. Vertical fine-tuning handlers for 气泡挂件 (Slider + [+] / [-])
+  // 6. Step Fine-Tuning & Scale Handlers for 气泡挂件 (4-Direction D-Pad + Right Zoom Bar)
   // -------------------------------------------------------------
   const handleBubbleStepFineTune = (deltaY: number) => {
     if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        const nextY = bubbleTopOffsetY + deltaY;
-        setBubbleTopOffsetY(nextY);
-        renderCompositeBubble({ topOffY: nextY });
-      } else {
-        const nextY = bubbleBottomOffsetY + deltaY;
-        setBubbleBottomOffsetY(nextY);
-        renderCompositeBubble({ bottomOffY: nextY });
+      if (bubbleActivePart === 'top' && activeTopLayer) {
+        updateActiveBubbleLayer('top', { offsetY: activeTopLayer.offsetY + deltaY });
+      } else if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+        updateActiveBubbleLayer('bottom', { offsetY: activeBottomLayer.offsetY + deltaY });
       }
     } else {
-      const nextY = bubbleOffsetY + deltaY;
-      setBubbleOffsetY(nextY);
-      renderCompositeBubble({ fullOffY: nextY });
+      const next = { ...bubbleFullSplitConfig };
+      if (next.enabled) {
+        if (bubbleFullEditPart === 'top') next.topOffsetY += deltaY;
+        else next.bottomOffsetY += deltaY;
+      } else {
+        next.fullOffsetY = (next.fullOffsetY || 0) + deltaY;
+      }
+      setBubbleFullSplitConfig(next);
+      renderCompositeBubble({ fullSplitConfig: next });
     }
   };
 
   const handleBubbleStepFineTuneX = (deltaX: number) => {
     if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        const nextX = bubbleTopOffsetX + deltaX;
-        setBubbleTopOffsetX(nextX);
-        renderCompositeBubble({ topOffX: nextX });
-      } else {
-        const nextX = bubbleBottomOffsetX + deltaX;
-        setBubbleBottomOffsetX(nextX);
-        renderCompositeBubble({ bottomOffX: nextX });
+      if (bubbleActivePart === 'top' && activeTopLayer) {
+        updateActiveBubbleLayer('top', { offsetX: activeTopLayer.offsetX + deltaX });
+      } else if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+        updateActiveBubbleLayer('bottom', { offsetX: activeBottomLayer.offsetX + deltaX });
       }
     } else {
-      const nextX = bubbleOffsetX + deltaX;
-      setBubbleOffsetX(nextX);
-      renderCompositeBubble({ fullOffX: nextX });
+      const next = { ...bubbleFullSplitConfig };
+      if (next.enabled) {
+        if (bubbleFullEditPart === 'top') next.topOffsetX += deltaX;
+        else next.bottomOffsetX += deltaX;
+      } else {
+        next.fullOffsetX = (next.fullOffsetX || 0) + deltaX;
+      }
+      setBubbleFullSplitConfig(next);
+      renderCompositeBubble({ fullSplitConfig: next });
     }
   };
 
   const handleBubbleStepScale = (deltaScale: number) => {
     if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        const nextScale = Math.min(2.5, Math.max(0.2, Math.round((bubbleTopScale + deltaScale) * 100) / 100));
-        setBubbleTopScale(nextScale);
-        renderCompositeBubble({ topScale: nextScale });
-      } else {
-        const nextScale = Math.min(2.5, Math.max(0.2, Math.round((bubbleBottomScale + deltaScale) * 100) / 100));
-        setBubbleBottomScale(nextScale);
-        renderCompositeBubble({ bottomScale: nextScale });
+      if (bubbleActivePart === 'top' && activeTopLayer) {
+        const nextScale = Math.min(2.5, Math.max(0.2, Math.round((activeTopLayer.scale + deltaScale) * 100) / 100));
+        updateActiveBubbleLayer('top', { scale: nextScale });
+      } else if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+        const nextScale = Math.min(2.5, Math.max(0.2, Math.round((activeBottomLayer.scale + deltaScale) * 100) / 100));
+        updateActiveBubbleLayer('bottom', { scale: nextScale });
       }
     } else {
-      const nextScale = Math.min(2.5, Math.max(0.2, Math.round((bubbleScale + deltaScale) * 100) / 100));
-      setBubbleScale(nextScale);
-      renderCompositeBubble({ fullScale: nextScale });
+      const next = { ...bubbleFullSplitConfig };
+      if (next.enabled) {
+        if (bubbleFullEditPart === 'top') {
+          next.topScale = Math.min(2.5, Math.max(0.2, Math.round((next.topScale + deltaScale) * 100) / 100));
+        } else {
+          next.bottomScale = Math.min(2.5, Math.max(0.2, Math.round((next.bottomScale + deltaScale) * 100) / 100));
+        }
+      } else {
+        next.fullScale = Math.min(2.5, Math.max(0.2, Math.round(((next.fullScale || 1.0) + deltaScale) * 100) / 100));
+      }
+      setBubbleFullSplitConfig(next);
+      renderCompositeBubble({ fullSplitConfig: next });
     }
   };
 
   const handleBubbleResetScale100 = () => {
     if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        setBubbleTopScale(1.0);
-        renderCompositeBubble({ topScale: 1.0 });
-      } else {
-        setBubbleBottomScale(1.0);
-        renderCompositeBubble({ bottomScale: 1.0 });
+      if (bubbleActivePart === 'top' && activeTopLayer) {
+        updateActiveBubbleLayer('top', { scale: 1.0 });
+      } else if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+        updateActiveBubbleLayer('bottom', { scale: 1.0 });
       }
     } else {
-      setBubbleScale(1.0);
-      renderCompositeBubble({ fullScale: 1.0 });
+      const next = { ...bubbleFullSplitConfig };
+      if (next.enabled) {
+        if (bubbleFullEditPart === 'top') next.topScale = 1.0;
+        else next.bottomScale = 1.0;
+      } else {
+        next.fullScale = 1.0;
+      }
+      setBubbleFullSplitConfig(next);
+      renderCompositeBubble({ fullSplitConfig: next });
     }
   };
 
   const handleBubbleResetCenter = () => {
     if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        setBubbleTopOffsetX(0);
-        renderCompositeBubble({ topOffX: 0 });
-      } else {
-        setBubbleBottomOffsetX(0);
-        renderCompositeBubble({ bottomOffX: 0 });
+      if (bubbleActivePart === 'top' && activeTopLayer) {
+        updateActiveBubbleLayer('top', { offsetX: 0 });
+      } else if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+        updateActiveBubbleLayer('bottom', { offsetX: 0 });
       }
     } else {
-      setBubbleOffsetX(0);
-      renderCompositeBubble({ fullOffX: 0 });
-    }
-  };
-
-  const handleBubbleSliderTrackPointer = (clientY: number, isFinal: boolean) => {
-    if (!bubbleTrackRef.current) return;
-    const rect = bubbleTrackRef.current.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (rect.bottom - clientY) / rect.height));
-    const deltaY = Math.round((0.5 - ratio) * 80);
-
-    if (bubbleUploadMode === 'split') {
-      if (bubbleActivePart === 'top') {
-        setBubbleTopOffsetY(deltaY);
-        if (bubbleDebounceTimerRef.current) clearTimeout(bubbleDebounceTimerRef.current);
-        if (isFinal) renderCompositeBubble({ topOffY: deltaY });
-        else bubbleDebounceTimerRef.current = setTimeout(() => renderCompositeBubble({ topOffY: deltaY }), 50);
+      const next = { ...bubbleFullSplitConfig };
+      if (next.enabled) {
+        if (bubbleFullEditPart === 'top') next.topOffsetX = 0;
+        else next.bottomOffsetX = 0;
       } else {
-        setBubbleBottomOffsetY(deltaY);
-        if (bubbleDebounceTimerRef.current) clearTimeout(bubbleDebounceTimerRef.current);
-        if (isFinal) renderCompositeBubble({ bottomOffY: deltaY });
-        else bubbleDebounceTimerRef.current = setTimeout(() => renderCompositeBubble({ bottomOffY: deltaY }), 50);
+        next.fullOffsetX = 0;
       }
-    } else {
-      setBubbleOffsetY(deltaY);
-      if (bubbleDebounceTimerRef.current) clearTimeout(bubbleDebounceTimerRef.current);
-      if (isFinal) renderCompositeBubble({ fullOffY: deltaY });
-      else bubbleDebounceTimerRef.current = setTimeout(() => renderCompositeBubble({ fullOffY: deltaY }), 50);
+      setBubbleFullSplitConfig(next);
+      renderCompositeBubble({ fullSplitConfig: next });
     }
   };
 
@@ -908,8 +1105,38 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   };
 
   // -------------------------------------------------------------
-  // 6. Direct Upload Handlers for Individual Materials
+  // 8. Upload & Multi-Layer / Transparency Processing Handlers
   // -------------------------------------------------------------
+  const processUploadedFileToTransparentLayer = async (
+    file: File,
+    progressCallback?: (p: number, msg: string) => void
+  ): Promise<{ rawImg: HTMLImageElement; cutoutImg: HTMLImageElement }> => {
+    const rawImg = await loadImageElement(file);
+    let cutoutCanvas: HTMLCanvasElement;
+    try {
+      const aiPromise = removeBackgroundWithAI(file, undefined, (p) => {
+        if (progressCallback) progressCallback(p.progress, p.message);
+      });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('快速色阶抠图优先')), 2600)
+      );
+      const aiMatting = await Promise.race([aiPromise, timeoutPromise]);
+      cutoutCanvas = document.createElement('canvas');
+      cutoutCanvas.width = aiMatting.width;
+      cutoutCanvas.height = aiMatting.height;
+      const cctx = cutoutCanvas.getContext('2d')!;
+      cctx.putImageData(aiMatting.imageData, 0, 0);
+      // Ensure any residual solid background is also cleaned
+      cutoutCanvas = await ensureTransparentSubject(cutoutCanvas);
+    } catch {
+      const autoTrans = await processImageTransparency(rawImg, DEFAULT_BG_CONFIG);
+      cutoutCanvas = autoTrans.canvas;
+    }
+
+    const trimmed = await trimImageTransparentBorders(cutoutCanvas, { alphaThreshold: 24, padding: 0 });
+    return { rawImg, cutoutImg: trimmed.img };
+  };
+
   const handleUploadMain = async (file: File) => {
     const isVideo = file.type.startsWith('video/') || file.name.endsWith('.mp4');
     setIsProcessing(true);
@@ -926,8 +1153,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         setVideoAnalysis(analysis);
         setVideoTrimStart(0);
         setVideoTrimEnd(Math.min(3.0, analysis.duration));
-
-        // Sample frame
         sourceImg = await extractFrameFromVideoUrl(url, 0.5);
       } else {
         sourceImg = await loadImageElement(file);
@@ -964,31 +1189,16 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       setProcessingStatus('智能抠取主体，生成透明背景挂件...');
       setProcessingProgress(70);
 
-      let cutoutCanvas: HTMLCanvasElement;
-      try {
-        const aiPromise = removeBackgroundWithAI(file, undefined, (p) => {
-          setProcessingProgress(65 + Math.round(p.progress * 0.15));
-          setProcessingStatus(p.message);
-        });
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('快速色阶抠图优先')), 2600)
-        );
-        const aiMatting = await Promise.race([aiPromise, timeoutPromise]);
-        cutoutCanvas = document.createElement('canvas');
-        cutoutCanvas.width = aiMatting.width;
-        cutoutCanvas.height = aiMatting.height;
-        const cctx = cutoutCanvas.getContext('2d')!;
-        cctx.putImageData(aiMatting.imageData, 0, 0);
-      } catch {
-        cutoutCanvas = await ensureTransparentSubject(sourceImg);
-      }
+      const { cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
+        setProcessingProgress(65 + Math.round(p * 0.15));
+        setProcessingStatus(msg);
+      });
 
-      const cutoutImg = await loadImageElement(cutoutCanvas.toDataURL('image/png'));
       setCachedCutoutImg(cutoutImg);
       setCachedPendantImg(cutoutImg);
       setCachedBubbleImg(cutoutImg);
 
-      // 4. Pendant: 1053x1746 (Figure 2 & 3: Top Rim by default)
+      // 4. Pendant: 1053x1746
       setProcessingStatus('正在装配 1053×1746 封面挂件并锁定上侧可编辑区...');
       setProcessingProgress(85);
       const pendant = await createCoverPendant(cutoutImg, {
@@ -1000,19 +1210,34 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       });
       setPendantResult(pendant);
 
-      // 5. Bubble: 480x384 (Figure 4: Upper Zone, Zero Truncation)
+      // 5. Bubble: 480x384
       setProcessingStatus('正在生成 480×384 气泡挂件并校验完整形象零截断...');
       setProcessingProgress(95);
-      const bubble = await createBubblePendant(cutoutImg, {
-        scale: bubbleScale,
+      const newTopLayer: BubbleLayerItem = {
+        id: `top-${Date.now()}`,
+        name: file.name || '主挂件 #1',
+        rawSource: sourceImg,
+        source: cutoutImg,
+        scale: 1.0,
         offsetX: 0,
         offsetY: 0,
-        addGlow: true,
+        flipX: false,
+        bottomCropPercent: 0,
+        topCropPercent: 0,
+        bgConfig: { ...DEFAULT_BG_CONFIG },
+      };
+      setBubbleTopLayers([newTopLayer]);
+      setBubbleActiveTopId(newTopLayer.id);
+
+      const bubble = await createCompositeBubblePendant({
+        topLayers: [newTopLayer],
+        bottomLayers: bubbleBottomLayers,
+        addGlow: false,
       });
       setBubbleResult(bubble);
 
       setProcessingProgress(100);
-      onNotification('🎉 成功生成全套符合微信规范素材！可在左侧直接拖拽微调位置。');
+      onNotification('🎉 成功生成全套符合微信规范素材！已自动去除背景透明化，支持多图叠加与微调。');
     } catch (err: any) {
       console.error(err);
       onNotification('素材处理失败: ' + err.message);
@@ -1054,29 +1279,12 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     setProcessingStatus(`正在处理封面挂件${slot === 'top' ? '顶部探头' : slot === 'bottom' ? '底部垂饰' : '完整图'}...`);
     setProcessingProgress(30);
     try {
-      const img = await loadImageElement(file);
-      let cutoutCanvas: HTMLCanvasElement;
-      setProcessingProgress(60);
-      try {
-        const aiPromise = removeBackgroundWithAI(file, undefined, (p) => {
-          setProcessingProgress(50 + Math.round(p.progress * 0.2));
-          setProcessingStatus(p.message);
-        });
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('快速色阶抠图优先')), 2600)
-        );
-        const aiMatting = await Promise.race([aiPromise, timeoutPromise]);
-        cutoutCanvas = document.createElement('canvas');
-        cutoutCanvas.width = aiMatting.width;
-        cutoutCanvas.height = aiMatting.height;
-        const cctx = cutoutCanvas.getContext('2d')!;
-        cctx.putImageData(aiMatting.imageData, 0, 0);
-      } catch {
-        cutoutCanvas = await ensureTransparentSubject(img);
-      }
+      const { cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
+        setProcessingProgress(50 + Math.round(p * 0.2));
+        setProcessingStatus(msg);
+      });
 
       setProcessingProgress(85);
-      const cutoutImg = await loadImageElement(cutoutCanvas.toDataURL('image/png'));
       if (slot === 'top') {
         setPendantTopImg(cutoutImg);
         setPendantTopFileName(file.name);
@@ -1121,55 +1329,100 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     }
   };
 
-  const handleUploadBubbleSlot = async (file: File, slot: 'top' | 'bottom' | 'full') => {
+  /**
+   * 支持顶部趴贴小熊 & 底部垂饰同时或分批上传多张图片，并自动抠图透明化 + 合成一张 480×384 规范图
+   */
+  const handleUploadBubbleMultipleFiles = async (
+    fileList: FileList | File[],
+    slot: 'top' | 'bottom' | 'full',
+    replaceActive = false
+  ) => {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+
     setIsProcessing(true);
-    setProcessingStatus(`正在处理气泡挂件${slot === 'top' ? '顶部趴贴' : slot === 'bottom' ? '底部垂饰' : '完整图'}...`);
-    setProcessingProgress(30);
+    setProcessingStatus(`正在自动化透明抠图并处理 ${files.length} 张气泡挂件素材...`);
+    setProcessingProgress(25);
+
     try {
-      const img = await loadImageElement(file);
-      let cutoutCanvas: HTMLCanvasElement;
-      setProcessingProgress(60);
-      try {
-        const aiPromise = removeBackgroundWithAI(file, undefined, (p) => {
-          setProcessingProgress(50 + Math.round(p.progress * 0.2));
-          setProcessingStatus(p.message);
+      if (slot === 'full') {
+        const file = files[0];
+        const { rawImg, cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
+          setProcessingProgress(40 + Math.round(p * 0.4));
+          setProcessingStatus(msg);
         });
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('快速色阶抠图优先')), 2600)
-        );
-        const aiMatting = await Promise.race([aiPromise, timeoutPromise]);
-        cutoutCanvas = document.createElement('canvas');
-        cutoutCanvas.width = aiMatting.width;
-        cutoutCanvas.height = aiMatting.height;
-        const cctx = cutoutCanvas.getContext('2d')!;
-        cctx.putImageData(aiMatting.imageData, 0, 0);
-      } catch {
-        cutoutCanvas = await ensureTransparentSubject(img);
-      }
-
-      setProcessingProgress(85);
-      // Auto-trim transparent borders and shadows so the subject fits snugly
-      const trimmed = await trimImageTransparentBorders(cutoutCanvas, { alphaThreshold: 24, padding: 0 });
-      const cutoutImg = trimmed.img;
-
-      if (slot === 'top') {
-        setBubbleTopImg(cutoutImg);
-        setBubbleTopFileName(file.name);
-        setBubbleTopBottomCrop(0);
-        setBubbleActivePart('top');
-        await renderCompositeBubble({ topImg: cutoutImg, topBottomCrop: 0 });
-      } else if (slot === 'bottom') {
-        setBubbleBottomImg(cutoutImg);
-        setBubbleBottomFileName(file.name);
-        setBubbleActivePart('bottom');
-        await renderCompositeBubble({ bottomImg: cutoutImg });
-      } else {
+        setBubbleFullRawImg(rawImg);
         setBubbleFullImg(cutoutImg);
         setBubbleFullFileName(file.name);
-        await renderCompositeBubble({ fullImg: cutoutImg });
+        setBubbleFullBgConfig({ ...DEFAULT_BG_CONFIG });
+        setBubbleUploadMode('full');
+        await renderCompositeBubble({ fullImg: cutoutImg, mode: 'full' });
+        setProcessingProgress(100);
+        onNotification('🎉 整张单图已自动透明化加载！可从中间截开分别调节上下位置并导出一张 480×384 规范 PNG。');
+        return;
       }
+
+      const existingLayers = slot === 'top' ? [...bubbleTopLayers] : [...bubbleBottomLayers];
+      const newItems: BubbleLayerItem[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        setProcessingStatus(`正在处理第 ${i + 1}/${files.length} 张图片 (${f.name}) · 自动去背景透明化...`);
+        setProcessingProgress(25 + Math.round(((i + 0.5) / files.length) * 60));
+        const { rawImg, cutoutImg } = await processUploadedFileToTransparentLayer(f);
+
+        newItems.push({
+          id: `${slot}-${Date.now()}-${i}`,
+          name: f.name.replace(/\.[^.]+$/, '') || `${slot === 'top' ? '顶部小熊' : '底部垂饰'} #${existingLayers.length + i + 1}`,
+          rawSource: rawImg,
+          source: cutoutImg,
+          scale: 1.0,
+          offsetX: 0,
+          offsetY: 0,
+          flipX: false,
+          bottomCropPercent: 0,
+          topCropPercent: 0,
+          bgConfig: { ...DEFAULT_BG_CONFIG },
+        });
+      }
+
+      let combined: BubbleLayerItem[];
+      if (replaceActive && existingLayers.length > 0 && newItems.length === 1) {
+        const activeId = slot === 'top' ? activeTopLayer?.id : activeBottomLayer?.id;
+        combined = existingLayers.map((l) =>
+          l.id === activeId
+            ? { ...newItems[0], id: l.id, offsetX: l.offsetX, offsetY: l.offsetY, scale: l.scale }
+            : l
+        );
+      } else {
+        combined = [...existingLayers, ...newItems];
+        // Smart auto-distribute X offsets when multiple images are present so they don't overlap 100%
+        if (combined.length > 1) {
+          const span = Math.min(200, (combined.length - 1) * 84);
+          combined = combined.map((item, idx) => ({
+            ...item,
+            offsetX: Math.round(-span / 2 + (span / (combined.length - 1)) * idx),
+          }));
+        }
+      }
+
+      const latestActiveId = newItems[newItems.length - 1].id;
+      if (slot === 'top') {
+        setBubbleTopLayers(combined);
+        if (!replaceActive) setBubbleActiveTopId(latestActiveId);
+        setBubbleActivePart('top');
+        await renderCompositeBubble({ topLayers: combined, mode: 'split' });
+      } else {
+        setBubbleBottomLayers(combined);
+        if (!replaceActive) setBubbleActiveBottomId(latestActiveId);
+        setBubbleActivePart('bottom');
+        await renderCompositeBubble({ bottomLayers: combined, mode: 'split' });
+      }
+
       setProcessingProgress(100);
-      onNotification(`🎉 气泡挂件${slot === 'top' ? '顶部' : slot === 'bottom' ? '底部' : '完整'}图片已更新，已自动紧凑识别主体并合成至微信 480×384 规范图！`);
+      onNotification(
+        `🎉 已成功上传并自动透明化 ${files.length} 张${slot === 'top' ? '顶部趴贴' : '底部垂饰'}图片！当前共 ${combined.length} 个图层合成一张规范图。`
+      );
     } catch (e: any) {
       onNotification('气泡挂件处理失败: ' + e.message);
     } finally {
@@ -1179,19 +1432,143 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     }
   };
 
-  const handleAutoTightTrim = async (slot: 'bubbleTop' | 'pendantTop') => {
+  const handleUploadBubbleSlot = async (file: File, slot: 'top' | 'bottom' | 'full') => {
+    await handleUploadBubbleMultipleFiles([file], slot, false);
+  };
+
+  /**
+   * 复制当前图层并水平对称排布（一键把单张小熊拓展为饱满的多图组合！）
+   */
+  const handleDuplicateBubbleLayer = async (part: 'top' | 'bottom') => {
+    const target = part === 'top' ? activeTopLayer : activeBottomLayer;
+    if (!target) return;
+
+    const layers = part === 'top' ? [...bubbleTopLayers] : [...bubbleBottomLayers];
+    const newId = `${part}-dup-${Date.now()}`;
+    const cloned: BubbleLayerItem = {
+      ...target,
+      id: newId,
+      name: `${target.name} (副本)`,
+      flipX: !target.flipX,
+      offsetX: target.offsetX === 0 ? 58 : -target.offsetX,
+    };
+
+    // If original was at X=0, shift original to -58 and clone to +58 for instant 210px+ symmetric fullness!
+    const updatedLayers = layers.map((l) =>
+      l.id === target.id && l.offsetX === 0 ? { ...l, offsetX: -58 } : l
+    );
+    updatedLayers.push(cloned);
+
+    if (part === 'top') {
+      setBubbleTopLayers(updatedLayers);
+      setBubbleActiveTopId(newId);
+      await renderCompositeBubble({ topLayers: updatedLayers });
+    } else {
+      setBubbleBottomLayers(updatedLayers);
+      setBubbleActiveBottomId(newId);
+      await renderCompositeBubble({ bottomLayers: updatedLayers });
+    }
+    onNotification(`✨ 已复制并对称排布「${target.name}」！多张图片将自动合成为一张 480×384 规范 PNG。`);
+  };
+
+  /**
+   * 删除指定图层
+   */
+  const handleDeleteBubbleLayer = async (part: 'top' | 'bottom', layerId: string) => {
+    if (part === 'top') {
+      const next = bubbleTopLayers.filter((l) => l.id !== layerId);
+      setBubbleTopLayers(next);
+      setBubbleActiveTopId(next[0]?.id || '');
+      await renderCompositeBubble({ topLayers: next });
+      onNotification('已移除该顶部图层');
+    } else {
+      const next = bubbleBottomLayers.filter((l) => l.id !== layerId);
+      setBubbleBottomLayers(next);
+      setBubbleActiveBottomId(next[0]?.id || '');
+      await renderCompositeBubble({ bottomLayers: next });
+      onNotification('已移除该底部图层');
+    }
+  };
+
+  /**
+   * 将整张单图从中间截开，直接转为「顶部趴贴小熊」+「底部垂饰」独立可编辑图层！
+   */
+  const handleSplitFullImageToLayers = async () => {
+    const fImg = bubbleFullImg || cachedBubbleImg;
+    if (!fImg) {
+      onNotification('请先上传整张单图');
+      return;
+    }
+    setIsProcessing(true);
+    setProcessingStatus('正在按分割线从中间截开，并生成顶部与底部独立图层...');
+    setProcessingProgress(50);
+    try {
+      const { topImg, bottomImg } = await splitSingleImageIntoTopAndBottom(fImg, bubbleFullSplitConfig.splitRatio);
+      const topItem: BubbleLayerItem = {
+        id: `top-split-${Date.now()}`,
+        name: '上半截 · 顶部趴贴',
+        rawSource: topImg,
+        source: topImg,
+        scale: bubbleFullSplitConfig.topScale || 1.0,
+        offsetX: bubbleFullSplitConfig.topOffsetX || 0,
+        offsetY: bubbleFullSplitConfig.topOffsetY || 0,
+        flipX: false,
+        bottomCropPercent: 0,
+        topCropPercent: 0,
+        bgConfig: { ...DEFAULT_BG_CONFIG },
+      };
+      const botItem: BubbleLayerItem = {
+        id: `bot-split-${Date.now()}`,
+        name: '下半截 · 底部垂饰',
+        rawSource: bottomImg,
+        source: bottomImg,
+        scale: bubbleFullSplitConfig.bottomScale || 1.0,
+        offsetX: bubbleFullSplitConfig.bottomOffsetX || 0,
+        offsetY: bubbleFullSplitConfig.bottomOffsetY || 0,
+        flipX: false,
+        bottomCropPercent: 0,
+        topCropPercent: 0,
+        bgConfig: { ...DEFAULT_BG_CONFIG },
+      };
+
+      setBubbleTopLayers([topItem]);
+      setBubbleActiveTopId(topItem.id);
+      setBubbleBottomLayers([botItem]);
+      setBubbleActiveBottomId(botItem.id);
+      setBubbleUploadMode('split');
+      setBubbleActivePart('top');
+
+      await renderCompositeBubble({
+        topLayers: [topItem],
+        bottomLayers: [botItem],
+        mode: 'split',
+      });
+      onNotification('✂️ 已成功从中间截开为「顶部趴贴」与「底部垂饰」两个图层！可分别微调位置后导出一张合成图。');
+    } catch (e: any) {
+      onNotification('截开图片失败: ' + e.message);
+    } finally {
+      setIsProcessing(false);
+      setProcessingProgress(100);
+    }
+  };
+
+  const handleAutoTightTrim = async (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop') => {
     setIsProcessing(true);
     setProcessingStatus('正在智能检测主体轮廓，清除周围空白与接触阴影...');
     try {
-      const src = slot === 'bubbleTop' ? bubbleTopImg : pendantTopImg;
-      if (!src) return;
-      const trimmed = await trimImageTransparentBorders(src, { alphaThreshold: 35, padding: 0 });
       if (slot === 'bubbleTop') {
-        setBubbleTopImg(trimmed.img);
-        setBubbleTopBottomCrop(0);
-        await renderCompositeBubble({ topImg: trimmed.img, topBottomCrop: 0 });
-        onNotification('✨ 已成功紧凑裁切！小熊底部多余空白与阴影已清除，已紧密贴齐微信红包卡片');
+        if (!activeTopLayer) return;
+        const trimmed = await trimImageTransparentBorders(activeTopLayer.source, { alphaThreshold: 35, padding: 0 });
+        updateActiveBubbleLayer('top', { source: trimmed.img, bottomCropPercent: 0, topCropPercent: 0 });
+        onNotification('✨ 已成功紧凑裁切顶部图层！底部多余空白与阴影已清除，紧密贴齐 Y=96px 卡片顶边');
+      } else if (slot === 'bubbleBottom') {
+        if (!activeBottomLayer) return;
+        const trimmed = await trimImageTransparentBorders(activeBottomLayer.source, { alphaThreshold: 35, padding: 0 });
+        updateActiveBubbleLayer('bottom', { source: trimmed.img, bottomCropPercent: 0, topCropPercent: 0 });
+        onNotification('✨ 已成功紧凑裁切底部垂饰！顶部多余空白已清除，紧密贴齐 Y=312px 卡片底边');
       } else {
+        if (!pendantTopImg) return;
+        const trimmed = await trimImageTransparentBorders(pendantTopImg, { alphaThreshold: 35, padding: 0 });
         setPendantTopImg(trimmed.img);
         setPendantTopBottomCrop(0);
         await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0 });
@@ -1204,32 +1581,273 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     }
   };
 
-  // 满格合规 96px (头顶 Y=0，下沿 Y=96，高 96px，零截除零遮挡)
+  /**
+   * 「一键均匀排布」辅助功能：将多张图层水平均匀分布在 210px 黄金宽度内并贴齐边缘
+   */
+  const handleSpreadLayersBestWidth = async (part: 'top' | 'bottom') => {
+    const layers = part === 'top' ? [...bubbleTopLayers] : [...bubbleBottomLayers];
+    if (layers.length === 0) return;
+    const span = layers.length === 1 ? 0 : Math.min(200, Math.max(120, (layers.length - 1) * 72));
+    const updated = layers.map((item, idx) => ({
+      ...item,
+      offsetY: 0,
+      offsetX: layers.length === 1 ? 0 : Math.round(-span / 2 + (span / (layers.length - 1)) * idx),
+    }));
+    if (part === 'top') {
+      setBubbleTopLayers(updated);
+      await renderCompositeBubble({ topLayers: updated });
+    } else {
+      setBubbleBottomLayers(updated);
+      await renderCompositeBubble({ bottomLayers: updated });
+    }
+    onNotification('↔️ 已将全部图层均匀分布在真机最佳饱满宽度区间，并精准对齐卡片边缘！');
+  };
+
+  /**
+   * 「一键真机最佳比例」辅助功能 (Req 5.3):
+   * 点击后，自动将当前小熊/挂件等比放大至高度约 90~95px (取 94px, 约 0.98~1.0)、宽度自动适配，并贴齐 Y=96 卡片顶沿。
+   */
+  const handleApplyMobileBestProportion = async () => {
+    if (bubbleUploadMode === 'split') {
+      if (bubbleActivePart === 'top' && activeTopLayer) {
+        // 94px height (~98% of 96px), strictly snapped to Y=96 (offsetY = 0)
+        const targetScale = 0.98;
+        updateActiveBubbleLayer('top', { scale: targetScale, offsetY: 0 });
+        onNotification('🎯 已应用「真机最佳比例」：小熊高度锁定为 94px (90~95px 黄金区间)，下沿精准贴齐 Y=96 红包顶边！');
+      } else if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+        updateActiveBubbleLayer('bottom', { scale: 0.98, offsetY: 0 });
+        onNotification('🎯 已应用底部垂饰「真机最佳比例」：高度锁定 70px，顶沿精准贴齐 Y=312 红包底边！');
+      }
+    } else {
+      const next: FullBubbleSplitConfig = {
+        ...bubbleFullSplitConfig,
+        enabled: true,
+        topScale: 0.98,
+        topOffsetY: 0,
+        bottomScale: 0.98,
+        bottomOffsetY: 0,
+      };
+      setBubbleFullSplitConfig(next);
+      await renderCompositeBubble({ fullSplitConfig: next });
+      onNotification('🎯 已应用「真机最佳比例」并贴齐卡片上下沿！');
+    }
+  };
+
+  // 满格合规 96px / 72px
   const handleResetStandard96 = () => {
-    setBubbleTopScale(1.0);
-    setBubbleTopOffsetY(0);
-    setBubbleTopOffsetX(0);
-    setBubbleActivePart('top');
-    renderCompositeBubble({ topScale: 1.0, topOffY: 0, topOffX: 0 });
-    onNotification('🎯 已重置为微信官方 96px 满格规范：小熊高 96px，头顶对齐 Y=0，下沿贴齐 Y=96 气泡卡片，完全合规零截断！');
+    if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+      updateActiveBubbleLayer('bottom', { scale: 1.0, offsetY: 0, offsetX: 0 });
+      onNotification('🎯 已重置为底部垂饰 72px 满格规范：顶沿贴齐 Y=312，底沿对齐 Y=384，完全合规！');
+      return;
+    }
+    if (activeTopLayer) {
+      updateActiveBubbleLayer('top', { scale: 1.0, offsetY: 0, offsetX: 0 });
+      onNotification('🎯 已重置为微信官方 96px 满格规范：小熊高 96px，头顶对齐 Y=0，下沿贴齐 Y=96 气泡卡片，完全合规零截断！');
+    }
   };
 
-  // 一键贴齐 96px 下沿 (下沿精准 <= 96px，防止平台驳回)
+  // 一键贴齐 96px 下沿 或 312px 顶沿
   const handleSnapTo96 = () => {
-    setBubbleTopOffsetY(0);
-    setBubbleActivePart('top');
-    renderCompositeBubble({ topOffY: 0 });
-    onNotification('✅ 已一键贴齐 96px 气泡卡片顶边！下沿精准对齐 Y=96px，符合微信审核规范。');
+    if (bubbleActivePart === 'bottom' && activeBottomLayer) {
+      updateActiveBubbleLayer('bottom', { offsetY: 0 });
+      onNotification('✅ 已一键贴齐 312px 气泡卡片底边！符合微信审核规范。');
+      return;
+    }
+    if (activeTopLayer) {
+      updateActiveBubbleLayer('top', { offsetY: 0 });
+      onNotification('✅ 已一键贴齐 96px 气泡卡片顶边！下沿精准对齐 Y=96px，符合微信审核规范。');
+    }
   };
 
+  // -------------------------------------------------------------
+  // 9. Manual Background Transparency Modal Handlers
+  // -------------------------------------------------------------
+  const [bgAiLoading, setBgAiLoading] = useState(false);
+
+  const handleOpenBgModal = (target: 'bubbleTop' | 'bubbleBottom' | 'bubbleFull') => {
+    let raw: HTMLImageElement | null = null;
+    let cfg: ManualTransparencyConfig = { ...DEFAULT_BG_CONFIG };
+
+    if (target === 'bubbleTop') {
+      if (!activeTopLayer) {
+        onNotification('请先上传顶部图片');
+        return;
+      }
+      raw = activeTopLayer.rawSource || activeTopLayer.source;
+      cfg = { ...activeTopLayer.bgConfig };
+    } else if (target === 'bubbleBottom') {
+      if (!activeBottomLayer) {
+        onNotification('请先上传底部垂饰图片');
+        return;
+      }
+      raw = activeBottomLayer.rawSource || activeBottomLayer.source;
+      cfg = { ...activeBottomLayer.bgConfig };
+    } else {
+      raw = bubbleFullRawImg || bubbleFullImg;
+      cfg = { ...bubbleFullBgConfig };
+      if (!raw) {
+        onNotification('请先上传完整挂件图片');
+        return;
+      }
+    }
+
+    setBgModalTarget(target);
+    setBgModalRawImg(raw);
+    setBgModalConfig(cfg);
+    setBgModalTool('eyedropper');
+    setBgModalOpen(true);
+  };
+
+  const handleRunAiBackgroundRemovalInModal = async () => {
+    if (!bgModalRawImg || bgAiLoading) return;
+    setBgAiLoading(true);
+    try {
+      const tempC = document.createElement('canvas');
+      tempC.width = bgModalRawImg.naturalWidth || bgModalRawImg.width;
+      tempC.height = bgModalRawImg.naturalHeight || bgModalRawImg.height;
+      tempC.getContext('2d')!.drawImage(bgModalRawImg, 0, 0);
+      const blob = await new Promise<Blob>((res) => tempC.toBlob((b) => res(b!), 'image/png'));
+      const aiRes = await removeBackgroundWithAI(blob);
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = aiRes.width;
+      outCanvas.height = aiRes.height;
+      outCanvas.getContext('2d')!.putImageData(aiRes.imageData, 0, 0);
+      const cleaned = await ensureTransparentSubject(outCanvas);
+      const canvas = bgModalCanvasRef.current;
+      if (canvas) {
+        canvas.width = cleaned.width;
+        canvas.height = cleaned.height;
+        const ctx = canvas.getContext('2d')!;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(cleaned, 0, 0);
+      }
+      onNotification('✨ AI 神经网络深度抠图完成！可继续使用橡皮擦或画笔微调细节。');
+    } catch (e: any) {
+      onNotification('AI 深度抠图超时或切换为智能色阶模式，请使用下方容差滑块或吸管工具微调。');
+    } finally {
+      setBgAiLoading(false);
+    }
+  };
+
+  const handleBgModalCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas || !bgModalRawImg) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(canvas.width - 1, Math.round(((e.clientX - rect.left) / rect.width) * canvas.width)));
+    const y = Math.max(0, Math.min(canvas.height - 1, Math.round(((e.clientY - rect.top) / rect.height) * canvas.height)));
+
+    if (bgModalTool === 'eyedropper') {
+      // Sample color from raw image at (x, y)
+      const tempC = document.createElement('canvas');
+      tempC.width = canvas.width;
+      tempC.height = canvas.height;
+      const tCtx = tempC.getContext('2d')!;
+      tCtx.drawImage(bgModalRawImg, 0, 0, canvas.width, canvas.height);
+      const pixel = tCtx.getImageData(x, y, 1, 1).data;
+      const toHex = (n: number) => n.toString(16).padStart(2, '0');
+      const pickedHex = `#${toHex(pixel[0])}${toHex(pixel[1])}${toHex(pixel[2])}`;
+      setBgModalConfig((prev) => ({
+        ...prev,
+        mode: prev.mode === 'keep' || prev.mode === 'auto' ? 'custom' : prev.mode,
+        customColor: pickedHex,
+      }));
+      onNotification(`💧 已吸取背景颜色 ${pickedHex.toUpperCase()} 并自动透明化！可拖动容差滑块微调边缘。`);
+      return;
+    }
+
+    setIsPaintingBgModal(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    paintOnBgModalCanvas(x, y);
+  };
+
+  const handleBgModalCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isPaintingBgModal) return;
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(canvas.width - 1, Math.round(((e.clientX - rect.left) / rect.width) * canvas.width)));
+    const y = Math.max(0, Math.min(canvas.height - 1, Math.round(((e.clientY - rect.top) / rect.height) * canvas.height)));
+    paintOnBgModalCanvas(x, y);
+  };
+
+  const handleBgModalCanvasPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isPaintingBgModal) return;
+    setIsPaintingBgModal(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {}
+  };
+
+  const paintOnBgModalCanvas = (cx: number, cy: number) => {
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas || !bgModalRawImg) return;
+    const ctx = canvas.getContext('2d')!;
+    const scaleFactor = Math.max(1, canvas.width / 320);
+    const radius = bgBrushSize * scaleFactor;
+
+    ctx.save();
+    if (bgModalTool === 'eraser') {
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (bgModalTool === 'restore') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(bgModalRawImg, 0, 0, canvas.width, canvas.height);
+    }
+    ctx.restore();
+  };
+
+  const handleApplyBgModal = async () => {
+    const canvas = bgModalCanvasRef.current;
+    if (!canvas) return;
+    setIsProcessing(true);
+    setProcessingStatus('正在应用透明背景并紧凑裁切主体轮廓...');
+    try {
+      const trimmed = await trimImageTransparentBorders(canvas, { alphaThreshold: 22, padding: 0 });
+      if (bgModalTarget === 'bubbleTop' && activeTopLayer) {
+        updateActiveBubbleLayer('top', {
+          source: trimmed.img,
+          bgConfig: bgModalConfig,
+        });
+      } else if (bgModalTarget === 'bubbleBottom' && activeBottomLayer) {
+        updateActiveBubbleLayer('bottom', {
+          source: trimmed.img,
+          bgConfig: bgModalConfig,
+        });
+      } else if (bgModalTarget === 'bubbleFull') {
+        const fullOut = await loadImageElement(canvas.toDataURL('image/png'));
+        setBubbleFullImg(fullOut);
+        setBubbleFullBgConfig(bgModalConfig);
+        await renderCompositeBubble({ fullImg: fullOut, mode: 'full' });
+      }
+      setBgModalOpen(false);
+      onNotification('✨ 透明背景调整已生效！已同步更新至 480×384 规范画布与真机预览。');
+    } catch (e: any) {
+      onNotification('应用透明处理失败: ' + e.message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // -------------------------------------------------------------
+  // 10. Interactive Crop Modal Handlers
+  // -------------------------------------------------------------
   const handleOpenCropModal = (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom') => {
     let img: HTMLImageElement | null = null;
     let bottomCrop = 0;
+    let topCrop = 0;
     if (slot === 'bubbleTop') {
-      img = bubbleTopImg;
-      bottomCrop = bubbleTopBottomCrop;
+      img = activeTopLayer?.source || null;
+      bottomCrop = activeTopLayer?.bottomCropPercent || 0;
+      topCrop = activeTopLayer?.topCropPercent || 0;
     } else if (slot === 'bubbleBottom') {
-      img = bubbleBottomImg;
+      img = activeBottomLayer?.source || null;
+      bottomCrop = activeBottomLayer?.bottomCropPercent || 0;
+      topCrop = activeBottomLayer?.topCropPercent || 0;
     } else if (slot === 'pendantTop') {
       img = pendantTopImg;
       bottomCrop = pendantTopBottomCrop;
@@ -1244,7 +1862,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     setCropModalTarget(slot);
     setCropModalImg(img);
     setCropModalBottomCrop(bottomCrop);
-    setCropModalTopCrop(0);
+    setCropModalTopCrop(topCrop);
     setCropModalOpen(true);
   };
 
@@ -1261,19 +1879,24 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       });
 
       if (cropModalTarget === 'bubbleTop') {
-        setBubbleTopImg(trimmed.img);
-        setBubbleTopBottomCrop(0);
-        await renderCompositeBubble({ topImg: trimmed.img, topBottomCrop: 0 });
-        onNotification('🎉 裁剪完成！小熊已紧密贴合红包顶部');
+        updateActiveBubbleLayer('top', {
+          source: trimmed.img,
+          bottomCropPercent: 0,
+          topCropPercent: 0,
+        });
+        onNotification('🎉 裁剪完成！顶部小熊已紧密贴合红包顶边 Y=96px');
       } else if (cropModalTarget === 'pendantTop') {
         setPendantTopImg(trimmed.img);
         setPendantTopBottomCrop(0);
         await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0 });
         onNotification('🎉 裁剪完成！挂件已紧密贴合');
       } else if (cropModalTarget === 'bubbleBottom') {
-        setBubbleBottomImg(trimmed.img);
-        await renderCompositeBubble({ bottomImg: trimmed.img });
-        onNotification('🎉 底部垂饰裁剪完成！');
+        updateActiveBubbleLayer('bottom', {
+          source: trimmed.img,
+          bottomCropPercent: 0,
+          topCropPercent: 0,
+        });
+        onNotification('🎉 底部垂饰裁剪完成！已紧密贴合红包底边 Y=312px');
       } else {
         setPendantBottomImg(trimmed.img);
         await renderCompositePendant({ bottomImg: trimmed.img });
@@ -1289,16 +1912,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
   const handleClearBubbleSlot = async (slot: 'top' | 'bottom' | 'full') => {
     if (slot === 'top') {
-      setBubbleTopImg(null);
-      setBubbleTopFileName('');
-      await renderCompositeBubble({ topImg: null });
-      onNotification('已清除气泡挂件顶部图片');
+      setBubbleTopLayers([]);
+      setBubbleActiveTopId('');
+      await renderCompositeBubble({ topLayers: [] });
+      onNotification('已清空顶部所有图层');
     } else if (slot === 'bottom') {
-      setBubbleBottomImg(null);
-      setBubbleBottomFileName('');
-      await renderCompositeBubble({ bottomImg: null });
-      onNotification('已清除气泡挂件底部图片');
+      setBubbleBottomLayers([]);
+      setBubbleActiveBottomId('');
+      await renderCompositeBubble({ bottomLayers: [] });
+      onNotification('已清空底部所有图层');
     } else {
+      setBubbleFullRawImg(null);
       setBubbleFullImg(null);
       setBubbleFullFileName('');
       onNotification('已清除气泡挂件完整图片');
@@ -2690,16 +3314,30 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               {/* 1. Header & Title Bar */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-100">
                 <div>
-                  <h3 className="text-sm font-bold text-neutral-900 flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-neutral-900 flex items-center gap-2 flex-wrap">
                     <span>③ 气泡挂件 1:1 像素级工作台 · 480 × 384 px</span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-mono font-bold">1:1 精准视窗</span>
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-mono font-bold">
+                      所见即所得 · 真机 0.6x 锚点映射
+                    </span>
+                    <span className="text-[10px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-mono font-bold">
+                      支持多图合成 & 单图截开 & 智能抠图
+                    </span>
                   </h3>
                   <p className="text-[11px] text-neutral-400 mt-0.5">
-                    微信平台规范：气泡挂件 480×384。顶部挂件展示区 0~96px，<strong>小熊下沿严禁超过 96 像素</strong>。默认 100% 满格标准为<strong>高 96px（头顶 Y=0，下沿 Y=96）</strong>。
+                    微信平台规范：画布 480×384px，红包卡片主体 <code className="text-neutral-600 font-mono">rect(48, 96, 384, 216)</code>，文字禁入区 <code className="text-red-500 font-mono">rect(68, 120, 272, 100)</code>，顶部挂件区 <code className="text-emerald-700 font-mono">0~96px</code>，底部装饰区 <code className="text-emerald-700 font-mono">312~384px</code>。
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleApplyMobileBestProportion}
+                    className="text-xs px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-bold shadow-xs transition-all cursor-pointer flex items-center gap-1 active:scale-95"
+                    title="自动将当前小熊/挂件等比放大至高度约 94px，并贴齐 Y=96 卡片顶沿"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>一键真机最佳比例</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => setShowGuides((v) => !v)}
@@ -2712,76 +3350,150 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 </div>
               </div>
 
-              {/* 2. Real-Time WeChat Compliance Indicator Banner */}
+              {/* 2. Real-Time WeChat Compliance & True Mobile Size Warning Banner */}
               {(() => {
                 const currentBottomY = 96 + bubbleTopOffsetY;
                 const approxH = Math.round(96 * bubbleTopScale);
                 const currentTopY = currentBottomY - approxH;
-                const isBottomOver96 = currentBottomY > 96;
-                const isTopOverCanvas = currentTopY < 0;
+                const isBottomOver96 = bubbleUploadMode === 'split' && bubbleActivePart === 'top' && currentBottomY > 96;
+                const isBottomIntrude312 = bubbleUploadMode === 'split' && bubbleActivePart === 'bottom' && (312 + bubbleBottomOffsetY) < 312;
+                const isTopOverCanvas = bubbleUploadMode === 'split' && bubbleActivePart === 'top' && currentTopY < 0;
+
+                const opaqueW = bubbleResult?.topOpaqueWidth || bubbleResult?.opaqueWidth || 0;
+                const isNarrowOnMobile = opaqueW > 0 && opaqueW < 160;
+                const cardRatioPercent = opaqueW > 0 ? Math.round((opaqueW / 384) * 100) : 0;
 
                 return (
-                  <div className={`p-3 rounded-2xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs ${
-                    isBottomOver96
-                      ? 'bg-red-50/90 border-red-300 text-red-950'
-                      : isTopOverCanvas
-                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
-                      : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
-                  }`}>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-bold flex items-center gap-1 font-mono">
-                        {isBottomOver96 ? '🚨 平台驳回风险' : isTopOverCanvas ? '⚠️ 顶沿溢出提醒' : '✅ 微信审核合规'}
-                      </span>
-                      <span className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] ${
-                        isBottomOver96 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
-                      }`}>
-                        下沿: {currentBottomY}px {isBottomOver96 ? `(超标 ${currentBottomY - 96}px 必拒)` : '(<= 96px 合规)'}
-                      </span>
-                      <span className="px-2 py-0.5 rounded-full bg-white/90 border border-neutral-200 font-mono text-[11px] text-neutral-700">
-                        小熊高度: {approxH}px (缩放 {Math.round(bubbleTopScale * 100)}%)
-                      </span>
-                      <span className={`px-2 py-0.5 rounded-full font-mono text-[11px] ${
-                        isTopOverCanvas ? 'bg-amber-500 text-white font-bold' : 'bg-white/90 border border-neutral-200 text-neutral-600'
-                      }`}>
-                        头顶: Y={currentTopY}px {isTopOverCanvas ? `(裁切 ${Math.abs(currentTopY)}px)` : ''}
-                      </span>
-                    </div>
+                  <div className="space-y-2">
+                    {/* Compliance Status Bar */}
+                    <div className={`p-3 rounded-2xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs ${
+                      isBottomOver96 || isBottomIntrude312
+                        ? 'bg-red-50/90 border-red-300 text-red-950'
+                        : isTopOverCanvas
+                        ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                        : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                    }`}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold flex items-center gap-1 font-mono">
+                          {isBottomOver96 || isBottomIntrude312 ? '🚨 平台驳回风险' : isTopOverCanvas ? '⚠️ 顶沿溢出提醒' : '✅ 微信审核合规'}
+                        </span>
+                        {bubbleUploadMode === 'split' && bubbleActivePart === 'top' && (
+                          <>
+                            <span className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] ${
+                              isBottomOver96 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
+                            }`}>
+                              顶部下沿: {currentBottomY}px {isBottomOver96 ? `(超标 ${currentBottomY - 96}px 必拒)` : '(<= 96px 合规)'}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full bg-white/90 border border-neutral-200 font-mono text-[11px] text-neutral-700">
+                              高度: {approxH}px ({Math.round(bubbleTopScale * 100)}%)
+                            </span>
+                          </>
+                        )}
+                        {bubbleUploadMode === 'split' && bubbleActivePart === 'bottom' && (
+                          <span className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] ${
+                            isBottomIntrude312 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
+                          }`}>
+                            底部上沿: {312 + bubbleBottomOffsetY}px {isBottomIntrude312 ? `(侵入卡片 ${312 - (312 + bubbleBottomOffsetY)}px)` : '(>= 312px 合规)'}
+                          </span>
+                        )}
+                        {opaqueW > 0 && (
+                          <span className={`px-2 py-0.5 rounded-full font-mono text-[11px] border ${
+                            isNarrowOnMobile
+                              ? 'bg-amber-100 text-amber-900 border-amber-300 font-bold'
+                              : 'bg-white/90 text-emerald-800 border-emerald-200 font-bold'
+                          }`}>
+                            挂件有效宽: {opaqueW}px (真机 {Math.round(opaqueW * 0.6)}pt · 占卡片 {cardRatioPercent}%)
+                          </span>
+                        )}
+                      </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      {isBottomOver96 && (
+                      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                        {isBottomOver96 && (
+                          <button
+                            type="button"
+                            onClick={handleSnapTo96}
+                            className="px-2.5 py-1 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer shadow-xs transition-all"
+                          >
+                            🎯 一键贴齐 96px 下沿
+                          </button>
+                        )}
+                        {isBottomIntrude312 && (
+                          <button
+                            type="button"
+                            onClick={() => updateActiveBubbleLayer('bottom', { offsetY: 0 })}
+                            className="px-2.5 py-1 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer shadow-xs transition-all"
+                          >
+                            🎯 一键贴齐 312px 底沿
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={handleSnapTo96}
-                          className="px-2.5 py-1 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer shadow-xs transition-all"
-                        >
-                          🎯 一键贴齐 96px 下沿
-                        </button>
-                      )}
-                      {(isTopOverCanvas || bubbleTopScale !== 1.0 || bubbleTopOffsetY !== 0) && (
-                        <button
-                          type="button"
-                          onClick={handleResetStandard96}
+                          onClick={handleApplyMobileBestProportion}
                           className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer shadow-xs transition-all flex items-center gap-1"
-                          title="恢复 100% 满格标准：高 96px，头顶 Y=0，下沿 Y=96"
+                          title="自动将当前小熊/挂件等比放大至高度约 94px，并贴齐 Y=96 卡片顶沿"
                         >
                           <Sparkles className="w-3 h-3" />
-                          <span>⭐ 100% 满格标准 (96px)</span>
+                          <span>一键真机最佳比例</span>
                         </button>
-                      )}
+                      </div>
                     </div>
+
+                    {/* 真机视觉预警 (< 160px) */}
+                    {isNarrowOnMobile && (
+                      <div className="p-3 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs shadow-2xs">
+                        <div className="flex items-start sm:items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5 sm:mt-0" />
+                          <div>
+                            <span className="font-bold">
+                              ⚠️ 当前挂件在真机上仅占红包宽度的 {Math.max(15, cardRatioPercent)}%（有效宽度 {opaqueW}px &lt; 160px），视觉可能偏小。
+                            </span>
+                            <span className="text-amber-800 block sm:inline sm:ml-1">
+                              建议宽度拓展至 <strong>190~230px</strong>（可上传多张小熊组合排列，或使用「复制多一只并排」）。
+                            </span>
+                          </div>
+                        </div>
+                        {bubbleUploadMode === 'split' && (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleDuplicateBubbleLayer(bubbleActivePart)}
+                              className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-[11px] cursor-pointer transition-all shadow-2xs flex items-center gap-1"
+                            >
+                              <Copy className="w-3 h-3" />
+                              <span>复制多一只并排</span>
+                            </button>
+                            {(bubbleActivePart === 'top' ? bubbleTopLayers.length : bubbleBottomLayers.length) > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleSpreadLayersBestWidth(bubbleActivePart)}
+                                className="px-2.5 py-1 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 font-bold rounded-xl text-[11px] cursor-pointer transition-all"
+                              >
+                                ↔️ 一键 210px 饱满排布
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })()}
 
               {/* 3. FRONT-AND-CENTER: 1:1 Pixel Canvas & Ruler (横向480px, 竖向384px) */}
               <div className="flex flex-col items-center p-3 sm:p-4 rounded-2xl bg-neutral-50/90 border border-neutral-200/90 shadow-2xs">
-                <div className="w-full flex items-center justify-between mb-2 text-xs text-neutral-500 px-1 font-medium">
+                <div className="w-full flex items-center justify-between mb-2 text-xs text-neutral-500 px-1 font-medium flex-wrap gap-1">
                   <span className="flex items-center gap-1.5 font-bold text-neutral-700">
                     <Move className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>1:1 真实视窗 (480 × 384 px) · 可直接在画板上拖动小熊平移</span>
+                    <span>1:1 标准画布 (480 × 384 px) · 直接点击画布中任意小熊/垂饰即可选中并拖拽</span>
                   </span>
-                  <span className="font-mono text-[11px] text-neutral-400">
-                    {bubbleActivePart === 'top' ? '当前编辑: 顶部小熊' : '当前编辑: 底部挂饰'}
+                  <span className="font-mono text-[11px] text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 font-bold">
+                    {bubbleUploadMode === 'full'
+                      ? bubbleFullSplitConfig.enabled
+                        ? `当前编辑: 整图中间截开 (${bubbleActivePart === 'top' ? '上半截' : '下半截'})`
+                        : '当前编辑: 整张单图 (480×384)'
+                      : bubbleActivePart === 'top'
+                      ? `当前编辑: 顶部小熊 (${activeTopLayer?.name || '图层'}) · 共${bubbleTopLayers.length}层`
+                      : `当前编辑: 底部垂饰 (${activeBottomLayer?.name || '图层'}) · 共${bubbleBottomLayers.length}层`}
                   </span>
                 </div>
 
@@ -2827,7 +3539,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                               handleBubbleResetCenter();
                             }
                           }}
-                          title={bubbleActivePart === 'top' ? "🎯 一键贴齐 96px 卡片顶边" : "🎯 一键恢复居中"}
+                          title={bubbleActivePart === 'top' ? "🎯 一键贴齐 96px 卡片顶边" : "🎯 一键贴齐 312px 卡片底边"}
                           className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-50 hover:bg-emerald-200 active:scale-90 border border-emerald-300 shadow-2xs flex items-center justify-center text-[10px] font-black text-emerald-800 transition-all cursor-pointer"
                         >
                           🎯
@@ -2858,7 +3570,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     {/* 坐标实时读数 */}
                     <div className="flex flex-col items-center gap-0.5 text-center w-full">
                       <span className={`text-[9px] font-mono font-bold px-1 py-0.5 rounded border shadow-2xs w-full truncate ${
-                        (96 + bubbleTopOffsetY) > 96
+                        bubbleActivePart === 'top' && (96 + bubbleTopOffsetY) > 96
+                          ? 'bg-red-100 text-red-900 border-red-300'
+                          : bubbleActivePart === 'bottom' && (312 + bubbleBottomOffsetY) < 312
                           ? 'bg-red-100 text-red-900 border-red-300'
                           : 'bg-emerald-50 text-emerald-800 border-emerald-200'
                       }`}>
@@ -2870,7 +3584,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     </div>
                   </div>
 
-                  {/* 1:1 Canvas: width 480px, height 384px */}
+                  {/* 1:1 Standardized Canvas: width 480px, height 384px */}
                   <div
                     ref={bubbleCanvasRef}
                     onPointerDown={handleBubblePointerDown}
@@ -2881,25 +3595,63 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     }`}
                     title="按住鼠标拖拽，可在 480×384 画布内自由平移微调"
                   >
-                    {/* Zone 1: Top 96px zone (0~96px, 25%) */}
-                    <div
-                      className="absolute inset-x-0 top-0 border-b-2 border-dashed border-emerald-500/80 bg-emerald-500/5 pointer-events-none z-0 flex items-start justify-between px-2 pt-1"
-                      style={{ height: '25%' }}
-                    >
-                      <span className="text-[8px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs border border-emerald-200 font-mono">
-                        ✅ 顶部挂件核心区 (0~96px · 高96px)
-                      </span>
-                      <span className="text-[7px] text-emerald-700/80 font-mono">
-                        下沿不得超过 Y=96px
-                      </span>
-                    </div>
+                    {/* Standardized Reference Coordinates Layer */}
+                    {showGuides && (
+                      <>
+                        {/* 1. 顶部挂件区: rect(x: 0, y: 0, w: 480, h: 96) */}
+                        <div
+                          className={`absolute inset-x-0 top-0 border-b-2 border-dashed transition-colors pointer-events-none z-0 flex items-start justify-between px-2 pt-1 ${
+                            bubbleActivePart === 'top'
+                              ? 'border-emerald-500 bg-emerald-500/8'
+                              : 'border-emerald-500/50 bg-emerald-500/4'
+                          }`}
+                          style={{
+                            left: `${(BUBBLE_PENDANT_COORDS.topZone.x / 480) * 100}%`,
+                            top: `${(BUBBLE_PENDANT_COORDS.topZone.y / 384) * 100}%`,
+                            width: `${(BUBBLE_PENDANT_COORDS.topZone.w / 480) * 100}%`,
+                            height: `${(BUBBLE_PENDANT_COORDS.topZone.h / 384) * 100}%`,
+                          }}
+                        >
+                          <span className="text-[8px] font-bold text-emerald-800 bg-white/95 px-1.5 py-0.5 rounded shadow-2xs border border-emerald-200 font-mono">
+                            ✅ 顶部挂件区 rect(0, 0, 480, 96)
+                          </span>
+                          <span className="text-[7px] text-emerald-700 font-mono bg-white/80 px-1 rounded">
+                            推荐宽 190~230px
+                          </span>
+                        </div>
 
-                    {/* Zone 2: Middle 216px WeChat Red Packet Bubble Card (96~312px, 56.25%) */}
+                        {/* 4. 底部装饰区: rect(x: 0, y: 312, w: 480, h: 72) */}
+                        <div
+                          className={`absolute inset-x-0 bottom-0 border-t-2 border-dashed transition-colors pointer-events-none z-0 flex items-end justify-between px-2 pb-1 ${
+                            bubbleActivePart === 'bottom'
+                              ? 'border-emerald-500 bg-emerald-500/8'
+                              : 'border-emerald-500/50 bg-emerald-500/4'
+                          }`}
+                          style={{
+                            left: `${(BUBBLE_PENDANT_COORDS.bottomZone.x / 480) * 100}%`,
+                            top: `${(BUBBLE_PENDANT_COORDS.bottomZone.y / 384) * 100}%`,
+                            width: `${(BUBBLE_PENDANT_COORDS.bottomZone.w / 480) * 100}%`,
+                            height: `${(BUBBLE_PENDANT_COORDS.bottomZone.h / 384) * 100}%`,
+                          }}
+                        >
+                          <span className="text-[8px] font-bold text-emerald-800 bg-white/95 px-1.5 py-0.5 rounded shadow-2xs border border-emerald-200 font-mono">
+                            ✅ 底部装饰区 rect(0, 312, 480, 72)
+                          </span>
+                          <span className="text-[7px] text-emerald-700 font-mono bg-white/80 px-1 rounded">
+                            上沿 Y=312px
+                          </span>
+                        </div>
+                      </>
+                    )}
+
+                    {/* 2. 红包卡片主体: rect(x: 48, y: 96, w: 384, h: 216) */}
                     <div
-                      className="absolute inset-x-3 bg-gradient-to-r from-[#fa9d3b] to-[#f97316] rounded-xl border border-[#ea580c]/60 pointer-events-none z-5 flex flex-col justify-between shadow-xs overflow-hidden"
+                      className="absolute bg-gradient-to-r from-[#fa9d3b] to-[#f97316] rounded-xl border border-[#ea580c]/70 pointer-events-none z-5 flex flex-col justify-between shadow-xs overflow-hidden"
                       style={{
-                        top: '25%', // 紧贴 Y = 96px 顶部分界线
-                        height: '56.25%', // 贴合 96~312px 整个卡片区 (216px)
+                        left: `${(BUBBLE_PENDANT_COORDS.cardBody.x / 480) * 100}%`, // 48 / 480 = 10%
+                        top: `${(BUBBLE_PENDANT_COORDS.cardBody.y / 384) * 100}%`, // 96 / 384 = 25%
+                        width: `${(BUBBLE_PENDANT_COORDS.cardBody.w / 480) * 100}%`, // 384 / 480 = 80%
+                        height: `${(BUBBLE_PENDANT_COORDS.cardBody.h / 384) * 100}%`, // 216 / 384 = 56.25%
                       }}
                     >
                       <div className="p-2 sm:p-2.5 flex items-center justify-between">
@@ -2908,27 +3660,39 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             🧧
                           </div>
                           <div className="space-y-0.5 text-left">
-                            <div className="text-[11px] font-bold text-white leading-tight">恭喜发财，大吉大利</div>
-                            <div className="text-[8px] text-amber-100/90 font-medium">微信红包气泡卡片主体 (顶沿 Y = 96px)</div>
+                            <div className="text-[11px] font-bold text-white leading-tight">{blessingText || '恭喜发财，大吉大利'}</div>
+                            <div className="text-[8px] text-amber-100/90 font-mono">红包卡片主体 rect(48, 96, 384, 216)</div>
                           </div>
                         </div>
-                        <span className="text-[8px] text-amber-100/80 font-mono font-bold bg-black/10 px-1 py-0.5 rounded">卡片 96~312px</span>
+                        <span className="text-[7px] text-amber-100 font-mono font-bold bg-black/15 px-1.5 py-0.5 rounded">
+                          真机 0.6x = 230×129.6pt
+                        </span>
                       </div>
-                      <div className="bg-white/95 px-2.5 py-0.5 flex items-center justify-between text-[8px] text-neutral-500 font-medium border-t border-amber-600/30">
+                      <div className="bg-white/95 px-2.5 py-1 flex items-center justify-between text-[8px] text-neutral-500 font-medium border-t border-amber-600/30">
                         <span>微信红包</span>
-                        <span className="text-amber-700 font-bold text-[7px]">专享气泡</span>
+                        <span className="text-amber-700 font-bold text-[7px]">锚点 (X:48, Y:96)</span>
                       </div>
                     </div>
 
-                    {/* Zone 3: Bottom 72px zone (312~384px, 18.75%) */}
-                    <div
-                      className="absolute inset-x-0 bottom-0 border-t-2 border-dashed border-emerald-500/80 bg-emerald-500/5 pointer-events-none z-0 flex items-end justify-between px-2 pb-1"
-                      style={{ height: '18.75%' }}
-                    >
-                      <span className="text-[8px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs border border-emerald-200 font-mono">
-                        ✅ 底部垂饰区 (312~384px · 高72px)
-                      </span>
-                    </div>
+                    {/* 3. 文字及交互禁入区: rect(x: 68, y: 120, w: 272, h: 100) */}
+                    {showGuides && (
+                      <div
+                        className="absolute border-2 border-dashed border-red-300/90 bg-red-600/15 rounded-lg pointer-events-none z-6 flex flex-col items-center justify-center text-center px-2"
+                        style={{
+                          left: `${(BUBBLE_PENDANT_COORDS.textForbiddenZone.x / 480) * 100}%`, // 68/480 = 14.17%
+                          top: `${(BUBBLE_PENDANT_COORDS.textForbiddenZone.y / 384) * 100}%`, // 120/384 = 31.25%
+                          width: `${(BUBBLE_PENDANT_COORDS.textForbiddenZone.w / 480) * 100}%`, // 272/480 = 56.67%
+                          height: `${(BUBBLE_PENDANT_COORDS.textForbiddenZone.h / 384) * 100}%`, // 100/384 = 26.04%
+                        }}
+                      >
+                        <span className="text-[8px] font-bold text-white bg-red-600/90 px-1.5 py-0.5 rounded shadow-2xs font-mono">
+                          🚫 文字及交互禁入区 rect(68, 120, 272, 100)
+                        </span>
+                        <span className="text-[7px] text-white/90 mt-0.5 drop-shadow">
+                          严禁挂件遮挡红包图标与祝福文字
+                        </span>
+                      </div>
+                    )}
 
                     {/* Rendered Composite Result Overlay */}
                     {bubbleResult ? (
@@ -2940,9 +3704,10 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         />
 
                         {/* Top Moving Dashed Line Indicators */}
-                        {(bubbleTopImg || bubbleActivePart === 'top') && (() => {
-                          const topBottomY = 96 + bubbleTopOffsetY;
-                          const approxH = Math.round(96 * bubbleTopScale);
+                        {showGuides && (bubbleTopLayers.length > 0 || (bubbleUploadMode === 'full' && bubbleFullSplitConfig.enabled)) && bubbleActivePart === 'top' && (() => {
+                          const topBottomY = 96 + (bubbleUploadMode === 'full' ? bubbleFullSplitConfig.topOffsetY : bubbleTopOffsetY);
+                          const scaleVal = bubbleUploadMode === 'full' ? bubbleFullSplitConfig.topScale : bubbleTopScale;
+                          const approxH = Math.round(96 * scaleVal);
                           const topTopY = topBottomY - approxH;
                           const isTopOverflow = topTopY < 0;
                           const isBottomIntrusion = topBottomY > 96;
@@ -2968,7 +3733,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                                 >
                                   <span>顶沿: Y={topTopY}px</span>
                                   {isTopOverflow && (
-                                    <span className="text-[7px] bg-black/30 px-1 rounded font-bold">⚠️ 超出画板顶部 {Math.abs(topTopY)}px</span>
+                                    <span className="text-[7px] bg-black/30 px-1 rounded font-bold">⚠️ 超出顶部 {Math.abs(topTopY)}px</span>
                                   )}
                                   {topTopY === 0 && (
                                     <span className="text-[7px] bg-white/20 px-1 rounded font-bold">🎯 满格对齐 0px</span>
@@ -3008,16 +3773,51 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             </>
                           );
                         })()}
+
+                        {/* Bottom Moving Dashed Line Indicators */}
+                        {showGuides && (bubbleBottomLayers.length > 0 || (bubbleUploadMode === 'full' && bubbleFullSplitConfig.enabled)) && bubbleActivePart === 'bottom' && (() => {
+                          const bottomTopY = 312 + (bubbleUploadMode === 'full' ? bubbleFullSplitConfig.bottomOffsetY : bubbleBottomOffsetY);
+                          const isIntrudeCard = bottomTopY < 312;
+                          return (
+                            <div
+                              className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
+                              style={{
+                                top: `${(bottomTopY / 384) * 100}%`,
+                              }}
+                            >
+                              <div className={`w-full border-t-2 border-dashed ${isIntrudeCard ? 'border-red-500' : 'border-emerald-600'} shadow-xs`} />
+                              <div
+                                className={`absolute px-2 py-0.5 rounded-full text-[9px] font-mono font-bold shadow-md flex items-center gap-1 whitespace-nowrap border ${
+                                  bottomTopY === 312
+                                    ? 'bg-emerald-600 text-white border-emerald-400 ring-2 ring-emerald-300'
+                                    : isIntrudeCard
+                                    ? 'bg-red-600 text-white border-red-400 ring-2 ring-red-300'
+                                    : 'bg-emerald-700 text-white border-emerald-500'
+                                }`}
+                              >
+                                <span>🎋 底部上沿对齐线: {bottomTopY}px</span>
+                                {bottomTopY === 312 && (
+                                  <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美贴齐312px卡片底沿</span>
+                                )}
+                                {isIntrudeCard && (
+                                  <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🚨 侵入卡片区 {312 - bottomTopY}px</span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </>
                     ) : (
-                      <div className="text-neutral-400 text-xs">请上传顶部小熊图片</div>
+                      <div className="text-neutral-400 text-xs">请上传顶部小熊或底部垂饰图片</div>
                     )}
 
                     {/* Dragging HUD */}
                     {isDraggingBubble && (
                       <div className="absolute top-2 bg-neutral-900/90 text-white text-[10px] px-3 py-1 rounded-full backdrop-blur-md font-mono z-30 flex items-center gap-1.5">
                         <Move className="w-3 h-3 text-emerald-400" />
-                        <span>正在平移: {bubbleActivePart === 'top' ? '顶部小熊' : '底部垂饰'}</span>
+                        <span>
+                          正在平移: {bubbleActivePart === 'top' ? `顶部 (${activeTopLayer?.name || '小熊'})` : `底部 (${activeBottomLayer?.name || '垂饰'})`}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -3048,7 +3848,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         <button
                           type="button"
                           onClick={handleBubbleResetScale100}
-                          title="点击快速重置为 100% 满格标准 (96px)"
+                          title="点击快速重置为 100% 满格标准"
                           className="px-1.5 py-1 rounded-lg bg-neutral-100 hover:bg-emerald-50 border border-neutral-200 flex flex-col items-center justify-center cursor-pointer transition-all w-full shadow-2xs"
                         >
                           <span className="text-[10px] font-black font-mono text-emerald-900">
@@ -3088,8 +3888,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       {/* Middle 216px Bracket */}
                       <div className="h-[56.25%] flex flex-col justify-center border-l-2 border-red-400 pl-1.5 text-red-700 bg-red-50/60 rounded-r-lg my-1">
                         <div className="font-extrabold text-red-700">中 216px</div>
-                        <div className="text-[8px] text-red-600 font-sans font-bold leading-tight">🚫 不可编辑区</div>
-                        <div className="text-[7px] text-amber-800 font-sans mt-0.5">红包卡片</div>
+                        <div className="text-[8px] text-red-600 font-sans font-bold leading-tight">红包卡片区</div>
+                        <div className="text-[7px] text-amber-800 font-sans mt-0.5">384×216</div>
                         <div className="text-[7px] text-neutral-400">96~312px</div>
                       </div>
 
@@ -3098,7 +3898,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         <div className="font-extrabold flex items-center gap-0.5">
                           <span>下 72px</span>
                         </div>
-                        <div className="text-[8px] text-emerald-700 font-sans">底部垂饰区</div>
+                        <div className="text-[8px] text-emerald-700 font-sans">底部装饰区</div>
                         <div className="text-[7px] text-neutral-400">312~384px</div>
                       </div>
                     </div>
@@ -3106,7 +3906,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 </div>
               </div>
 
-              {/* 4. UNIFIED COMPACT CONTROL DECK (紧密排布在画板正下方，双列并排，无需上下大范围滚动) */}
+              {/* 4. UNIFIED MULTI-LAYER & SPLIT CONTROL DECK */}
               <div className="space-y-3">
                 {/* Mode Selector Tabs */}
                 <div className="flex items-center justify-between p-1 bg-neutral-100 rounded-xl border border-neutral-200/80 text-xs gap-1">
@@ -3117,13 +3917,18 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       setBubbleActivePart('top');
                       renderCompositeBubble({ mode: 'split' });
                     }}
-                    className={`flex-1 py-1.5 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
+                    className={`flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
                       bubbleUploadMode === 'split' && bubbleActivePart === 'top'
                         ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200'
                         : 'text-neutral-600 hover:text-neutral-900'
                     }`}
                   >
-                    <span>🐻 顶部趴贴小熊 (核心 96px)</span>
+                    <span>🐻 顶部趴贴小熊 (多图合成 · 96px)</span>
+                    {bubbleTopLayers.length > 0 && (
+                      <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-mono">
+                        {bubbleTopLayers.length}张
+                      </span>
+                    )}
                   </button>
 
                   <button
@@ -3133,14 +3938,18 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       setBubbleActivePart('bottom');
                       renderCompositeBubble({ mode: 'split' });
                     }}
-                    className={`flex-1 py-1.5 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
+                    className={`flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
                       bubbleUploadMode === 'split' && bubbleActivePart === 'bottom'
                         ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200'
                         : 'text-neutral-600 hover:text-neutral-900'
                     }`}
                   >
-                    <span>🎋 底部垂饰 (选填 72px)</span>
-                    {bubbleBottomImg && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />}
+                    <span>🎋 底部垂饰挂件 (多图合成 · 72px)</span>
+                    {bubbleBottomLayers.length > 0 && (
+                      <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 rounded-full text-[10px] font-mono">
+                        {bubbleBottomLayers.length}张
+                      </span>
+                    )}
                   </button>
 
                   <button
@@ -3149,444 +3958,745 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       setBubbleUploadMode('full');
                       renderCompositeBubble({ mode: 'full' });
                     }}
-                    className={`py-1.5 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs ${
+                    className={`flex-1 py-2 px-3 rounded-lg font-bold transition-all cursor-pointer text-center text-xs flex items-center justify-center gap-1.5 ${
                       bubbleUploadMode === 'full'
                         ? 'bg-white text-emerald-900 shadow-2xs border border-emerald-200'
                         : 'text-neutral-600 hover:text-neutral-900'
                     }`}
                   >
-                    🖼️ 整张单图 (480×384)
+                    <span>✂️ 整张单图 / 中间截开 (480×384)</span>
                   </button>
                 </div>
 
-                {/* Sub-Panel 1: 顶部趴贴小熊 (Core Active Part) */}
-                {bubbleUploadMode === 'split' && bubbleActivePart === 'top' && (
-                  <div className="space-y-3">
-                    {/* Material Quick Bar */}
-                    <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-11 h-11 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:6px_6px]">
-                          {bubbleTopImg ? (
-                            <img src={bubbleTopImg.src} alt="小熊素材" className="w-full h-full object-contain p-0.5" />
-                          ) : (
-                            <Smile className="w-5 h-5 text-neutral-300" />
-                          )}
-                        </div>
-                        <div className="space-y-0.5">
+                {/* ===================================================================== */}
+                {/* SHARED PARITY WORKBENCH FOR TOP (顶部趴贴小熊) & BOTTOM (底部垂饰)       */}
+                {/* ===================================================================== */}
+                {bubbleUploadMode === 'split' && (() => {
+                  const isTop = bubbleActivePart === 'top';
+                  const layers = isTop ? bubbleTopLayers : bubbleBottomLayers;
+                  const activeLayer = isTop ? activeTopLayer : activeBottomLayer;
+                  const activeId = isTop ? bubbleActiveTopId : bubbleActiveBottomId;
+                  const setActiveId = isTop ? setBubbleActiveTopId : setBubbleActiveBottomId;
+                  const updateLayer = (patch: Partial<BubbleLayerItem>) => updateActiveBubbleLayer(isTop ? 'top' : 'bottom', patch);
+                  const zoneHeight = isTop ? 96 : 72;
+                  const anchorY = isTop ? 96 : 312;
+
+                  return (
+                    <div className="space-y-3">
+                      {/* Multi-Layer Strip & Multi-Image Upload Bar */}
+                      <div className="p-3.5 bg-neutral-50/90 rounded-2xl border border-neutral-200/90 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 border-b border-neutral-200/70 pb-2.5">
                           <div className="flex items-center gap-2">
-                            <span className="font-bold text-xs text-neutral-900">
-                              {bubbleTopFileName ? bubbleTopFileName : '顶部小熊主素材'}
+                            <span className="w-6 h-6 rounded-lg bg-emerald-700 text-white text-xs font-bold flex items-center justify-center shadow-2xs">
+                              {isTop ? '🐻' : '🎋'}
                             </span>
-                            <span className="text-[10px] bg-emerald-100 text-emerald-800 font-mono px-1.5 py-0.2 rounded font-bold">
-                              基准高 96px
-                            </span>
+                            <div>
+                              <div className="font-bold text-xs text-neutral-900 flex items-center gap-2">
+                                <span>{isTop ? '顶部趴贴小熊图层管理 (0~96px)' : '底部垂饰图层管理 (312~384px)'}</span>
+                                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-mono px-2 py-0.5 rounded-full font-bold">
+                                  已加载 {layers.length} 张 · 自动合并输出
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-neutral-400">
+                                支持一次上传多张图片（左中右组合排布），上传非透明背景图将自动智能去底，也可点击「背景透明处理 / 手动抠图」精修。
+                              </p>
+                            </div>
                           </div>
-                          <p className="text-[10px] text-neutral-400">
-                            裁剪后默认 100% 满格标准为高 96px，头顶 Y=0，下沿 Y=96 贴合气泡卡片
-                          </p>
+
+                          {/* Upload Multiple / Add Layer / Spread Buttons */}
+                          <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                            <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>+ 添加图片 (支持多选)</span>
+                              <input
+                                type="file"
+                                multiple
+                                accept="image/png,image/jpeg,image/webp"
+                                className="hidden"
+                                onChange={(e) => {
+                                  if (e.target.files && e.target.files.length > 0) {
+                                    handleUploadBubbleMultipleFiles(e.target.files, isTop ? 'top' : 'bottom', false);
+                                    e.target.value = '';
+                                  }
+                                }}
+                              />
+                            </label>
+
+                            {layers.length > 0 && (
+                              <label className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-neutral-100 active:scale-95 text-neutral-700 font-bold text-xs rounded-xl cursor-pointer transition-all border border-neutral-200 shadow-2xs">
+                                <Upload className="w-3 h-3" />
+                                <span>替换当前</span>
+                                <input
+                                  type="file"
+                                  accept="image/png,image/jpeg,image/webp"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    if (e.target.files && e.target.files.length > 0) {
+                                      handleUploadBubbleMultipleFiles(e.target.files, isTop ? 'top' : 'bottom', true);
+                                      e.target.value = '';
+                                    }
+                                  }}
+                                />
+                              </label>
+                            )}
+
+                            {layers.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => handleDuplicateBubbleLayer(isTop ? 'top' : 'bottom')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 active:scale-95 text-amber-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-amber-300 shadow-2xs"
+                                title="复制当前选中的图片并自动水平错开，快速做出双熊/三熊饱满战队效果"
+                              >
+                                <Copy className="w-3 h-3 text-amber-700" />
+                                <span>复制多一只</span>
+                              </button>
+                            )}
+
+                            {layers.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleSpreadLayersBestWidth(isTop ? 'top' : 'bottom')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 active:scale-95 text-emerald-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-emerald-300 shadow-2xs"
+                                title="将多张图层自动均匀分布在 210px 黄金宽度内并对齐边缘"
+                              >
+                                <span>↔️ 一键均匀排布</span>
+                              </button>
+                            )}
+
+                            {layers.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => handleClearBubbleSlot(isTop ? 'top' : 'bottom')}
+                                className="text-[11px] text-red-500 hover:text-red-700 font-bold cursor-pointer px-2 py-1"
+                              >
+                                清空全部
+                              </button>
+                            )}
+                          </div>
                         </div>
+
+                        {/* Layer Cards List */}
+                        {layers.length > 0 ? (
+                          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                            {layers.map((layer, idx) => {
+                              const isSelected = layer.id === (activeLayer?.id || activeId);
+                              return (
+                                <div
+                                  key={layer.id}
+                                  onClick={() => setActiveId(layer.id)}
+                                  className={`group relative flex items-center gap-2 p-2 rounded-xl border transition-all cursor-pointer shrink-0 min-w-[165px] ${
+                                    isSelected
+                                      ? 'bg-white border-emerald-500 ring-2 ring-emerald-400/50 shadow-xs'
+                                      : 'bg-white/70 border-neutral-200 hover:border-neutral-300'
+                                  }`}
+                                >
+                                  <div className="w-10 h-10 rounded-lg bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:6px_6px] bg-neutral-50 border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0">
+                                    <img
+                                      src={layer.source.src}
+                                      alt={layer.name}
+                                      className={`w-full h-full object-contain p-0.5 ${layer.flipX ? '-scale-x-100' : ''}`}
+                                    />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-[10px] font-mono font-bold px-1 rounded bg-emerald-100 text-emerald-900">
+                                        #{idx + 1}
+                                      </span>
+                                      <span className="text-xs font-bold text-neutral-800 truncate">
+                                        {layer.name}
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] text-neutral-400 font-mono mt-0.5">
+                                      {Math.round(layer.scale * 100)}% · X:{layer.offsetX > 0 ? `+${layer.offsetX}` : layer.offsetX}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteBubbleLayer(isTop ? 'top' : 'bottom', layer.id);
+                                    }}
+                                    className="p-1 rounded-lg text-neutral-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                                    title="删除此图层"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="py-5 text-center text-xs text-neutral-400 border border-dashed border-neutral-200 rounded-xl bg-white/50">
+                            当前部位暂无图层，请点击右上角「+ 添加图片 (支持多选)」上传小熊或挂饰素材
+                          </div>
+                        )}
+
+                        {/* Active Layer Action Toolbar (去背景透明、紧致去留白、手动裁剪、水平翻转) */}
+                        {activeLayer && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-neutral-200/70">
+                            <div className="flex items-center gap-1.5 text-xs">
+                              <span className="font-bold text-emerald-950">
+                                当前选中：{activeLayer.name}
+                              </span>
+                              <span className="text-[10px] text-neutral-400 font-mono">
+                                (基准高 {zoneHeight}px)
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() => handleOpenBgModal(isTop ? 'bubbleTop' : 'bubbleBottom')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 active:scale-95 text-purple-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-purple-300 shadow-2xs"
+                                title="自动或手动调整背景透明容差、吸管取色抠图、橡皮擦去杂边"
+                              >
+                                <Wand2 className="w-3.5 h-3.5 text-purple-700" />
+                                <span>背景透明处理 / 手动抠图</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleAutoTightTrim(isTop ? 'bubbleTop' : 'bubbleBottom')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 active:scale-95 text-emerald-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-emerald-300 shadow-2xs"
+                                title="一键切除四周透明留白与底部阴影，让挂件严丝合缝贴合边缘"
+                              >
+                                <Scissors className="w-3 h-3 text-emerald-700" />
+                                <span>智能紧凑去留白</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleOpenCropModal(isTop ? 'bubbleTop' : 'bubbleBottom')}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-xs rounded-xl cursor-pointer transition-all border border-neutral-200 shadow-2xs"
+                                title="打开精确可视化裁剪工具"
+                              >
+                                <Crop className="w-3 h-3 text-neutral-600" />
+                                <span>手动裁剪</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => updateLayer({ flipX: !activeLayer.flipX })}
+                                className={`inline-flex items-center gap-1 px-2.5 py-1.5 font-bold text-xs rounded-xl cursor-pointer transition-all border shadow-2xs ${
+                                  activeLayer.flipX
+                                    ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                    : 'bg-white hover:bg-neutral-50 text-neutral-700 border-neutral-200'
+                                }`}
+                                title="水平镜像翻转当前图层（适合对称摆放两只小熊）"
+                              >
+                                <FlipHorizontal className="w-3 h-3" />
+                                <span>镜像翻转</span>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Dual-Column Immediate Controls for Selected Layer (Top and Bottom 100% Aligned) */}
+                      {activeLayer && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {/* Left Column: 尺寸与缩放 + 留白裁切 */}
+                          <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/80 space-y-2.5 text-xs">
+                            <div className="flex items-center justify-between font-bold text-neutral-700 border-b border-neutral-200/60 pb-1.5">
+                              <span className="flex items-center gap-1 text-emerald-900">
+                                <span>{isTop ? '小熊缩放大小' : '垂饰缩放大小'} ({activeLayer.name})</span>
+                              </span>
+                              <span className="font-mono text-emerald-800 font-black">
+                                {Math.round(activeLayer.scale * 100)}% (高 {Math.round(zoneHeight * activeLayer.scale)}px)
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const val = Math.max(0.2, Math.round((activeLayer.scale - 0.05) * 100) / 100);
+                                  updateLayer({ scale: val });
+                                }}
+                                className="w-7 h-7 rounded-xl bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
+                                title="缩小 5%"
+                              >
+                                -
+                              </button>
+                              <input
+                                type="range"
+                                min="0.2"
+                                max="2.5"
+                                step="0.02"
+                                value={activeLayer.scale}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateLayer({ scale: val });
+                                }}
+                                className="flex-1 accent-emerald-600 cursor-pointer"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const val = Math.min(2.5, Math.round((activeLayer.scale + 0.05) * 100) / 100);
+                                  updateLayer({ scale: val });
+                                }}
+                                className="w-7 h-7 rounded-xl bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
+                                title="放大 5%"
+                              >
+                                +
+                              </button>
+                            </div>
+
+                            {/* Scale Presets */}
+                            <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                              {[
+                                { val: 0.8, label: `80% (${Math.round(zoneHeight * 0.8)}px)` },
+                                { val: 0.98, label: `⭐ 真机最佳 (${Math.round(zoneHeight * 0.98)}px)` },
+                                { val: 1.0, label: `100% 满格 (${zoneHeight}px)` },
+                                { val: 1.15, label: `115% (${Math.round(zoneHeight * 1.15)}px)` },
+                              ].map((item) => (
+                                <button
+                                  key={item.val}
+                                  type="button"
+                                  onClick={() => updateLayer({ scale: item.val })}
+                                  className={`text-[10px] px-2 py-1 rounded-lg border font-bold transition-all cursor-pointer ${
+                                    Math.abs(activeLayer.scale - item.val) < 0.02
+                                      ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
+                                      : item.val === 0.98
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold shadow-2xs'
+                                      : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
+                                  }`}
+                                >
+                                  {item.label}
+                                </button>
+                              ))}
+                            </div>
+
+                            {/* 边缘留白/阴影切除 */}
+                            <div className="pt-2 border-t border-neutral-200/60 space-y-1.5">
+                              <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600">
+                                <span className="flex items-center gap-1">
+                                  <Scissors className="w-3 h-3 text-emerald-600" />
+                                  <span>{isTop ? '去除底部空隙与阴影' : '去除边缘空隙与阴影'}</span>
+                                </span>
+                                <span className="font-mono text-neutral-700 font-bold">
+                                  {activeLayer.bottomCropPercent > 0 ? `裁 ${Math.round(activeLayer.bottomCropPercent * 100)}%` : '0% (原图)'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="0.8"
+                                  step="0.05"
+                                  value={activeLayer.bottomCropPercent}
+                                  onChange={(e) => {
+                                    const val = parseFloat(e.target.value);
+                                    updateLayer({ bottomCropPercent: val });
+                                  }}
+                                  className="flex-1 accent-emerald-600 cursor-pointer"
+                                />
+                                <div className="flex items-center gap-1 shrink-0">
+                                  {[0, 0.15, 0.3, 0.45].map((cp) => (
+                                    <button
+                                      key={cp}
+                                      type="button"
+                                      onClick={() => updateLayer({ bottomCropPercent: cp })}
+                                      className={`text-[9px] px-1.5 py-0.5 rounded border font-mono cursor-pointer ${
+                                        Math.abs(activeLayer.bottomCropPercent - cp) < 0.03
+                                          ? 'bg-emerald-600 text-white border-emerald-600'
+                                          : 'bg-white text-neutral-600 border-neutral-200'
+                                      }`}
+                                    >
+                                      {cp === 0 ? '原图' : `${Math.round(cp * 100)}%`}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Right Column: 位置与对齐 (X / Y 轴) */}
+                          <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/80 space-y-2.5 text-xs">
+                            {/* 1. 垂直 Y 轴 */}
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between font-bold text-neutral-700 border-b border-neutral-200/60 pb-1.5">
+                                <span className="text-neutral-700">
+                                  {isTop ? '垂直 Y 轴 (卡片顶沿 Y=96)' : '垂直 Y 轴 (卡片底沿 Y=312)'}
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
+                                    (isTop && anchorY + activeLayer.offsetY > 96) || (!isTop && anchorY + activeLayer.offsetY < 312)
+                                      ? 'bg-red-100 text-red-900 border-red-300'
+                                      : 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                                  }`}>
+                                    {isTop ? `下沿: ${96 + activeLayer.offsetY}px` : `上沿: ${312 + activeLayer.offsetY}px`}{' '}
+                                    {(isTop && anchorY + activeLayer.offsetY > 96) || (!isTop && anchorY + activeLayer.offsetY < 312) ? '🚨' : '✓'}
+                                  </span>
+                                  {activeLayer.offsetY !== 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLayer({ offsetY: 0 })}
+                                      className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-white px-1.5 py-0.5 rounded border border-emerald-300 cursor-pointer font-bold"
+                                    >
+                                      贴齐{anchorY}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-neutral-400 font-mono w-7 text-right">-80</span>
+                                <input
+                                  type="range"
+                                  min="-80"
+                                  max="80"
+                                  step="1"
+                                  value={activeLayer.offsetY}
+                                  onChange={(e) => {
+                                    const val = parseInt(e.target.value);
+                                    updateLayer({ offsetY: val });
+                                  }}
+                                  className="flex-1 accent-emerald-600 cursor-pointer"
+                                />
+                                <span className="text-[10px] text-neutral-400 font-mono w-7">+80</span>
+                              </div>
+                            </div>
+
+                            {/* 2. 水平 X 轴微调 */}
+                            <div className="space-y-1.5 pt-2 border-t border-neutral-200/60">
+                              <div className="flex items-center justify-between font-bold text-neutral-700">
+                                <span className="text-neutral-700">水平 X 轴平移</span>
+                                <div className="flex items-center gap-1">
+                                  <span className="font-mono text-xs font-bold text-neutral-800 bg-white px-2 py-0.5 rounded border border-neutral-200 shadow-2xs">
+                                    {activeLayer.offsetX === 0 ? '0px (居中)' : activeLayer.offsetX > 0 ? `+${activeLayer.offsetX}px` : `${activeLayer.offsetX}px`}
+                                  </span>
+                                  {activeLayer.offsetX !== 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => updateLayer({ offsetX: 0 })}
+                                      className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-white px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
+                                    >
+                                      居中
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-neutral-400 font-mono w-7 text-right">-180</span>
+                                <input
+                                  type="range"
+                                  min="-180"
+                                  max="180"
+                                  step="1"
+                                  value={activeLayer.offsetX}
+                                  onChange={(e) => {
+                                    const val = parseInt(e.target.value);
+                                    updateLayer({ offsetX: val });
+                                  }}
+                                  className="flex-1 accent-emerald-600 cursor-pointer"
+                                />
+                                <span className="text-[10px] text-neutral-400 font-mono w-7">+180</span>
+                              </div>
+                              {/* Quick Left / Center / Right Position Presets */}
+                              <div className="flex items-center gap-1.5 pt-1">
+                                {[
+                                  { label: '居左 (-75px)', val: -75 },
+                                  { label: '正中 (0px)', val: 0 },
+                                  { label: '居右 (+75px)', val: 75 },
+                                ].map((pos) => (
+                                  <button
+                                    key={pos.val}
+                                    type="button"
+                                    onClick={() => updateLayer({ offsetX: pos.val })}
+                                    className={`flex-1 py-1 rounded-lg border text-[10px] font-bold cursor-pointer transition-all ${
+                                      activeLayer.offsetX === pos.val
+                                        ? 'bg-emerald-600 text-white border-emerald-600'
+                                        : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
+                                    }`}
+                                  >
+                                    {pos.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* ===================================================================== */}
+                {/* SUB-PANEL 3: 整张单图 & 中间一刀切模式 (Full Image & Mid-Split)         */}
+                {/* ===================================================================== */}
+                {bubbleUploadMode === 'full' && (
+                  <div className="p-4 rounded-2xl bg-neutral-50/90 border border-neutral-200 space-y-4 text-xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-200/70 pb-3">
+                      <div>
+                        <h4 className="font-bold text-xs text-neutral-900 flex items-center gap-2">
+                          <span>✂️ 整张单图上传 & 从中间截开上下独立对位 (480 × 384)</span>
+                          <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-mono font-bold">
+                            单图切分神器
+                          </span>
+                        </h4>
+                        <p className="text-[11px] text-neutral-400 mt-0.5">
+                          上传任意一整张角色或装饰图，开启「从中间截开」即可将上半部分自动贴齐顶部 0~96px、下半部分自动贴齐底部 312~384px，中间气泡区严格留空，调好后导出一张合规 PNG！
+                        </p>
                       </div>
 
                       <div className="flex items-center gap-2 flex-wrap shrink-0">
-                        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                        <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
                           <Upload className="w-3.5 h-3.5" />
-                          <span>{bubbleTopImg ? '替换小熊' : '上传小熊图片'}</span>
+                          <span>{bubbleFullImg ? '替换整张单图' : '上传整张单图'}</span>
                           <input
                             type="file"
                             accept="image/png,image/jpeg,image/webp"
                             className="hidden"
                             onChange={(e) => {
                               if (e.target.files && e.target.files[0]) {
-                                handleUploadBubbleSlot(e.target.files[0], 'top');
+                                handleUploadBubbleSlot(e.target.files[0], 'full');
                               }
                             }}
                           />
                         </label>
 
-                        {bubbleTopImg && (
+                        {bubbleFullImg && (
                           <>
                             <button
                               type="button"
-                              onClick={() => handleAutoTightTrim('bubbleTop')}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-100 hover:bg-emerald-200 active:scale-95 text-emerald-900 font-bold text-xs rounded-xl cursor-pointer transition-all border border-emerald-300 shadow-2xs"
-                              title="一键识别小熊身体轮廓，切除所有外围空白与阴影，让小熊贴齐 96px 顶沿"
+                              onClick={() => handleOpenBgModal('bubbleFull')}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-900 font-bold text-xs rounded-xl border border-purple-300 cursor-pointer transition-all"
                             >
-                              <Scissors className="w-3 h-3 text-emerald-700" />
-                              <span>智能紧凑去留白</span>
+                              <Wand2 className="w-3.5 h-3.5 text-purple-700" />
+                              <span>背景透明处理</span>
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleOpenCropModal('bubbleTop')}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-xs rounded-xl cursor-pointer transition-all border border-neutral-200 shadow-2xs"
-                              title="打开精确可视化裁剪工具"
+                              onClick={handleSplitFullImageToLayers}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-xs rounded-xl border border-amber-300 cursor-pointer transition-all"
+                              title="按当前截断比例将单图真正切分为「顶部小熊图层」和「底部垂饰图层」进入多图模式精修"
                             >
-                              <Crop className="w-3 h-3 text-neutral-600" />
-                              <span>手动裁剪</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleClearBubbleSlot('top')}
-                              className="text-[10px] text-red-500 hover:text-red-700 font-medium cursor-pointer px-1 py-1"
-                            >
-                              清除
+                              <Scissors className="w-3.5 h-3.5 text-amber-700" />
+                              <span>切分转入上下图层</span>
                             </button>
                           </>
                         )}
                       </div>
                     </div>
 
-                    {/* Dual-Column Immediate Controls (尺寸缩放 vs 位置对齐) */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {/* Left Column: 尺寸与缩放 */}
-                      <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/80 space-y-2.5 text-xs">
-                        <div className="flex items-center justify-between font-bold text-neutral-700 border-b border-neutral-200/60 pb-1.5">
-                          <span className="flex items-center gap-1 text-emerald-900">
-                            <span>小熊缩放大小</span>
-                          </span>
-                          <span className="font-mono text-emerald-800 font-black">
-                            {Math.round(bubbleTopScale * 100)}% (高 {Math.round(96 * bubbleTopScale)}px)
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.max(0.2, Math.round((bubbleTopScale - 0.05) * 100) / 100);
-                              setBubbleTopScale(val);
-                              renderCompositeBubble({ topScale: val });
-                            }}
-                            className="w-7 h-7 rounded-xl bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                            title="缩小 5%"
-                          >
-                            -
-                          </button>
-                          <input
-                            type="range"
-                            min="0.2"
-                            max="2.5"
-                            step="0.05"
-                            value={bubbleTopScale}
-                            onChange={(e) => {
-                              const val = parseFloat(e.target.value);
-                              setBubbleTopScale(val);
-                              renderCompositeBubble({ topScale: val });
-                            }}
-                            className="flex-1 accent-emerald-600 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const val = Math.min(2.5, Math.round((bubbleTopScale + 0.05) * 100) / 100);
-                              setBubbleTopScale(val);
-                              renderCompositeBubble({ topScale: val });
-                            }}
-                            className="w-7 h-7 rounded-xl bg-white border border-neutral-200 hover:bg-neutral-50 active:scale-95 flex items-center justify-center font-black text-xs text-neutral-700 shrink-0 cursor-pointer shadow-2xs"
-                            title="放大 5%"
-                          >
-                            +
-                          </button>
-                        </div>
-
-                        {/* Scale Presets */}
-                        <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-                          {[
-                            { val: 0.8, label: '80% (77px)' },
-                            { val: 0.9, label: '90% (86px)' },
-                            { val: 1.0, label: '⭐ 100% 满格 (96px 官方标准)' },
-                            { val: 1.1, label: '110% (106px)' },
-                          ].map((item) => (
-                            <button
-                              key={item.val}
-                              type="button"
-                              onClick={() => {
-                                setBubbleTopScale(item.val);
-                                renderCompositeBubble({ topScale: item.val });
-                              }}
-                              className={`text-[10px] px-2 py-1 rounded-lg border font-bold transition-all cursor-pointer ${
-                                Math.abs(bubbleTopScale - item.val) < 0.03
-                                  ? 'bg-emerald-600 text-white border-emerald-600 ring-1 ring-emerald-400'
-                                  : item.val === 1.0
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100 font-extrabold shadow-2xs'
-                                  : 'bg-white text-neutral-600 border-neutral-200 hover:bg-neutral-50'
-                              }`}
-                            >
-                              {item.label}
-                            </button>
-                          ))}
-                        </div>
-
-                        {/* 底部留白/阴影切除 (解决悬空与缝隙) */}
-                        <div className="pt-2 border-t border-neutral-200/60 space-y-1.5">
-                          <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600">
-                            <span className="flex items-center gap-1">
-                              <Scissors className="w-3 h-3 text-emerald-600" />
-                              <span>去除底部空隙与阴影</span>
-                            </span>
-                            <span className="font-mono text-neutral-700 font-bold">
-                              {bubbleTopBottomCrop > 0 ? `裁 ${Math.round(bubbleTopBottomCrop * 100)}%` : '0% (原图)'}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
+                    {bubbleFullImg ? (
+                      <div className="space-y-3">
+                        {/* Toggle Mid-Split Mode */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-white border border-neutral-200">
+                          <div className="flex items-center gap-2.5">
                             <input
-                              type="range"
-                              min="0"
-                              max="0.8"
-                              step="0.05"
-                              value={bubbleTopBottomCrop}
+                              type="checkbox"
+                              id="toggle-full-split"
+                              checked={bubbleFullSplitConfig.enabled}
                               onChange={(e) => {
-                                const val = parseFloat(e.target.value);
-                                setBubbleTopBottomCrop(val);
-                                renderCompositeBubble({ topBottomCrop: val });
+                                const next = { ...bubbleFullSplitConfig, enabled: e.target.checked };
+                                setBubbleFullSplitConfig(next);
+                                renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
                               }}
-                              className="flex-1 accent-emerald-600 cursor-pointer"
+                              className="w-4 h-4 accent-emerald-600 rounded cursor-pointer"
                             />
-                            <div className="flex items-center gap-1 shrink-0">
-                              {[0, 0.15, 0.3, 0.45].map((cp) => (
-                                <button
-                                  key={cp}
-                                  type="button"
-                                  onClick={() => {
-                                    setBubbleTopBottomCrop(cp);
-                                    renderCompositeBubble({ topBottomCrop: cp });
-                                  }}
-                                  className={`text-[9px] px-1.5 py-0.5 rounded border font-mono ${
-                                    Math.abs(bubbleTopBottomCrop - cp) < 0.03
-                                      ? 'bg-emerald-600 text-white border-emerald-600'
-                                      : 'bg-white text-neutral-600 border-neutral-200'
-                                  }`}
-                                >
-                                  {cp === 0 ? '原图' : `${Math.round(cp * 100)}%`}
-                                </button>
-                              ))}
-                            </div>
+                            <label htmlFor="toggle-full-split" className="font-bold text-neutral-900 cursor-pointer">
+                              启用「从中间横向截开」上下分置模式（上半截归入 0~96px 顶部区，下半截归入 312~384px 底部区）
+                            </label>
                           </div>
-                        </div>
-                      </div>
 
-                      {/* Right Column: 位置与对齐 (X / Y 轴) */}
-                      <div className="p-3 bg-neutral-50/80 rounded-2xl border border-neutral-200/80 space-y-2.5 text-xs">
-                        {/* 1. 垂直 Y 轴 (卡片顶沿 Y=96) */}
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between font-bold text-neutral-700 border-b border-neutral-200/60 pb-1.5">
-                            <span className="text-neutral-700">垂直 Y 轴 (卡片顶沿 Y=96)</span>
-                            <div className="flex items-center gap-1">
-                              <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
-                                (96 + bubbleTopOffsetY) > 96
-                                  ? 'bg-red-100 text-red-900 border-red-300'
-                                  : 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                              }`}>
-                                下沿: {96 + bubbleTopOffsetY}px {(96 + bubbleTopOffsetY) > 96 ? '🚨' : '✓'}
-                              </span>
-                              {bubbleTopOffsetY !== 0 && (
-                                <button
-                                  type="button"
-                                  onClick={handleSnapTo96}
-                                  className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-white px-1.5 py-0.5 rounded border border-emerald-300 cursor-pointer font-bold"
-                                  title="贴齐 96px"
-                                >
-                                  贴齐96
-                                </button>
-                              )}
+                          {bubbleFullSplitConfig.enabled && (
+                            <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-lg shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setBubbleActivePart('top')}
+                                className={`px-2.5 py-1 rounded-md text-[11px] font-bold cursor-pointer transition-all ${
+                                  bubbleActivePart === 'top' ? 'bg-emerald-600 text-white' : 'text-neutral-600'
+                                }`}
+                              >
+                                调上半截 (顶部)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setBubbleActivePart('bottom')}
+                                className={`px-2.5 py-1 rounded-md text-[11px] font-bold cursor-pointer transition-all ${
+                                  bubbleActivePart === 'bottom' ? 'bg-emerald-600 text-white' : 'text-neutral-600'
+                                }`}
+                              >
+                                调下半截 (底部)
+                              </button>
                             </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-neutral-400 font-mono w-7 text-right">-80</span>
-                            <input
-                              type="range"
-                              min="-80"
-                              max="80"
-                              step="1"
-                              value={bubbleTopOffsetY}
-                              onChange={(e) => {
-                                const val = parseInt(e.target.value);
-                                setBubbleTopOffsetY(val);
-                                renderCompositeBubble({ topOffY: val });
-                              }}
-                              className="flex-1 accent-emerald-600 cursor-pointer"
-                            />
-                            <span className="text-[10px] text-neutral-400 font-mono w-7">+80</span>
-                          </div>
+                          )}
                         </div>
 
-                        {/* 2. 水平 X 轴微调 */}
-                        <div className="space-y-1.5 pt-2 border-t border-neutral-200/60">
-                          <div className="flex items-center justify-between font-bold text-neutral-700">
-                            <span className="text-neutral-700">水平 X 轴平移</span>
-                            <div className="flex items-center gap-1">
-                              <span className="font-mono text-xs font-bold text-neutral-800 bg-white px-2 py-0.5 rounded border border-neutral-200 shadow-2xs">
-                                {bubbleTopOffsetX === 0 ? '0px (居中)' : bubbleTopOffsetX > 0 ? `+${bubbleTopOffsetX}px` : `${bubbleTopOffsetX}px`}
-                              </span>
-                              {bubbleTopOffsetX !== 0 && (
+                        {bubbleFullSplitConfig.enabled && (
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            {/* Column 1: 截开位置比例 */}
+                            <div className="p-3 bg-white rounded-xl border border-neutral-200 space-y-2">
+                              <div className="flex items-center justify-between font-bold text-neutral-800">
+                                <span>✂️ 原图中间截开位置</span>
+                                <span className="font-mono text-emerald-700">{Math.round(bubbleFullSplitConfig.splitRatio * 100)}%</span>
+                              </div>
+                              <input
+                                type="range"
+                                min="0.15"
+                                max="0.85"
+                                step="0.01"
+                                value={bubbleFullSplitConfig.splitRatio}
+                                onChange={(e) => {
+                                  const next = { ...bubbleFullSplitConfig, splitRatio: parseFloat(e.target.value) };
+                                  setBubbleFullSplitConfig(next);
+                                  renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                }}
+                                className="w-full accent-emerald-600 cursor-pointer"
+                              />
+                              <div className="flex items-center gap-1">
+                                {[
+                                  { label: '上40%/下60%', val: 0.4 },
+                                  { label: '正中对半 50%', val: 0.5 },
+                                  { label: '上60%/下40%', val: 0.6 },
+                                ].map((preset) => (
+                                  <button
+                                    key={preset.val}
+                                    type="button"
+                                    onClick={() => {
+                                      const next = { ...bubbleFullSplitConfig, splitRatio: preset.val };
+                                      setBubbleFullSplitConfig(next);
+                                      renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                    }}
+                                    className={`flex-1 py-1 rounded border text-[10px] font-bold cursor-pointer ${
+                                      Math.abs(bubbleFullSplitConfig.splitRatio - preset.val) < 0.02
+                                        ? 'bg-emerald-600 text-white border-emerald-600'
+                                        : 'bg-neutral-50 text-neutral-600 border-neutral-200'
+                                    }`}
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Column 2: 上半截独立微调 */}
+                            <div className="p-3 bg-white rounded-xl border border-neutral-200 space-y-2">
+                              <div className="flex items-center justify-between font-bold text-emerald-900">
+                                <span>🔼 上半截 (顶部 0~96px)</span>
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    setBubbleTopOffsetX(0);
-                                    renderCompositeBubble({ topOffX: 0 });
+                                    const next = { ...bubbleFullSplitConfig, topScale: 1.0, topOffsetX: 0, topOffsetY: 0 };
+                                    setBubbleFullSplitConfig(next);
+                                    renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
                                   }}
-                                  className="text-[10px] text-emerald-700 hover:text-emerald-900 bg-white px-1.5 py-0.5 rounded border border-emerald-200 cursor-pointer font-medium"
-                                  title="恢复居中"
+                                  className="text-[10px] text-emerald-700 underline cursor-pointer"
                                 >
-                                  居中
+                                  重置贴齐96
                                 </button>
-                              )}
+                              </div>
+                              <div className="space-y-1">
+                                <div className="flex justify-between text-[11px]">
+                                  <span>缩放: {Math.round(bubbleFullSplitConfig.topScale * 100)}%</span>
+                                  <span>下沿Y: {96 + bubbleFullSplitConfig.topOffsetY}px</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="0.3"
+                                  max="2.2"
+                                  step="0.05"
+                                  value={bubbleFullSplitConfig.topScale}
+                                  onChange={(e) => {
+                                    const next = { ...bubbleFullSplitConfig, topScale: parseFloat(e.target.value) };
+                                    setBubbleFullSplitConfig(next);
+                                    renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                  }}
+                                  className="w-full accent-emerald-600 cursor-pointer"
+                                />
+                                <input
+                                  type="range"
+                                  min="-60"
+                                  max="60"
+                                  step="1"
+                                  value={bubbleFullSplitConfig.topOffsetY}
+                                  onChange={(e) => {
+                                    const next = { ...bubbleFullSplitConfig, topOffsetY: parseInt(e.target.value) };
+                                    setBubbleFullSplitConfig(next);
+                                    renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                  }}
+                                  className="w-full accent-emerald-600 cursor-pointer"
+                                />
+                              </div>
+                            </div>
+
+                            {/* Column 3: 下半截独立微调 */}
+                            <div className="p-3 bg-white rounded-xl border border-neutral-200 space-y-2">
+                              <div className="flex items-center justify-between font-bold text-emerald-900">
+                                <span>🔽 下半截 (底部 312~384px)</span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = { ...bubbleFullSplitConfig, bottomScale: 1.0, bottomOffsetX: 0, bottomOffsetY: 0 };
+                                    setBubbleFullSplitConfig(next);
+                                    renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                  }}
+                                  className="text-[10px] text-emerald-700 underline cursor-pointer"
+                                >
+                                  重置贴齐312
+                                </button>
+                              </div>
+                              <div className="space-y-1">
+                                <div className="flex justify-between text-[11px]">
+                                  <span>缩放: {Math.round(bubbleFullSplitConfig.bottomScale * 100)}%</span>
+                                  <span>上沿Y: {312 + bubbleFullSplitConfig.bottomOffsetY}px</span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min="0.3"
+                                  max="2.2"
+                                  step="0.05"
+                                  value={bubbleFullSplitConfig.bottomScale}
+                                  onChange={(e) => {
+                                    const next = { ...bubbleFullSplitConfig, bottomScale: parseFloat(e.target.value) };
+                                    setBubbleFullSplitConfig(next);
+                                    renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                  }}
+                                  className="w-full accent-emerald-600 cursor-pointer"
+                                />
+                                <input
+                                  type="range"
+                                  min="-60"
+                                  max="60"
+                                  step="1"
+                                  value={bubbleFullSplitConfig.bottomOffsetY}
+                                  onChange={(e) => {
+                                    const next = { ...bubbleFullSplitConfig, bottomOffsetY: parseInt(e.target.value) };
+                                    setBubbleFullSplitConfig(next);
+                                    renderCompositeBubble({ mode: 'full', fullSplitConfig: next });
+                                  }}
+                                  className="w-full accent-emerald-600 cursor-pointer"
+                                />
+                              </div>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] text-neutral-400 font-mono w-7 text-right">-150</span>
-                            <input
-                              type="range"
-                              min="-150"
-                              max="150"
-                              step="1"
-                              value={bubbleTopOffsetX}
-                              onChange={(e) => {
-                                const val = parseInt(e.target.value);
-                                setBubbleTopOffsetX(val);
-                                renderCompositeBubble({ topOffX: val });
-                              }}
-                              className="flex-1 accent-emerald-600 cursor-pointer"
-                            />
-                            <span className="text-[10px] text-neutral-400 font-mono w-7">+150</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Sub-Panel 2: 底部垂饰挂件 (Optional Secondary Part) */}
-                {bubbleUploadMode === 'split' && bubbleActivePart === 'bottom' && (
-                  <div className="p-4 rounded-2xl bg-neutral-50/80 border border-neutral-200 space-y-3 text-xs">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-emerald-700 text-white text-[11px] font-bold flex items-center justify-center">
-                          B
-                        </span>
-                        <div>
-                          <div className="font-bold text-xs text-neutral-900">底部垂饰挂件 (选填 · 312~384px)</div>
-                          <div className="text-[10px] text-neutral-400">悬挂在红包卡片下方的流苏、金币或小吊坠，基准高 72px</div>
-                        </div>
-                      </div>
-                      {bubbleBottomImg && (
-                        <button
-                          type="button"
-                          onClick={() => handleClearBubbleSlot('bottom')}
-                          className="text-[10px] text-red-500 hover:text-red-700 font-medium cursor-pointer"
-                        >
-                          清除
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
-                        {bubbleBottomImg ? (
-                          <img src={bubbleBottomImg.src} alt="底部挂件" className="w-full h-full object-contain p-1" />
-                        ) : (
-                          <Sparkles className="w-5 h-5 text-neutral-300" />
                         )}
                       </div>
-                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>{bubbleBottomImg ? '替换底部图片' : '上传底部垂饰图片'}</span>
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp"
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files && e.target.files[0]) {
-                              handleUploadBubbleSlot(e.target.files[0], 'bottom');
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-
-                    {bubbleBottomImg && (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-neutral-200/80">
-                        <div className="space-y-1">
-                          <div className="flex items-center justify-between font-bold text-neutral-700">
-                            <span>缩放大小</span>
-                            <span className="font-mono text-emerald-800">{Math.round(bubbleBottomScale * 100)}%</span>
-                          </div>
-                          <input
-                            type="range"
-                            min="0.2"
-                            max="2.0"
-                            step="0.05"
-                            value={bubbleBottomScale}
-                            onChange={(e) => {
-                              const val = parseFloat(e.target.value);
-                              setBubbleBottomScale(val);
-                              renderCompositeBubble({ bottomScale: val });
-                            }}
-                            className="w-full accent-emerald-600 cursor-pointer"
-                          />
-                        </div>
-
-                        <div className="space-y-1">
-                          <div className="flex items-center justify-between font-bold text-neutral-700">
-                            <span>垂直位置 Y 轴</span>
-                            <span className="font-mono text-neutral-700">{312 + bubbleBottomOffsetY}px</span>
-                          </div>
-                          <input
-                            type="range"
-                            min="-50"
-                            max="50"
-                            step="1"
-                            value={bubbleBottomOffsetY}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value);
-                              setBubbleBottomOffsetY(val);
-                              renderCompositeBubble({ bottomOffY: val });
-                            }}
-                            className="w-full accent-emerald-600 cursor-pointer"
-                          />
-                        </div>
+                    ) : (
+                      <div className="py-6 text-center text-neutral-400 border border-dashed border-neutral-200 rounded-xl bg-white/60">
+                        请点击右上角「上传整张单图」，上传后即可从中间一刀截开并分别对位顶部与底部区域
                       </div>
                     )}
                   </div>
                 )}
 
-                {/* Sub-Panel 3: 整张单图模式 */}
-                {bubbleUploadMode === 'full' && (
-                  <div className="p-4 rounded-2xl bg-neutral-50/80 border border-neutral-200 space-y-3 text-xs">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h4 className="font-bold text-xs text-neutral-900">完整透明气泡挂件图片 (480 × 384)</h4>
-                        <p className="text-[11px] text-neutral-400 mt-0.5">上传已在设计软件中排版好的完整透明背景 PNG</p>
-                      </div>
-                      <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>{bubbleFullImg ? '替换整张挂件' : '上传完整挂件图片'}</span>
-                        <input
-                          type="file"
-                          accept="image/png,image/jpeg,image/webp"
-                          className="hidden"
-                          onChange={(e) => {
-                            if (e.target.files && e.target.files[0]) {
-                              handleUploadBubbleSlot(e.target.files[0], 'full');
-                            }
-                          }}
-                        />
-                      </label>
-                    </div>
-                  </div>
-                )}
-
-                {/* 5. Dedicated Synthesis Download Box */}
+                {/* 5. Dedicated Synthesis Download Box (Strict 480×384 PNG <= 300KB) */}
                 {bubbleResult && (
                   <div className="p-4 rounded-2xl bg-emerald-50/60 border border-emerald-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
                     <div className="space-y-0.5">
-                      <div className="flex items-center gap-2">
-                        <span className="font-extrabold text-emerald-950 text-sm">微信标准气泡挂件已就绪</span>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-extrabold text-emerald-950 text-sm">微信标准气泡挂件已合成就绪</span>
                         <span className="font-mono text-[10px] bg-white px-2 py-0.5 rounded-full border border-emerald-300 text-emerald-800 font-bold">
-                          480 × 384 PNG · {Math.round(bubbleResult.size / 1024)} KB ✓
+                          {bubbleResult.width} × {bubbleResult.height} PNG · {(bubbleResult.size / 1024).toFixed(1)} KB (&le; 300KB ✓)
+                        </span>
+                        <span className="font-mono text-[10px] bg-emerald-700 text-white px-2 py-0.5 rounded-full font-bold">
+                          所见即所得 1:1 导出
                         </span>
                       </div>
                       <p className="text-[11px] text-emerald-900/70">
-                        100% 遵循微信官方气泡挂件 480×384 规范，小熊下沿严格对齐 ≤ 96px，可直接上传平台机审。
+                        已将全部顶部小熊与底部垂饰合成为一张严格 480×384 像素透明 PNG，与右侧 375pt 手机真机视窗 100% 同步一致，可直接上传微信红包封面平台通过审核。
                       </p>
                     </div>
                     <button
@@ -3595,7 +4705,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       className="px-5 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm shrink-0 active:scale-95"
                     >
                       <Download className="w-4 h-4 text-emerald-300" />
-                      <span>下载 480×384 规范图</span>
+                      <span>下载 480×384 合成图</span>
                     </button>
                   </div>
                 )}
@@ -3746,10 +4856,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         </div>
 
         {/* Right Column: Live WeChat Red Packet Cover (5 Cols) */}
-        {/* Strictly on the RED PACKET COVER (红包封面), NO extraneous chat dialogue! */}
         <div className="lg:col-span-5 xl:col-span-5 space-y-4">
           <div className="sticky top-20 flex flex-col items-center">
-            {/* Live WeChat Realistic Phone Mockup */}
+            {/* Live WeChat Realistic Phone Mockup (Strict 375px 1:1 Mobile Viewport) */}
             <RedPacketPreviewMockup
               coverResult={coverResult}
               coverVideoUrl={videoUrl}
@@ -3759,10 +4868,11 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               senderName={senderName}
               blessingText={blessingText}
               activeTab={activeTab}
+              showSafeAreaGuide={showGuides}
             />
 
             {/* Quick Sender Name & Blessing Input for Live Customization */}
-            <div className="w-full max-w-[340px] mt-3 p-3.5 bg-white/90 backdrop-blur-xl rounded-2xl border border-neutral-200/80 shadow-2xs text-xs space-y-2">
+            <div className="w-full max-w-[375px] mt-3 p-3.5 bg-white/90 backdrop-blur-xl rounded-2xl border border-neutral-200/80 shadow-2xs text-xs space-y-2">
               <span className="font-bold text-neutral-700 block text-[11px]">
                 定制微信红包文字预览：
               </span>
@@ -3797,7 +4907,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       {isProcessing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-md animate-in fade-in">
           <div className="bg-white/95 rounded-3xl p-6 sm:p-7 max-w-md w-full shadow-[0_24px_60px_rgba(0,0,0,0.2)] border border-neutral-100 flex flex-col items-center text-center space-y-4">
-            {/* Animated Icon Ring */}
             <div className="relative w-16 h-16 flex items-center justify-center">
               <div className="w-16 h-16 rounded-full border-4 border-amber-200 border-t-amber-500 animate-spin" />
               <Sparkles className="w-7 h-7 text-amber-500 absolute" />
@@ -3812,7 +4921,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               </p>
             </div>
 
-            {/* Progress Bar with real percentage */}
             <div className="w-full space-y-1.5">
               <div className="flex justify-between items-center text-xs font-mono">
                 <span className="text-neutral-400">处理进度</span>
@@ -3826,7 +4934,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               </div>
             </div>
 
-            {/* Material generation progress pills */}
             <div className="grid grid-cols-2 gap-2 w-full text-[11px] pt-1">
               <div className={`p-2 rounded-xl border flex items-center gap-1.5 ${
                 processingProgress >= 30 ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-bold' : 'bg-neutral-50 border-neutral-200 text-neutral-400'
@@ -3856,6 +4963,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
           </div>
         </div>
       )}
+
       {/* ======================================================== */}
       {/* Interactive Crop & Blank-Removal Modal                   */}
       {/* ======================================================== */}
@@ -3872,7 +4980,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     裁剪与去除底部空白/阴影
                   </h3>
                   <p className="text-[11px] text-neutral-500">
-                    切除底部留白后，小熊可立刻放大并完美紧贴 96px 红包顶沿！
+                    切除底部留白后，小熊/垂饰可立刻放大并完美紧贴红包卡片边缘！
                   </p>
                 </div>
               </div>
@@ -3885,7 +4993,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               </button>
             </div>
 
-            {/* Visual Crop Preview Canvas */}
             <div className="relative w-full h-[240px] bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-neutral-50 rounded-2xl border border-neutral-200/90 flex items-center justify-center overflow-hidden p-2">
               <div className="relative max-w-full max-h-full flex items-center justify-center">
                 <img
@@ -3894,7 +5001,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                   className="max-h-[220px] max-w-[280px] object-contain select-none pointer-events-none"
                 />
 
-                {/* Bottom crop mask overlay */}
                 {cropModalBottomCrop > 0 && (
                   <div
                     className="absolute inset-x-0 bottom-0 bg-red-500/35 border-t-2 border-dashed border-red-500 flex items-center justify-center pointer-events-none transition-all"
@@ -3908,7 +5014,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               </div>
             </div>
 
-            {/* Preset Action Buttons */}
             <div className="space-y-2">
               <span className="text-[11px] font-bold text-neutral-700 block">
                 快捷裁剪预设：
@@ -3936,7 +5041,6 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               </div>
             </div>
 
-            {/* Custom Bottom Crop Slider */}
             <div className="space-y-1.5 p-3 rounded-2xl bg-neutral-50 border border-neutral-200/80">
               <div className="flex items-center justify-between text-xs font-bold text-neutral-700">
                 <span>自定义底部裁剪比例</span>
@@ -3953,12 +5057,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 onChange={(e) => setCropModalBottomCrop(parseFloat(e.target.value))}
                 className="w-full accent-emerald-600 cursor-pointer"
               />
-              <p className="text-[10px] text-neutral-400">
-                向右拖动滑块切除底部多余留白，直到小熊双爪刚好位于裁剪虚线边缘。
-              </p>
             </div>
 
-            {/* Modal Actions */}
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-neutral-100">
               <button
                 type="button"
@@ -3975,6 +5075,256 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 <Scissors className="w-3.5 h-3.5 text-amber-300" />
                 <span>确认并应用裁剪</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* Interactive Background Transparency & Manual Brush Modal */}
+      {/* ======================================================== */}
+      {bgModalOpen && bgModalRawImg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-md animate-in fade-in">
+          <div className="bg-white rounded-3xl p-5 sm:p-6 max-w-2xl w-full shadow-2xl border border-neutral-200 flex flex-col space-y-4 max-h-[92vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-neutral-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-purple-100 text-purple-800 flex items-center justify-center">
+                  <Wand2 className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-sm text-neutral-900">
+                    图片背景透明化处理 & 手动精修工作台
+                  </h3>
+                  <p className="text-[11px] text-neutral-500">
+                    支持智能去底、容差调节、吸管点击取色抠图，以及使用橡皮擦/恢复画笔在画布上手动涂抹微调。
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBgModalOpen(false)}
+                className="w-8 h-8 rounded-full bg-neutral-100 hover:bg-neutral-200 text-neutral-600 flex items-center justify-center cursor-pointer text-xs font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Interactive Canvas + Brush Toolbar */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                {/* Interactive Brush Mode Selector */}
+                <div className="flex items-center gap-1 bg-neutral-100 p-1 rounded-xl border border-neutral-200 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setBgModalTool('eyedropper')}
+                    className={`px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all ${
+                      bgModalTool === 'eyedropper'
+                        ? 'bg-purple-600 text-white shadow-2xs'
+                        : 'text-neutral-700 hover:bg-white/60'
+                    }`}
+                    title="点击图片上的背景颜色即可将该颜色抠除为透明"
+                  >
+                    <Pipette className="w-3.5 h-3.5" />
+                    <span>吸管点选背景色</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBgModalTool('eraser')}
+                    className={`px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all ${
+                      bgModalTool === 'eraser'
+                        ? 'bg-red-600 text-white shadow-2xs'
+                        : 'text-neutral-700 hover:bg-white/60'
+                    }`}
+                    title="按住鼠标涂抹即可手动擦除残留背景杂边"
+                  >
+                    <Eraser className="w-3.5 h-3.5" />
+                    <span>橡皮擦去杂边</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBgModalTool('restore')}
+                    className={`px-2.5 py-1.5 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all ${
+                      bgModalTool === 'restore'
+                        ? 'bg-emerald-600 text-white shadow-2xs'
+                        : 'text-neutral-700 hover:bg-white/60'
+                    }`}
+                    title="按住鼠标涂抹即可恢复被误删的小熊身体细节"
+                  >
+                    <Paintbrush className="w-3.5 h-3.5" />
+                    <span>画笔恢复原图</span>
+                  </button>
+                </div>
+
+                {/* Brush Size Slider */}
+                {(bgModalTool === 'eraser' || bgModalTool === 'restore') && (
+                  <div className="flex items-center gap-2 text-xs bg-neutral-50 px-3 py-1.5 rounded-xl border border-neutral-200">
+                    <span className="font-bold text-neutral-600">笔刷大小: {bgBrushSize}px</span>
+                    <input
+                      type="range"
+                      min="4"
+                      max="60"
+                      step="2"
+                      value={bgBrushSize}
+                      onChange={(e) => setBgBrushSize(parseInt(e.target.value))}
+                      className="w-24 accent-purple-600 cursor-pointer"
+                    />
+                  </div>
+                )}
+
+                {/* Deep AI Matting Trigger */}
+                <button
+                  type="button"
+                  onClick={handleRunAiBackgroundRemovalInModal}
+                  disabled={bgAiLoading}
+                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>{bgAiLoading ? 'AI 深度抠图中...' : 'AI 神经网络一键重抠'}</span>
+                </button>
+              </div>
+
+              {/* Checkerboard Interactive Canvas */}
+              <div className="relative w-full h-[270px] bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:10px_10px] bg-neutral-100 rounded-2xl border border-neutral-300 flex items-center justify-center overflow-hidden p-2 select-none touch-none">
+                <canvas
+                  ref={bgModalCanvasRef}
+                  onPointerDown={handleBgModalCanvasPointerDown}
+                  onPointerMove={handleBgModalCanvasPointerMove}
+                  onPointerUp={handleBgModalCanvasPointerUp}
+                  className={`max-h-[250px] max-w-full object-contain shadow-sm rounded-lg ${
+                    bgModalTool === 'eyedropper'
+                      ? 'cursor-crosshair'
+                      : 'cursor-cell'
+                  }`}
+                />
+                <div className="absolute bottom-2 left-2.5 bg-neutral-900/80 text-white text-[10px] px-2.5 py-1 rounded-full backdrop-blur-xs pointer-events-none font-mono">
+                  {bgModalTool === 'eyedropper'
+                    ? '💡 点击画面中需要变透明的背景区域即可吸取颜色并自动抠除'
+                    : bgModalTool === 'eraser'
+                    ? '💡 在画面上按住拖动即可手动擦除背景残留'
+                    : '💡 在画面上按住拖动即可恢复原图细节'}
+                </div>
+              </div>
+            </div>
+
+            {/* Algorithm Mode Selection & Parameter Sliders */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              {/* Left: Mode Selection */}
+              <div className="p-3 rounded-2xl bg-neutral-50 border border-neutral-200/80 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-neutral-800">1. 自动去背景模式：</span>
+                  <span className="flex items-center gap-1 text-[10px] text-neutral-500 font-mono">
+                    <span>检测底色:</span>
+                    <span
+                      className="w-3 h-3 rounded-full border border-neutral-300 inline-block"
+                      style={{ backgroundColor: bgModalConfig.customColor || bgModalDetectedHex }}
+                    />
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {[
+                    { mode: 'flood' as const, label: '🌊 四角边缘漫水去底 (推荐)' },
+                    { mode: 'global' as const, label: '🌐 全图同色镂空去底' },
+                    { mode: 'white' as const, label: '⬜ 专去纯白/浅灰背景' },
+                    { mode: 'black' as const, label: '⬛ 专去纯黑/深暗背景' },
+                    { mode: 'custom' as const, label: '🎨 吸管指定颜色去底' },
+                    { mode: 'keep' as const, label: '🛡️ 保持原图不自动抠除' },
+                  ].map((item) => (
+                    <button
+                      key={item.mode}
+                      type="button"
+                      onClick={() => setBgModalConfig((prev) => ({ ...prev, mode: item.mode }))}
+                      className={`py-1.5 px-2 rounded-xl font-bold text-[11px] text-left border transition-all cursor-pointer truncate ${
+                        bgModalConfig.mode === item.mode
+                          ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
+                          : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-100'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Right: Sliders (Tolerance, Feather, Defringe) */}
+              <div className="p-3 rounded-2xl bg-neutral-50 border border-neutral-200/80 space-y-2.5">
+                <div className="space-y-1">
+                  <div className="flex justify-between font-bold text-neutral-700">
+                    <span>色彩容差 (Tolerance)</span>
+                    <span className="font-mono text-purple-800">{bgModalConfig.tolerance}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="2"
+                    max="120"
+                    step="1"
+                    value={bgModalConfig.tolerance}
+                    onChange={(e) => setBgModalConfig((prev) => ({ ...prev, tolerance: parseInt(e.target.value) }))}
+                    className="w-full accent-purple-600 cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between font-bold text-neutral-700">
+                    <span>边缘柔和羽化 (Feather)</span>
+                    <span className="font-mono text-purple-800">{bgModalConfig.feather}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="10"
+                    step="1"
+                    value={bgModalConfig.feather}
+                    onChange={(e) => setBgModalConfig((prev) => ({ ...prev, feather: parseInt(e.target.value) }))}
+                    className="w-full accent-purple-600 cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between font-bold text-neutral-700">
+                    <span>收缩去白边/黑边 (Defringe)</span>
+                    <span className="font-mono text-purple-800">{bgModalConfig.defringe}px</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="3"
+                    step="1"
+                    value={bgModalConfig.defringe}
+                    onChange={(e) => setBgModalConfig((prev) => ({ ...prev, defringe: parseInt(e.target.value) }))}
+                    className="w-full accent-purple-600 cursor-pointer"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Actions */}
+            <div className="flex items-center justify-between pt-2 border-t border-neutral-100">
+              <button
+                type="button"
+                onClick={() => setBgModalConfig({ ...DEFAULT_BG_CONFIG, mode: 'flood' })}
+                className="px-3 py-2 rounded-xl text-xs font-bold text-neutral-600 hover:bg-neutral-100 transition-all cursor-pointer"
+              >
+                恢复默认参数
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setBgModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-neutral-600 hover:bg-neutral-100 transition-all cursor-pointer"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplyBgModal}
+                  className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-purple-600 hover:bg-purple-700 active:scale-95 shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-300" />
+                  <span>确认应用透明效果</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

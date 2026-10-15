@@ -119,8 +119,8 @@ export const WECHAT_EDITABLE_ZONES = {
     // 底部垂饰区：Y: 312 ~ 384 (高 72px，底部流苏/饰品挂件)
     topZone: {
       name: '上侧挂件主展示区 (0~96px，头顶Y=0，下沿Y=96，高96px)',
-      minX: 20,
-      maxX: 460,
+      minX: 0,
+      maxX: 480,
       minY: 0,
       maxY: 96,
       defaultAnchorX: 240,
@@ -133,8 +133,8 @@ export const WECHAT_EDITABLE_ZONES = {
     },
     bottomZone: {
       name: '下侧底部可编辑区 (312~384px，底部垂饰/流苏)',
-      minX: 40,
-      maxX: 440,
+      minX: 0,
+      maxX: 480,
       minY: 312,
       maxY: 384,
       defaultAnchorX: 240,
@@ -144,6 +144,31 @@ export const WECHAT_EDITABLE_ZONES = {
     defaultAnchorY: 96,
   },
 };
+
+/**
+ * 微信红包气泡挂件 (480 × 384 px) 标准几何坐标与真机 1:1 映射常量
+ * 真机映射系数 K = 230 / 384 ≈ 0.6 (以移动端 375pt 屏幕宽度、红包卡片净宽 230pt 为基准)
+ */
+export const BUBBLE_PENDANT_COORDS = {
+  canvas: { width: 480, height: 384 },
+  topZone: { x: 0, y: 0, w: 480, h: 96 }, // 顶部挂件区 (核心有效区)
+  cardBody: { x: 48, y: 96, w: 384, h: 216 }, // 红包卡片主体
+  textForbiddenZone: { x: 68, y: 120, w: 272, h: 100 }, // 文字及交互禁入区 (禁止挂件主体遮挡)
+  bottomZone: { x: 0, y: 312, w: 480, h: 72 }, // 底部装饰区
+  mobileMapping: {
+    screenWidthPt: 375,
+    cardWidthPt: 230,
+    cardHeightPt: 129.6, // 216 * 0.6
+    scaleFactor: 0.6, // 230 / 384 ≈ 0.6
+    overlayWidthPt: 288, // 480 * 0.6
+    overlayHeightPt: 230.4, // 384 * 0.6
+    overlayLeftOffsetPt: -28.8, // -48 * 0.6 (卡片左边距精确对齐)
+    overlayTopOffsetPt: -57.6, // -96 * 0.6 (卡片顶边距精确对齐)
+  },
+  warningMinOpaqueWidthPx: 160, // 小于 160px 时触发真机偏小视觉预警
+  recommendedMinWidthPx: 190,
+  recommendedMaxWidthPx: 230,
+} as const;
 
 export interface MaterialResult {
   blob: Blob;
@@ -157,6 +182,12 @@ export interface MaterialResult {
   anchorX?: number;
   anchorY?: number;
   inEditableZone?: boolean;
+  opaqueWidth?: number;
+  opaqueHeight?: number;
+  topOpaqueWidth?: number;
+  topOpaqueHeight?: number;
+  bottomOpaqueWidth?: number;
+  bottomOpaqueHeight?: number;
 }
 
 export interface VideoAnalysisResult {
@@ -289,21 +320,59 @@ export async function compressPngStrictUnderLimit(
   return blob || rawBlob || new Blob([], { type: 'image/png' });
 }
 
+export interface ManualTransparencyConfig {
+  mode: 'auto' | 'flood' | 'global' | 'white' | 'black' | 'custom' | 'keep';
+  tolerance: number; // 0 ~ 150
+  feather: number; // 0 ~ 12
+  defringe: number; // 0 ~ 3 (收缩去白边/杂边像素)
+  customColor?: string; // hex e.g. '#ffffff'
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const clean = hex.replace('#', '').trim();
+  if (clean.length === 3) {
+    return {
+      r: parseInt(clean[0] + clean[0], 16) || 255,
+      g: parseInt(clean[1] + clean[1], 16) || 255,
+      b: parseInt(clean[2] + clean[2], 16) || 255,
+    };
+  }
+  return {
+    r: parseInt(clean.substring(0, 2), 16) || 255,
+    g: parseInt(clean.substring(2, 4), 16) || 255,
+    b: parseInt(clean.substring(4, 6), 16) || 255,
+  };
+}
+
 /**
- * Ensures an image or canvas has transparent background pixels required by WeChat Red Packet.
- * If less than 15% of pixels are transparent, automatically detects corner background color
- * (white, black, or solid color) and keys it out to pure alpha=0.
+ * Automated + Manual Background Transparency Processor
+ * Supports:
+ * - 'auto': Checks if already transparent; if not, performs edge-connected flood fill + smooth feathering so subject interior (e.g. white eyes/belly) stays intact!
+ * - 'flood': Edge-connected flood-fill background removal using corner/border colors or customColor
+ * - 'global': Global color distance keying across the entire image
+ * - 'white': Removes white/light background (#ffffff)
+ * - 'black': Removes black/dark background (#000000)
+ * - 'custom': Removes user-picked color (via eyedropper)
+ * - 'keep': Keeps original alpha channel untouched
  */
-export async function ensureTransparentSubject(
+export async function processImageTransparency(
   source: HTMLImageElement | HTMLCanvasElement,
-  tolerance = 32
-): Promise<HTMLCanvasElement> {
+  config: Partial<ManualTransparencyConfig> = {}
+): Promise<{ canvas: HTMLCanvasElement; img: HTMLImageElement; detectedBgHex: string; hadTransparency: boolean }> {
+  const {
+    mode = 'auto',
+    tolerance = 38,
+    feather = 10,
+    defringe = 1,
+    customColor,
+  } = config;
+
   const w = 'naturalWidth' in source ? (source.naturalWidth || source.width) : source.width;
   const h = 'naturalHeight' in source ? (source.naturalHeight || source.height) : source.height;
 
   const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
+  canvas.width = Math.max(1, w);
+  canvas.height = Math.max(1, h);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(source, 0, 0, w, h);
 
@@ -317,52 +386,211 @@ export async function ensureTransparentSubject(
       transparentPixels++;
     }
   }
+  const hadTransparency = transparentPixels / totalPixels >= 0.12;
 
-  // If already contains sufficient transparent areas (>= 12%), it's already a good transparent cutout!
-  if (transparentPixels / totalPixels >= 0.12) {
-    return canvas;
-  }
-
-  // If mostly opaque, detect corner colors to remove solid background (e.g. white or gray or dark)
-  // Samples top-left, top-right, bottom-left, bottom-right
-  const corners = [
+  // Sample border/corner colors to detect background color
+  const samplePoints = [
     [0, 0],
     [w - 1, 0],
     [0, h - 1],
     [w - 1, h - 1],
+    [Math.floor(w / 2), 0],
+    [0, Math.floor(h / 2)],
+    [w - 1, Math.floor(h / 2)],
   ];
-
   let bgR = 0;
   let bgG = 0;
   let bgB = 0;
-
-  for (const [cx, cy] of corners) {
+  let validSamples = 0;
+  for (const [cx, cy] of samplePoints) {
     const idx = (cy * w + cx) * 4;
-    bgR += d[idx];
-    bgG += d[idx + 1];
-    bgB += d[idx + 2];
+    if (d[idx + 3] >= 30) {
+      bgR += d[idx];
+      bgG += d[idx + 1];
+      bgB += d[idx + 2];
+      validSamples++;
+    }
   }
-  bgR = Math.round(bgR / corners.length);
-  bgG = Math.round(bgG / corners.length);
-  bgB = Math.round(bgB / corners.length);
+  if (validSamples > 0) {
+    bgR = Math.round(bgR / validSamples);
+    bgG = Math.round(bgG / validSamples);
+    bgB = Math.round(bgB / validSamples);
+  } else {
+    bgR = 255;
+    bgG = 255;
+    bgB = 255;
+  }
 
-  // Key out matching background colors with smooth alpha falloff
-  for (let i = 0; i < d.length; i += 4) {
-    const r = d[i];
-    const g = d[i + 1];
-    const b = d[i + 2];
+  const toHex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0');
+  const detectedBgHex = `#${toHex(bgR)}${toHex(bgG)}${toHex(bgB)}`;
 
-    const dist = Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
-    if (dist <= tolerance) {
-      d[i + 3] = 0; // completely transparent
-    } else if (dist <= tolerance + 18) {
-      const alphaFactor = (dist - tolerance) / 18;
-      d[i + 3] = Math.round(d[i + 3] * alphaFactor);
+  if (mode === 'keep' || (mode === 'auto' && hadTransparency)) {
+    const img = await loadImageElement(canvas.toDataURL('image/png'));
+    return { canvas, img, detectedBgHex, hadTransparency };
+  }
+
+  let targetR = bgR;
+  let targetG = bgG;
+  let targetB = bgB;
+
+  if (mode === 'white') {
+    targetR = 252;
+    targetG = 252;
+    targetB = 252;
+  } else if (mode === 'black') {
+    targetR = 8;
+    targetG = 8;
+    targetB = 8;
+  } else if (customColor) {
+    const rgb = hexToRgb(customColor);
+    targetR = rgb.r;
+    targetG = rgb.g;
+    targetB = rgb.b;
+  }
+
+  const useFloodFill = mode === 'auto' || mode === 'flood';
+  const featherRange = Math.max(2, feather * 3);
+
+  if (useFloodFill) {
+    // Edge-connected BFS flood fill so interior white/colored parts of the bear are preserved!
+    const visited = new Uint8Array(totalPixels);
+    const queue = new Int32Array(totalPixels);
+    let head = 0;
+    let tail = 0;
+
+    const pushIfBg = (x: number, y: number) => {
+      if (x < 0 || x >= w || y < 0 || y >= h) return;
+      const pIdx = y * w + x;
+      if (visited[pIdx]) return;
+      const idx = pIdx * 4;
+      const a = d[idx + 3];
+      if (a < 20) {
+        visited[pIdx] = 1;
+        queue[tail++] = pIdx;
+        return;
+      }
+      const dist = Math.sqrt((d[idx] - targetR) ** 2 + (d[idx + 1] - targetG) ** 2 + (d[idx + 2] - targetB) ** 2);
+      if (dist <= tolerance) {
+        visited[pIdx] = 1;
+        d[idx + 3] = 0;
+        queue[tail++] = pIdx;
+      }
+    };
+
+    // Seed all 4 borders
+    for (let x = 0; x < w; x++) {
+      pushIfBg(x, 0);
+      pushIfBg(x, h - 1);
+    }
+    for (let y = 1; y < h - 1; y++) {
+      pushIfBg(0, y);
+      pushIfBg(w - 1, y);
+    }
+
+    while (head < tail) {
+      const curr = queue[head++];
+      const cx = curr % w;
+      const cy = (curr - cx) / w;
+      pushIfBg(cx - 1, cy);
+      pushIfBg(cx + 1, cy);
+      pushIfBg(cx, cy - 1);
+      pushIfBg(cx, cy + 1);
+    }
+
+    // Soft feathering along the boundary of flood-filled background pixels
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const pIdx = y * w + x;
+        if (visited[pIdx]) continue;
+        // Check if adjacent to a transparent/visited background pixel
+        const hasBgNeighbor =
+          visited[pIdx - 1] ||
+          visited[pIdx + 1] ||
+          visited[pIdx - w] ||
+          visited[pIdx + w] ||
+          visited[pIdx - w - 1] ||
+          visited[pIdx - w + 1] ||
+          visited[pIdx + w - 1] ||
+          visited[pIdx + w + 1];
+
+        if (hasBgNeighbor) {
+          const idx = pIdx * 4;
+          const dist = Math.sqrt((d[idx] - targetR) ** 2 + (d[idx + 1] - targetG) ** 2 + (d[idx + 2] - targetB) ** 2);
+          if (dist <= tolerance + featherRange) {
+            const factor = Math.max(0, Math.min(1, (dist - tolerance) / featherRange));
+            d[idx + 3] = Math.round(d[idx + 3] * factor);
+          }
+        }
+      }
+    }
+  } else {
+    // Global color distance keying across all pixels
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i];
+      const g = d[i + 1];
+      const b = d[i + 2];
+      const dist = Math.sqrt((r - targetR) ** 2 + (g - targetG) ** 2 + (b - targetB) ** 2);
+      if (dist <= tolerance) {
+        d[i + 3] = 0;
+      } else if (dist <= tolerance + featherRange) {
+        const alphaFactor = (dist - tolerance) / featherRange;
+        d[i + 3] = Math.round(d[i + 3] * alphaFactor);
+      }
+    }
+  }
+
+  // Optional edge defringe / choke to remove stubborn 1~3px white/gray anti-alias halo
+  if (defringe > 0) {
+    for (let pass = 0; pass < defringe; pass++) {
+      const alphaCopy = new Uint8ClampedArray(totalPixels);
+      for (let p = 0; p < totalPixels; p++) {
+        alphaCopy[p] = d[p * 4 + 3];
+      }
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const p = y * w + x;
+          if (alphaCopy[p] === 0) continue;
+          const minNeighborAlpha = Math.min(
+            alphaCopy[p - 1],
+            alphaCopy[p + 1],
+            alphaCopy[p - w],
+            alphaCopy[p + w]
+          );
+          if (minNeighborAlpha < 30) {
+            const idx = p * 4;
+            const dist = Math.sqrt((d[idx] - targetR) ** 2 + (d[idx + 1] - targetG) ** 2 + (d[idx + 2] - targetB) ** 2);
+            if (dist < tolerance + 55) {
+              d[idx + 3] = Math.round(alphaCopy[p] * 0.25);
+            } else {
+              d[idx + 3] = Math.round(alphaCopy[p] * 0.75);
+            }
+          }
+        }
+      }
     }
   }
 
   ctx.putImageData(imgData, 0, 0);
-  return canvas;
+  const img = await loadImageElement(canvas.toDataURL('image/png'));
+  return { canvas, img, detectedBgHex, hadTransparency };
+}
+
+/**
+ * Ensures an image or canvas has transparent background pixels required by WeChat Red Packet.
+ * If less than 12% of pixels are transparent, automatically detects corner background color
+ * and removes it cleanly.
+ */
+export async function ensureTransparentSubject(
+  source: HTMLImageElement | HTMLCanvasElement,
+  tolerance = 36
+): Promise<HTMLCanvasElement> {
+  const res = await processImageTransparency(source, {
+    mode: 'auto',
+    tolerance,
+    feather: 8,
+    defringe: 1,
+  });
+  return res.canvas;
 }
 
 /**
@@ -641,12 +869,66 @@ export async function trimImageTransparentBorders(
 }
 
 export interface PendantPartConfig {
+  id?: string;
+  name?: string;
   source: HTMLImageElement | HTMLCanvasElement;
   scale?: number; // 0.2 ~ 5.0 (支持放大至 500%)
   offsetX?: number;
   offsetY?: number;
+  flipX?: boolean; // 水平镜像翻转
   bottomCropPercent?: number; // 0% ~ 80% 去除底部留白
-  baseHeight?: number; // 基准高度 (气泡大比例默认为 192px)
+  topCropPercent?: number; // 0% ~ 80% 去除顶部留白
+  baseHeight?: number; // 基准高度 (气泡顶部默认为 96px，底部默认为 72px)
+}
+
+export interface FullBubbleSplitConfig {
+  enabled: boolean; // 是否开启从中间截开分别定位
+  splitRatio: number; // 0.15 ~ 0.85, 默认 0.5 (正中间截开)
+  topScale: number;
+  topOffsetX: number;
+  topOffsetY: number;
+  bottomScale: number;
+  bottomOffsetX: number;
+  bottomOffsetY: number;
+  fullScale?: number;
+  fullOffsetX?: number;
+  fullOffsetY?: number;
+}
+
+/**
+ * 将单张完整图片从指定比例 (默认 50% 正中间) 截开为独立的「顶部趴贴图」与「底部垂饰图」
+ */
+export async function splitSingleImageIntoTopAndBottom(
+  source: HTMLImageElement | HTMLCanvasElement,
+  splitRatio: number = 0.5
+): Promise<{ topImg: HTMLImageElement; bottomImg: HTMLImageElement }> {
+  const transCanvas = await ensureTransparentSubject(source);
+  const w = transCanvas.width;
+  const h = transCanvas.height;
+  const clampedRatio = Math.max(0.1, Math.min(0.9, splitRatio));
+  const splitY = Math.max(1, Math.min(h - 1, Math.round(h * clampedRatio)));
+
+  // Upper half
+  const topCanvas = document.createElement('canvas');
+  topCanvas.width = w;
+  topCanvas.height = splitY;
+  const topCtx = topCanvas.getContext('2d')!;
+  topCtx.drawImage(transCanvas, 0, 0, w, splitY, 0, 0, w, splitY);
+  const trimmedTop = await trimImageTransparentBorders(topCanvas, { alphaThreshold: 20, padding: 0 });
+
+  // Lower half
+  const bottomH = h - splitY;
+  const bottomCanvas = document.createElement('canvas');
+  bottomCanvas.width = w;
+  bottomCanvas.height = bottomH;
+  const bottomCtx = bottomCanvas.getContext('2d')!;
+  bottomCtx.drawImage(transCanvas, 0, splitY, w, bottomH, 0, 0, w, bottomH);
+  const trimmedBottom = await trimImageTransparentBorders(bottomCanvas, { alphaThreshold: 20, padding: 0 });
+
+  return {
+    topImg: trimmedTop.img,
+    bottomImg: trimmedBottom.img,
+  };
 }
 
 /**
@@ -812,20 +1094,29 @@ export async function createCoverPendant(
 }
 
 /**
- * Generate 气泡挂件 (480 x 384) supporting separate Top + Bottom uploads or Full artwork
- * Automatically merges top and bottom into ONE compliant transparent PNG for WeChat!
+ * Generate 气泡挂件 (480 x 384) supporting:
+ * - Multiple Top Layers (顶部趴贴小熊多图叠加)
+ * - Multiple Bottom Layers (底部垂饰多图叠加)
+ * - Single Full Image with optional Mid-Split (整张单图直接渲染或从中间截开分别定位)
+ * Automatically merges all layers into ONE compliant 480×384 transparent PNG for WeChat!
  */
 export async function createCompositeBubblePendant(options: {
   topPart?: PendantPartConfig | null;
   bottomPart?: PendantPartConfig | null;
+  topLayers?: PendantPartConfig[];
+  bottomLayers?: PendantPartConfig[];
   fullSource?: (HTMLImageElement | HTMLCanvasElement) | null;
+  fullSplitConfig?: FullBubbleSplitConfig;
   addGlow?: boolean;
 }): Promise<MaterialResult> {
   const {
     topPart,
     bottomPart,
+    topLayers,
+    bottomLayers,
     fullSource,
-    addGlow = true,
+    fullSplitConfig,
+    addGlow = false,
   } = options;
 
   const targetW = WECHAT_RED_PACKET_SPECS.bubble.width; // 480
@@ -834,40 +1125,72 @@ export async function createCompositeBubblePendant(options: {
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
   canvas.height = targetH;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.clearRect(0, 0, targetW, targetH);
 
-  // 1. Full artwork mode
+  // Build effective layer lists
+  const effectiveTopLayers: PendantPartConfig[] = topLayers && topLayers.length > 0
+    ? topLayers
+    : (topPart && topPart.source ? [topPart] : []);
+
+  const effectiveBottomLayers: PendantPartConfig[] = bottomLayers && bottomLayers.length > 0
+    ? bottomLayers
+    : (bottomPart && bottomPart.source ? [bottomPart] : []);
+
+  // 1. Full artwork mode (with optional mid-split!)
   if (fullSource) {
     const trans = await ensureTransparentSubject(fullSource);
-    ctx.drawImage(trans, 0, 0, targetW, targetH);
+    if (fullSplitConfig && fullSplitConfig.enabled) {
+      const { topImg, bottomImg } = await splitSingleImageIntoTopAndBottom(trans, fullSplitConfig.splitRatio);
+      effectiveTopLayers.push({
+        source: topImg,
+        scale: fullSplitConfig.topScale ?? 1.0,
+        offsetX: fullSplitConfig.topOffsetX ?? 0,
+        offsetY: fullSplitConfig.topOffsetY ?? 0,
+        baseHeight: 96,
+      });
+      effectiveBottomLayers.push({
+        source: bottomImg,
+        scale: fullSplitConfig.bottomScale ?? 1.0,
+        offsetX: fullSplitConfig.bottomOffsetX ?? 0,
+        offsetY: fullSplitConfig.bottomOffsetY ?? 0,
+        baseHeight: 72,
+      });
+    } else {
+      const fScale = fullSplitConfig?.fullScale ?? 1.0;
+      const fOffX = fullSplitConfig?.fullOffsetX ?? 0;
+      const fOffY = fullSplitConfig?.fullOffsetY ?? 0;
+      const drawW = Math.round(targetW * fScale);
+      const drawH = Math.round(targetH * fScale);
+      const drawX = Math.round((targetW - drawW) / 2 + fOffX);
+      const drawY = Math.round((targetH - drawH) / 2 + fOffY);
+      ctx.drawImage(trans, drawX, drawY, drawW, drawH);
+    }
   }
 
-  // 2. Top Part (顶部挂件核心展示区: Y: 0 ~ 96, 微信官方平台规范)
-  // 微信官方平台严格规范：小熊/挂件下沿严禁超过 96 像素，否则上传机审会被驳回
-  // 基准高度 96px：100% 满幅缩放下，小熊头顶 Y=0，下边缘 Y=96，总高刚好 96px，零截断且完全合规！
+  // 2. Render all Top Layers (顶部挂件核心展示区: Y: 0 ~ 96, 微信官方平台规范)
   let topDrawY = 0;
   let topDrawH = 0;
-  if (topPart && topPart.source) {
-    const trans = await ensureTransparentSubject(topPart.source);
-    // Auto-trim transparent borders and apply bottom crop if user requested
+  for (const layer of effectiveTopLayers) {
+    if (!layer || !layer.source) continue;
+    const trans = await ensureTransparentSubject(layer.source);
     const trimmed = await trimImageTransparentBorders(trans, {
       alphaThreshold: 24,
-      bottomCropPercent: topPart.bottomCropPercent || 0,
+      bottomCropPercent: layer.bottomCropPercent || 0,
+      topCropPercent: layer.topCropPercent || 0,
       padding: 0,
     });
     const bbox = trimmed.bbox;
     const drawSource = trimmed.canvas;
 
     if (bbox.hasContent) {
-      // 官方气泡挂件基准高度: 96px (100% 缩放下，头顶至下沿刚好 96px)
-      const baseH = topPart.baseHeight || 96;
-      const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
+      const baseH = layer.baseHeight || 96;
+      const effectiveScale = Math.min(Math.max(layer.scale ?? 1.0, 0.2), 5.0);
       topDrawH = Math.round(baseH * effectiveScale);
       const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
-      const topDrawX = Math.round((targetW - topDrawW) / 2 + (topPart.offsetX || 0));
+      const topDrawX = Math.round((targetW - topDrawW) / 2 + (layer.offsetX || 0));
       // 基准：爪子/下沿紧贴气泡卡片上沿（Y = 96px），配合 offsetY 微调
-      const anchorBaseY = topPart.offsetY !== undefined ? (96 + topPart.offsetY) : 96;
+      const anchorBaseY = layer.offsetY !== undefined ? (96 + layer.offsetY) : 96;
       topDrawY = Math.round(anchorBaseY - topDrawH);
 
       ctx.save();
@@ -880,24 +1203,42 @@ export async function createCompositeBubblePendant(options: {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
       }
-      ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+
+      if (layer.flipX) {
+        ctx.translate(topDrawX + topDrawW / 2, topDrawY + topDrawH / 2);
+        ctx.scale(-1, 1);
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, -topDrawW / 2, -topDrawH / 2, topDrawW, topDrawH);
+      } else {
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+      }
       ctx.restore();
     }
   }
 
-  // 3. Bottom Part (底部可选垂饰挂件区, Y: 312 ~ 384, 高 72px)
+  // 3. Render all Bottom Layers (底部垂饰挂件区, Y: 312 ~ 384, 高 72px)
+  // 与顶部趴贴小熊功能 100% 完全对齐：支持多图、自动紧凑去留白、顶/底裁剪、水平镜像翻转、以 Y=312 为贴合基准！
   let bottomDrawY = 312;
   let bottomDrawH = 0;
-  if (bottomPart && bottomPart.source) {
-    const trans = await ensureTransparentSubject(bottomPart.source);
-    const bbox = getAlphaBoundingBox(trans);
+  for (const layer of effectiveBottomLayers) {
+    if (!layer || !layer.source) continue;
+    const trans = await ensureTransparentSubject(layer.source);
+    const trimmed = await trimImageTransparentBorders(trans, {
+      alphaThreshold: 24,
+      bottomCropPercent: layer.bottomCropPercent || 0,
+      topCropPercent: layer.topCropPercent || 0,
+      padding: 0,
+    });
+    const bbox = trimmed.bbox;
+    const drawSource = trimmed.canvas;
+
     if (bbox.hasContent) {
-      const baseH = 64;
-      const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 3.0);
+      const baseH = layer.baseHeight || 72;
+      const effectiveScale = Math.min(Math.max(layer.scale ?? 1.0, 0.2), 5.0);
       bottomDrawH = Math.round(baseH * effectiveScale);
       const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
-      const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (bottomPart.offsetX || 0));
-      bottomDrawY = Math.round(312 + (bottomPart.offsetY || 0));
+      const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (layer.offsetX || 0));
+      // 基准：垂饰顶沿紧贴气泡卡片底边（Y = 312px），配合 offsetY 微调
+      bottomDrawY = Math.round(312 + (layer.offsetY || 0));
 
       ctx.save();
       // 严格限制在底部垂饰区 (Y: 312 ~ 384px)
@@ -909,7 +1250,14 @@ export async function createCompositeBubblePendant(options: {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
       }
-      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, bottomDrawX, bottomDrawY, bottomDrawW, bottomDrawH);
+
+      if (layer.flipX) {
+        ctx.translate(bottomDrawX + bottomDrawW / 2, bottomDrawY + bottomDrawH / 2);
+        ctx.scale(-1, 1);
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, -bottomDrawW / 2, -bottomDrawH / 2, bottomDrawW, bottomDrawH);
+      } else {
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, bottomDrawX, bottomDrawY, bottomDrawW, bottomDrawH);
+      }
       ctx.restore();
     }
   }
@@ -919,6 +1267,40 @@ export async function createCompositeBubblePendant(options: {
   // 任何透明度 alpha > 0 的像素点都会触发微信“进入不可编辑区”驳回。
   // 此处做强制彻底清空，完全消除所有微小抗锯齿、阴影晕染或坐标浮点溢出，确保 100% 机审合规通过！
   ctx.clearRect(0, 96, targetW, 216);
+
+  // 实时计算挂件不透明区域的外接矩形宽度（用于真机视觉饱满度预警）
+  const fullData = ctx.getImageData(0, 0, targetW, targetH).data;
+  let topMinX = targetW, topMaxX = -1, topMinY = 96, topMaxY = -1;
+  for (let y = 0; y < 96; y++) {
+    for (let x = 0; x < targetW; x++) {
+      if (fullData[(y * targetW + x) * 4 + 3] > 20) {
+        if (x < topMinX) topMinX = x;
+        if (x > topMaxX) topMaxX = x;
+        if (y < topMinY) topMinY = y;
+        if (y > topMaxY) topMaxY = y;
+      }
+    }
+  }
+  const topOpaqueWidth = topMaxX >= topMinX ? (topMaxX - topMinX + 1) : 0;
+  const topOpaqueHeight = topMaxY >= topMinY ? (topMaxY - topMinY + 1) : 0;
+
+  let botMinX = targetW, botMaxX = -1, botMinY = targetH, botMaxY = -1;
+  for (let y = 312; y < targetH; y++) {
+    for (let x = 0; x < targetW; x++) {
+      if (fullData[(y * targetW + x) * 4 + 3] > 20) {
+        if (x < botMinX) botMinX = x;
+        if (x > botMaxX) botMaxX = x;
+        if (y < botMinY) botMinY = y;
+        if (y > botMaxY) botMaxY = y;
+      }
+    }
+  }
+  const bottomOpaqueWidth = botMaxX >= botMinX ? (botMaxX - botMinX + 1) : 0;
+  const bottomOpaqueHeight = botMaxY >= botMinY ? (botMaxY - botMinY + 1) : 0;
+
+  const overallBbox = getAlphaBoundingBox(canvas, 20);
+  const opaqueWidth = overallBbox.hasContent ? overallBbox.width : 0;
+  const opaqueHeight = overallBbox.hasContent ? overallBbox.height : 0;
 
   const blob = await compressPngStrictUnderLimit(canvas, 280 * 1024);
   const url = URL.createObjectURL(blob);
@@ -933,8 +1315,14 @@ export async function createCompositeBubblePendant(options: {
     isCompliant: blob.size <= 300 * 1024,
     warnings: blob.size > 300 * 1024 ? ['气泡挂件体积超出 300KB'] : [],
     anchorX: 240,
-    anchorY: topPart ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
+    anchorY: effectiveTopLayers.length > 0 ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
     inEditableZone: true,
+    opaqueWidth,
+    opaqueHeight,
+    topOpaqueWidth,
+    topOpaqueHeight,
+    bottomOpaqueWidth,
+    bottomOpaqueHeight,
   };
 }
 
@@ -952,7 +1340,7 @@ export async function createBubblePendant(
     addGlow?: boolean;
   } = {}
 ): Promise<MaterialResult> {
-  const { placement = 'top', scale = 1.0, offsetX = 0, offsetY = 0, addGlow = true } = options;
+  const { placement = 'top', scale = 1.0, offsetX = 0, offsetY = 0, addGlow = false } = options;
 
   if (placement === 'bottom') {
     return createCompositeBubblePendant({

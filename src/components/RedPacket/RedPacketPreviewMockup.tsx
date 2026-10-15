@@ -128,12 +128,12 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
         </button>
       </div>
 
-      {/* Apple Natural Titanium / Silver Phone Chassis */}
-      <div className="relative w-[320px] sm:w-[340px] h-[640px] p-[2.5px] rounded-[50px] bg-gradient-to-b from-[#e5e5ea] via-[#d1d1d6] to-[#e5e5ea] shadow-[0_20px_50px_-10px_rgba(0,0,0,0.12)] border border-[#d1d1d6]">
-        {/* Inner Clean Light Bezel (Apple Minimalist White/Silver rim, NO dark pitch-black!) */}
-        <div className="w-full h-full p-[6px] rounded-[47px] bg-[#f5f5f7] border border-white flex flex-col">
-          {/* True Mobile Display Screen */}
-          <div className="relative flex-1 w-full rounded-[41px] overflow-hidden bg-[#f5f5f7] flex flex-col shadow-inner">
+      {/* Apple Natural Titanium / Silver Phone Chassis - Inner Screen strictly 375px standard mobile width */}
+      <div className="relative w-full max-w-[391px] h-[660px] p-[2px] rounded-[50px] bg-gradient-to-b from-[#e5e5ea] via-[#d1d1d6] to-[#e5e5ea] shadow-[0_20px_50px_-10px_rgba(0,0,0,0.12)] border border-[#d1d1d6] flex items-center justify-center">
+        {/* Inner Clean Light Bezel */}
+        <div className="w-full h-full p-[6px] rounded-[47px] bg-[#f5f5f7] border border-white flex flex-col items-center">
+          {/* True Mobile Display Screen (Standard 375pt Mobile Viewport Benchmark) */}
+          <div className="relative flex-1 w-full max-w-[375px] rounded-[41px] overflow-hidden bg-[#EDEDED] flex flex-col shadow-inner">
             {/* Minimalist Apple Status Bar */}
             <div className="relative w-full px-6 pt-2 pb-1.5 flex items-center justify-between text-[11px] font-mono text-neutral-800 z-40 bg-white/40 backdrop-blur-md">
               <span className="font-semibold tracking-tight">09:41</span>
@@ -307,87 +307,115 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
             )}
 
             {/* ======================================================== */}
-            {/* SCREEN 2: 微信红包消息气泡 (Realistic WeChat Red Packet Card - No Extra Dialogue!) */}
+            {/* SCREEN 2: 真机 1:1 视觉预览视窗 (375pt 基准 · K=0.6 锚点映射) */}
             {/* ======================================================== */}
             {activeScreen === 'chat' && (
-              <div className="flex-1 w-full overflow-hidden bg-[#ededed] flex flex-col text-neutral-800">
+              <div className="flex-1 w-full overflow-hidden bg-[#EDEDED] flex flex-col text-neutral-800">
                 {/* WeChat Chat Navigation Bar */}
-                <div className="bg-[#ededed] px-3.5 py-2.5 border-b border-neutral-300/80 flex items-center justify-between text-xs font-semibold text-neutral-800 shrink-0">
+                <div className="bg-[#EDEDED] px-3.5 py-2.5 border-b border-neutral-300/80 flex items-center justify-between text-xs font-semibold text-neutral-800 shrink-0">
                   <div className="flex items-center gap-1">
                     <ChevronLeft className="w-4 h-4" />
-                    <span>微信</span>
+                    <span>微信 (375pt 真机 1:1)</span>
                   </div>
                   <span className="font-bold">好友会话</span>
                   <span className="tracking-widest">···</span>
                 </div>
 
-                {/* Chat Scrollable Content Area: Focused Purely on WeChat Red Packet Card */}
-                <div className="flex-1 p-4 space-y-4 overflow-y-auto flex flex-col justify-center">
-                  <div className="text-center mb-2">
-                    <span className="text-[10px] bg-neutral-300/80 text-neutral-600 px-2 py-0.5 rounded-md">
-                      微信红包消息展示
+                {/* Chat Scrollable Content Area: Strictly 375px WeChat Chat Environment */}
+                <div className="flex-1 px-3 py-4 space-y-4 overflow-y-auto flex flex-col justify-between">
+                  <div className="text-center">
+                    <span className="text-[10px] bg-neutral-300/90 text-neutral-700 px-2.5 py-0.5 rounded-md font-mono font-semibold">
+                      真机 1:1 视觉映射 (K = 230/384 ≈ 0.6)
                     </span>
                   </div>
 
-                  {/* Authentic WeChat Red Packet Bubble Card with Attached Pendant (480 x 384 Frame) */}
-                  <div className="flex items-start justify-end gap-2.5 w-full pr-1">
-                    <div className="relative w-[230px] aspect-[480/384]">
-                      {/* Authentic WeChat Red Packet Card occupies middle zone (Y: 96 ~ 312px, top: 25%, height: 56.25%, seamless with 96px top boundary) */}
-                      <div
-                        className="absolute inset-x-2 bg-[#fa9d3b] text-white rounded-2xl rounded-tr-xs overflow-hidden shadow-sm border border-[#e58a27] cursor-pointer active:opacity-90 z-10 flex flex-col justify-between"
-                        style={{
-                          top: '25%', // 紧贴 Y = 96px，与小熊/主体下沿完美紧密贴合
-                          height: '56.25%', // 贴合 96~312px 红包卡片区 (216px)
-                        }}
-                      >
+                  {/* Authentic WeChat Message Row with Exact 230px × 129.6px Card Entity */}
+                  <div className="my-auto py-12 flex items-start justify-end gap-2.5 w-full pr-1">
+                    {/* 红包卡片实体容器：严格锁定 width: 230px, height: 129.6px (216px * 0.6) */}
+                    <div
+                      className="relative shrink-0"
+                      style={{
+                        width: '230px',
+                        height: '129.6px',
+                      }}
+                    >
+                      {/* 微信红包卡片本体 (230px × 129.6px) */}
+                      <div className="w-full h-full bg-[#fa9d3b] text-white rounded-[10px] rounded-tr-[3px] overflow-hidden shadow-xs border border-[#e58a27] cursor-pointer active:opacity-90 z-10 flex flex-col justify-between relative">
                         <div className="p-3 flex items-center gap-2.5">
-                          <div className="w-8 h-8 rounded-xl bg-[#c23636] flex items-center justify-center text-base shrink-0 shadow-xs border border-white/20">
+                          <div className="w-9 h-9 rounded-lg bg-[#c23636] flex items-center justify-center text-base shrink-0 shadow-xs border border-white/20">
                             🧧
                           </div>
                           <div className="overflow-hidden flex-1">
-                            <div className="text-xs font-bold leading-tight truncate">
+                            <div className="text-[13px] font-bold leading-tight truncate">
                               {blessingText}
                             </div>
-                            <div className="text-[9px] text-amber-100/90 mt-0.5 font-medium truncate">
-                              领取专享定制红包封面
+                            <div className="text-[10px] text-amber-100/90 mt-1 font-medium truncate">
+                              领取红包
                             </div>
                           </div>
                         </div>
 
-                        <div className="bg-white/95 text-neutral-500 text-[9px] px-3 py-1 flex items-center justify-between border-t border-amber-500/20">
+                        <div className="bg-white/95 text-neutral-400 text-[9px] px-3 py-1 flex items-center justify-between border-t border-amber-500/20">
                           <span>微信红包</span>
-                          <span className="text-[8px] text-amber-600 font-bold">专享封面</span>
+                          <span className="text-[8px] text-amber-600 font-bold">专享气泡挂件</span>
                         </div>
+
+                        {/* 文字及交互禁入区参考层 (x:68, y:120, w:272, h:100 -> 相对于卡片(48,96)乘0.6: left:12px, top:14.4px, w:163.2px, h:60px) */}
+                        {showSafeAreaGuide && (
+                          <div
+                            className="absolute border border-dashed border-red-600 bg-red-600/20 rounded pointer-events-none flex items-center justify-center z-20"
+                            style={{
+                              left: '12px',
+                              top: '14.4px',
+                              width: '163.2px',
+                              height: '60px',
+                            }}
+                          >
+                            <span className="text-[7px] font-bold text-white bg-red-600/90 px-1 py-0.2 rounded">
+                              🚫 文字禁入区 (272×100px)
+                            </span>
+                          </div>
+                        )}
                       </div>
 
-                      {/* 480x384 Bubble Pendant (overlays 1:1 onto the exact 480x384 frame) */}
+                      {/* 气泡挂件图层叠加逻辑：整个 480×384 挂件图层以等比系数 0.6 绝对定位覆盖在卡片上方 */}
                       {bubbleResult && (
-                        <div className="absolute inset-0 z-20 pointer-events-none drop-shadow-md">
+                        <div
+                          style={{
+                            position: 'absolute',
+                            width: '288px', // 480 * 0.6
+                            height: '230.4px', // 384 * 0.6
+                            left: '-28.8px', // -48 * 0.6 (卡片左边距精确对齐)
+                            top: '-57.6px', // -96 * 0.6 (卡片顶边距精确对齐)
+                            pointerEvents: 'none',
+                            zIndex: 20,
+                          }}
+                        >
                           <img
                             src={bubbleResult.url}
-                            alt="气泡挂件 (趴在对话框气泡上)"
-                            className="w-full h-full object-contain"
+                            alt="气泡挂件真机 1:1 叠加"
+                            className="w-full h-full object-contain drop-shadow-xs"
                           />
 
-                          {/* Guide Overlay if Safe Area is active */}
+                          {/* 0.6x 参考区标线 */}
                           {showSafeAreaGuide && (
                             <div className="absolute inset-0 pointer-events-none z-30">
-                              {/* Top Editable Area (0~96px, 25%) */}
+                              {/* 顶部挂件区 (0~96px -> 0~57.6px) */}
                               <div
-                                className="absolute inset-x-0 top-0 border border-dashed border-emerald-500 bg-emerald-500/10 rounded-t-lg flex items-center justify-center"
-                                style={{ height: '25%' }}
+                                className="absolute inset-x-0 top-0 border border-dashed border-emerald-600 bg-emerald-500/15 flex items-start justify-center pt-0.5"
+                                style={{ height: '57.6px' }}
                               >
-                                <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
-                                  顶部挂件区 (高96px · 下沿不得超96)
+                                <span className="text-[7px] font-bold text-emerald-900 bg-white/90 px-1 rounded shadow-2xs font-mono">
+                                  顶部挂件区 480×96 (真机高 57.6pt)
                                 </span>
                               </div>
-                              {/* Bottom Editable Area (312~384px, 18.75%) */}
+                              {/* 底部装饰区 (312~384px -> top: 187.2px, height: 43.2px) */}
                               <div
-                                className="absolute inset-x-0 bottom-0 border border-dashed border-emerald-500 bg-emerald-500/10 rounded-b-lg flex items-center justify-center"
-                                style={{ height: '18.75%' }}
+                                className="absolute inset-x-0 bottom-0 border border-dashed border-emerald-600 bg-emerald-500/15 flex items-end justify-center pb-0.5"
+                                style={{ height: '43.2px' }}
                               >
-                                <span className="text-[7px] font-bold text-emerald-800 bg-white/90 px-1 rounded shadow-2xs">
-                                  底部垂饰区 (72px)
+                                <span className="text-[7px] font-bold text-emerald-900 bg-white/90 px-1 rounded shadow-2xs font-mono">
+                                  底部装饰区 480×72 (真机高 43.2pt)
                                 </span>
                               </div>
                             </div>
@@ -396,19 +424,49 @@ export const RedPacketPreviewMockup: React.FC<RedPacketPreviewMockupProps> = ({
                       )}
                     </div>
 
-                    <div className="w-9 h-9 rounded-lg bg-red-600 text-white flex items-center justify-center text-sm font-bold shrink-0 shadow-xs mt-7">
+                    {/* 发送者微信头像 (40px × 40px) */}
+                    <div className="w-10 h-10 rounded-[6px] bg-red-600 text-white flex items-center justify-center text-sm font-bold shrink-0 shadow-xs">
                       {senderAvatar}
                     </div>
                   </div>
 
-                  {/* Specification Callout in Apple Style */}
-                  <div className="p-3 bg-white/90 rounded-2xl border border-neutral-200/90 text-[11px] text-neutral-600 space-y-1 shadow-2xs mt-4">
-                    <div className="font-bold text-neutral-800 flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                      <span>气泡挂件 (480×384) 微信官方标准</span>
+                  {/* 真机尺寸映射与视觉饱满度实时诊断卡 */}
+                  <div className="p-3 bg-white/95 rounded-2xl border border-neutral-200/90 text-[11px] text-neutral-600 space-y-1.5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <div className="font-bold text-neutral-800 flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>真机 1:1 绝对锚点渲染规格</span>
+                      </div>
+                      {bubbleResult && (
+                        <span className="font-mono text-[10px] bg-emerald-50 text-emerald-800 px-1.5 py-0.5 rounded border border-emerald-200 font-bold">
+                          480×384 PNG · {Math.round(bubbleResult.size / 1024)}KB
+                        </span>
+                      )}
                     </div>
+                    {bubbleResult && (() => {
+                      const topW = bubbleResult.topOpaqueWidth || bubbleResult.opaqueWidth || 0;
+                      const mobileW = Math.round(topW * 0.6);
+                      const ratioPct = Math.round((topW / 384) * 100);
+                      const isNarrow = topW > 0 && topW < 160;
+                      return (
+                        <div className={`p-2 rounded-xl border text-[10px] font-mono flex items-center justify-between ${
+                          isNarrow
+                            ? 'bg-amber-50 border-amber-300 text-amber-900'
+                            : 'bg-neutral-50 border-neutral-200 text-neutral-700'
+                        }`}>
+                          <span>
+                            挂件实宽: <strong>{topW}px</strong> (真机 <strong>{mobileW}pt</strong>)
+                          </span>
+                          <span className={`px-1.5 py-0.2 rounded font-bold ${
+                            isNarrow ? 'bg-amber-200/80 text-amber-950' : 'bg-emerald-100 text-emerald-800'
+                          }`}>
+                            占卡片宽 {ratioPct}% {isNarrow ? '⚠️偏小' : '✓饱满'}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     <p className="text-[10px] leading-relaxed text-neutral-500">
-                      微信官方规范：<strong>透明 PNG 格式</strong>，体积<strong>严格 ≤ 300KB</strong>。系统自动装配在红包卡片右上角，所见即所得，形象完整不截断。
+                      卡片实体 <strong>230×129.6pt</strong>，挂件图层按 <strong>0.6 倍</strong>（288×230.4pt，左偏移 -28.8pt，顶偏移 -57.6pt）精准锚定覆盖。
                     </p>
                   </div>
                 </div>

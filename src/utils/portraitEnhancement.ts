@@ -60,10 +60,27 @@ export interface SilhouetteField {
  * Only runs ONCE when a new image or matting result is loaded.
  */
 export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
-  const width = sourceData.width;
-  const height = sourceData.height;
+  let workingData = sourceData;
+  if (sourceData.width > 900 || sourceData.height > 900) {
+    const scale = 900 / Math.max(sourceData.width, sourceData.height);
+    const nw = Math.round(sourceData.width * scale);
+    const nh = Math.round(sourceData.height * scale);
+    const c = document.createElement('canvas');
+    c.width = nw;
+    c.height = nh;
+    const ctx = c.getContext('2d', { willReadFrequently: true })!;
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = sourceData.width;
+    tempCanvas.height = sourceData.height;
+    tempCanvas.getContext('2d')!.putImageData(sourceData, 0, 0);
+    ctx.drawImage(tempCanvas, 0, 0, nw, nh);
+    workingData = ctx.getImageData(0, 0, nw, nh);
+  }
+
+  const width = workingData.width;
+  const height = workingData.height;
   const totalPixels = width * height;
-  const src = sourceData.data;
+  const src = workingData.data;
 
   // Make a private copy of original pixels
   const rawSrc = new Uint8ClampedArray(src.length);
@@ -138,6 +155,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       if (x < 0 || x >= width || y < 0 || y >= height) return;
       const idx = y * width + x;
       if (visited[idx]) return;
+      visited[idx] = 1;
 
       const p = idx * 4;
       const r = rawSrc[p];
@@ -150,7 +168,6 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       }
 
       if (colorDist(r, g, b) <= maxTol) {
-        visited[idx] = 1;
         distMap[idx] = 0;
         rawSrc[p + 3] = 0;
         queue[tail++] = idx;
@@ -326,13 +343,13 @@ export function renderSilhouetteData(
   // 2. White Halo / De-fringe Spill Decontamination
   // For pixels near the trimmed boundary, detect whitish residue and replace with genuine inner hair or skin color
   if (deFringeRate > 0) {
-    const searchDepth = Math.round(Math.max(6, 4.5 * scaleRatio));
+    const searchDepth = Math.round(Math.min(8, Math.max(4, 3.5 * scaleRatio)));
     const deFringeZoneDepth = actualTrimRawPx + searchDepth;
+    const searchRadius = Math.round(Math.min(6, Math.max(3, 2.5 * scaleRatio)));
 
     for (let y = 0; y < height; y++) {
       const isHairZone = y < hairMaxY;
       const inEarSideburnZone = y >= earTopY && y <= earBottomY;
-      const searchRadius = Math.round(Math.max(4, (isHairZone ? 3.5 : 3.0) * scaleRatio));
 
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
@@ -351,18 +368,11 @@ export function renderSilhouetteData(
         const isSkin = isSkinPixel(curR, curG, curB);
         const isHair = isHairPixel(curR, curG, curB);
 
-        // Protect ears: Never treat genuine ear skin as "hair halo" or discolor it
-        if (inEarSideburnZone && isEarSideburnX && isSkin) {
+        // Protect ears and sideburns
+        if (inEarSideburnZone && isEarSideburnX && (isSkin || isHair)) {
           continue;
         }
 
-        // Protect sideburns: Preserve natural dark hair tone and shape
-        if (inEarSideburnZone && isEarSideburnX && isHair) {
-          continue;
-        }
-
-        // In hair zone, true hair is dark (lum < 115)
-        // In neck zone, true skin is warm (curR > curB)
         const isPale = curR > 140 && curG > 140 && curB > 140;
         const isWhitishOnHair = isHairZone && !isSkin && (curLum > 95 || isPale);
         const isWhitishOnSkin = (!isHairZone || isSkin) && (curLum > 200 || (curR > 180 && curG > 180 && curB > 180 && Math.abs(curR - curB) < 30));
@@ -375,8 +385,7 @@ export function renderSilhouetteData(
         let innerB = isHairZone ? 20 : 140;
         let foundInner = false;
         let minSearchDist = 99999;
-
-        const minTargetDist = actualTrimRawPx + Math.max(3, 2.5 * scaleRatio);
+        const minTargetDist = actualTrimRawPx + Math.max(2, 2.0 * scaleRatio);
 
         for (let dy = -searchRadius; dy <= searchRadius; dy += 2) {
           const ny = y + dy;
@@ -403,6 +412,7 @@ export function renderSilhouetteData(
                     innerB = b0;
                     minSearchDist = distSq;
                     foundInner = true;
+                    if (distSq <= 8) break;
                   }
                 } else {
                   if (r0 > b0 + 15 && l0 < 225) {
@@ -411,11 +421,13 @@ export function renderSilhouetteData(
                     innerB = b0;
                     minSearchDist = distSq;
                     foundInner = true;
+                    if (distSq <= 8) break;
                   }
                 }
               }
             }
           }
+          if (foundInner && minSearchDist <= 8) break;
         }
 
         // Relative distance from the cut boundary
@@ -427,7 +439,6 @@ export function renderSilhouetteData(
         dst[i * 4 + 1] = Math.round(curG * (1 - blendRatio) + innerG * blendRatio);
         dst[i * 4 + 2] = Math.round(curB * (1 - blendRatio) + innerB * blendRatio);
 
-        // If pixel is severely white halo right at the trimmed edge, also soften alpha (never on skin)
         if (isPale && !isSkin && distFromCut <= 1.2 * scaleRatio) {
           dst[i * 4 + 3] = Math.round(a * (1 - 0.45 * deFringeRate));
         }
@@ -435,36 +446,46 @@ export function renderSilhouetteData(
     }
   }
 
-  // 3. Subpixel Alpha Feathering & Anti-aliasing
+  // 3. Subpixel Alpha Feathering & Anti-aliasing with Precomputed LUT
   if (featherPx > 0.1) {
-    const actualFeatherRaw = Math.max(1, featherPx * scaleRatio);
-    const radius = Math.ceil(actualFeatherRaw);
+    const actualFeatherRaw = Math.min(3, Math.max(1, featherPx * scaleRatio));
+    const radius = Math.min(3, Math.ceil(actualFeatherRaw));
     const alphaCopy = new Uint8Array(totalPixels);
     for (let i = 0; i < totalPixels; i++) {
       alphaCopy[i] = dst[i * 4 + 3];
     }
 
-    const step = actualFeatherRaw > 3 ? 2 : 1;
+    // Precompute Gaussian weights
+    const twoSigmaSq = 2 * actualFeatherRaw * actualFeatherRaw;
+    const kernelSize = radius * 2 + 1;
+    const featherLUT = new Float32Array(kernelSize * kernelSize);
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist <= actualFeatherRaw) {
+          featherLUT[(dy + radius) * kernelSize + (dx + radius)] = Math.exp(-(dist * dist) / twoSigmaSq);
+        }
+      }
+    }
+
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const i = y * width + x;
         const curA = alphaCopy[i];
 
-        // Feather pixels right at the boundary
         if (curA > 5 && curA < 250) {
           let sumA = 0;
           let weightSum = 0;
 
-          for (let dy = -radius; dy <= radius; dy += step) {
+          for (let dy = -radius; dy <= radius; dy++) {
             const ny = y + dy;
             if (ny < 0 || ny >= height) continue;
-            for (let dx = -radius; dx <= radius; dx += step) {
+            for (let dx = -radius; dx <= radius; dx++) {
               const nx = x + dx;
               if (nx < 0 || nx >= width) continue;
 
-              const dist = Math.sqrt(dx * dx + dy * dy);
-              if (dist <= actualFeatherRaw) {
-                const w = Math.exp(-(dist * dist) / (2 * actualFeatherRaw * actualFeatherRaw));
+              const w = featherLUT[(dy + radius) * kernelSize + (dx + radius)];
+              if (w > 0) {
                 sumA += alphaCopy[ny * width + nx] * w;
                 weightSum += w;
               }
@@ -516,12 +537,26 @@ export function renderSilhouetteData(
     }
   }
 
-  // 5. Intelligent Facial Skin Smoothing & Blemish Softening (智能面部磨皮与自然平滑)
-  // Edge-preserving bilateral filter over facial skin pixels to eliminate roughness, coarse pores, and stubble shadows
+  // 5. Intelligent Facial Skin Smoothing & Blemish Softening (Ultra-fast LUT Bilateral Filter)
   const smoothRate = Math.max(0, Math.min(1, (config.skinSmoothing ?? 65) / 100));
   if (smoothRate > 0.05) {
-    const radius = Math.round(Math.max(3, 2.5 * scaleRatio));
+    const radius = Math.min(4, Math.max(2, Math.round(1.8 * scaleRatio)));
     const skinCopy = new Uint8ClampedArray(dst);
+
+    // Precompute spatial LUT and range LUT so there is ZERO Math.exp in the inner loop!
+    const twoRsq = 2 * radius * radius;
+    const kSize = radius * 2 + 1;
+    const spatialLUT = new Float32Array(kSize * kSize);
+    for (let dy = -radius; dy <= radius; dy += 2) {
+      for (let dx = -radius; dx <= radius; dx += 2) {
+        spatialLUT[(dy + radius) * kSize + (dx + radius)] = Math.exp(-(dx * dx + dy * dy) / twoRsq);
+      }
+    }
+
+    const rangeLUT = new Float32Array(32);
+    for (let d = 0; d < 32; d++) {
+      rangeLUT[d] = Math.exp(-(d * d) / 320);
+    }
 
     const faceTopY = Math.round(height * 0.15);
     const faceBottomY = Math.round(height * 0.78);
@@ -548,13 +583,12 @@ export function renderSilhouetteData(
         let sumB = curB * 1.5;
         let sumW = 1.5;
 
-        const step = radius > 3 ? 2 : 1;
-        for (let dy = -radius; dy <= radius; dy += step) {
+        for (let dy = -radius; dy <= radius; dy += 2) {
           const ny = y + dy;
           if (ny < 0 || ny >= height) continue;
           const nRow = ny * width;
 
-          for (let dx = -radius; dx <= radius; dx += step) {
+          for (let dx = -radius; dx <= radius; dx += 2) {
             const nx = x + dx;
             if (nx < 0 || nx >= width) continue;
 
@@ -565,16 +599,15 @@ export function renderSilhouetteData(
             const nG = skinCopy[nIdx + 1];
             const nB = skinCopy[nIdx + 2];
 
-            // If neighbor is also skin
             if (!isSkinPixel(nR, nG, nB)) continue;
 
             const nL = 0.299 * nR + 0.587 * nG + 0.114 * nB;
-            const diffL = Math.abs(curL - nL);
+            const diffL = Math.abs(curL - nL) | 0;
 
-            // Bilateral range threshold: preserves strong structural edges (eyelids, nostrils, mouth)
             if (diffL < 28) {
-              const dSq = dx * dx + dy * dy;
-              const w = Math.exp(-dSq / (2 * radius * radius) - (diffL * diffL) / 320);
+              const spW = spatialLUT[(dy + radius) * kSize + (dx + radius)];
+              const rgW = rangeLUT[diffL];
+              const w = spW * rgW;
               sumR += nR * w;
               sumG += nG * w;
               sumB += nB * w;
@@ -588,7 +621,6 @@ export function renderSilhouetteData(
           const smoothedG = sumG / sumW;
           const smoothedB = sumB / sumW;
 
-          // Blend based on smoothRate
           dst[idx] = Math.round(curR * (1 - smoothRate) + smoothedR * smoothRate);
           dst[idx + 1] = Math.round(curG * (1 - smoothRate) + smoothedG * smoothRate);
           dst[idx + 2] = Math.round(curB * (1 - smoothRate) + smoothedB * smoothRate);

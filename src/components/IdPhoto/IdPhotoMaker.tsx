@@ -171,19 +171,23 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       : POPULAR_ID_COLORS.find((c) => c.id === selectedColorId) || POPULAR_ID_COLORS[1];
 
   // Helper to ensure we have raw ImageData from transparentImgRef if needed
+  // Helper to ensure we have raw ImageData from transparentImgRef if needed
   const ensureRawImageData = useCallback((): ImageData | null => {
     if (rawCutoutImageDataRef.current) {
       return rawCutoutImageDataRef.current;
     }
     const img = transparentImgRef.current;
     if (img && (img.naturalWidth || img.width)) {
-      const w = img.naturalWidth || img.width;
-      const h = img.naturalHeight || img.height;
+      const origW = img.naturalWidth || img.width;
+      const origH = img.naturalHeight || img.height;
+      const scale = Math.min(1, 900 / Math.max(origW, origH));
+      const w = Math.round(origW * scale);
+      const h = Math.round(origH * scale);
       const c = document.createElement('canvas');
       c.width = w;
       c.height = h;
       const ctx = c.getContext('2d', { willReadFrequently: true })!;
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, w, h);
       const data = ctx.getImageData(0, 0, w, h);
       rawCutoutImageDataRef.current = data;
       return data;
@@ -266,14 +270,17 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       });
       transparentImgRef.current = fallbackImg;
 
-      // Extract raw data from fallback image
-      const w = fallbackImg.naturalWidth || fallbackImg.width;
-      const h = fallbackImg.naturalHeight || fallbackImg.height;
+      // Extract raw data from fallback image with max 900px clamp
+      const origW = fallbackImg.naturalWidth || fallbackImg.width;
+      const origH = fallbackImg.naturalHeight || fallbackImg.height;
+      const scale = Math.min(1, 900 / Math.max(origW, origH));
+      const w = Math.round(origW * scale);
+      const h = Math.round(origH * scale);
       const c = document.createElement('canvas');
       c.width = w;
       c.height = h;
       const ctx = c.getContext('2d', { willReadFrequently: true })!;
-      ctx.drawImage(fallbackImg, 0, 0);
+      ctx.drawImage(fallbackImg, 0, 0, w, h);
       const rawData = ctx.getImageData(0, 0, w, h);
       rawCutoutImageDataRef.current = rawData;
       const field = buildSilhouetteField(rawData);
@@ -518,7 +525,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     ]
   );
 
-  // Synchronously apply hair & edge optimization and immediately redraw the preview canvas
+  // Synchronously apply hair & edge optimization
   const applyHairOptimization = useCallback(
     (hConfig: HairOptimizationConfig) => {
       let field = silhouetteFieldRef.current;
@@ -530,28 +537,18 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       }
       const canvas = createOptimizedPortraitCanvas(field, hConfig);
       setOptimizedCanvas(canvas);
-      // Immediately draw to preview canvas for zero-delay 60fps live response
-      if (previewCanvasRef.current) {
-        renderIdPhotoToCanvas(
-          previewCanvasRef.current,
-          targetWidthPx,
-          targetHeightPx,
-          showGuidelines,
-          2,
-          true,
-          canvas
-        );
-      }
     },
-    [ensureRawImageData, renderIdPhotoToCanvas, targetWidthPx, targetHeightPx, showGuidelines]
+    [ensureRawImageData]
   );
 
   // Synchronously update whenever hairConfig changes
   useEffect(() => {
-    applyHairOptimization(hairConfig);
+    if (silhouetteFieldRef.current || rawCutoutImageDataRef.current) {
+      applyHairOptimization(hairConfig);
+    }
   }, [hairConfig, applyHairOptimization]);
 
-  // Re-render preview canvas whenever settings change
+  // Re-render preview canvas whenever settings or optimizedCanvas change
   useEffect(() => {
     if (previewCanvasRef.current) {
       renderIdPhotoToCanvas(
@@ -1243,17 +1240,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     max="2.0"
                     step="0.2"
                     value={hairConfig.edgeShift}
-                    onInput={(e) => {
-                      const val = Number((e.target as HTMLInputElement).value);
-                      const newCfg = { ...hairConfig, edgeShift: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
-                    }}
                     onChange={(e) => {
                       const val = Number(e.target.value);
-                      const newCfg = { ...hairConfig, edgeShift: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
+                      setHairConfig((prev) => ({ ...prev, edgeShift: val }));
                     }}
                     disabled={!hairConfig.enabled}
                     className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
@@ -1283,17 +1272,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     max="100"
                     step="5"
                     value={hairConfig.deFringe}
-                    onInput={(e) => {
-                      const val = Number((e.target as HTMLInputElement).value);
-                      const newCfg = { ...hairConfig, deFringe: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
-                    }}
                     onChange={(e) => {
                       const val = Number(e.target.value);
-                      const newCfg = { ...hairConfig, deFringe: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
+                      setHairConfig((prev) => ({ ...prev, deFringe: val }));
                     }}
                     disabled={!hairConfig.enabled}
                     className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
@@ -1321,17 +1302,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     max="3.5"
                     step="0.1"
                     value={hairConfig.feather}
-                    onInput={(e) => {
-                      const val = Number((e.target as HTMLInputElement).value);
-                      const newCfg = { ...hairConfig, feather: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
-                    }}
                     onChange={(e) => {
                       const val = Number(e.target.value);
-                      const newCfg = { ...hairConfig, feather: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
+                      setHairConfig((prev) => ({ ...prev, feather: val }));
                     }}
                     disabled={!hairConfig.enabled}
                     className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
@@ -1358,17 +1331,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     max="100"
                     step="5"
                     value={hairConfig.textureBoost}
-                    onInput={(e) => {
-                      const val = Number((e.target as HTMLInputElement).value);
-                      const newCfg = { ...hairConfig, textureBoost: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
-                    }}
                     onChange={(e) => {
                       const val = Number(e.target.value);
-                      const newCfg = { ...hairConfig, textureBoost: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
+                      setHairConfig((prev) => ({ ...prev, textureBoost: val }));
                     }}
                     disabled={!hairConfig.enabled}
                     className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
@@ -1400,17 +1365,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     max="100"
                     step="5"
                     value={hairConfig.skinSmoothing ?? 65}
-                    onInput={(e) => {
-                      const val = Number((e.target as HTMLInputElement).value);
-                      const newCfg = { ...hairConfig, skinSmoothing: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
-                    }}
                     onChange={(e) => {
                       const val = Number(e.target.value);
-                      const newCfg = { ...hairConfig, skinSmoothing: val };
-                      setHairConfig(newCfg);
-                      applyHairOptimization(newCfg);
+                      setHairConfig((prev) => ({ ...prev, skinSmoothing: val }));
                     }}
                     disabled={!hairConfig.enabled}
                     className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
@@ -1420,9 +1377,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        const newCfg = { ...hairConfig, skinSmoothing: 0 };
-                        setHairConfig(newCfg);
-                        applyHairOptimization(newCfg);
+                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 0 }));
                       }}
                       className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
                     >
@@ -1431,9 +1386,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        const newCfg = { ...hairConfig, skinSmoothing: 35 };
-                        setHairConfig(newCfg);
-                        applyHairOptimization(newCfg);
+                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 35 }));
                       }}
                       className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
                     >
@@ -1442,9 +1395,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        const newCfg = { ...hairConfig, skinSmoothing: 65 };
-                        setHairConfig(newCfg);
-                        applyHairOptimization(newCfg);
+                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 65 }));
                       }}
                       className="font-bold text-pink-600 hover:text-pink-700 px-1.5 py-0.5 rounded bg-pink-100/70 cursor-pointer transition-colors"
                     >
@@ -1453,9 +1404,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     <button
                       type="button"
                       onClick={() => {
-                        const newCfg = { ...hairConfig, skinSmoothing: 90 };
-                        setHairConfig(newCfg);
-                        applyHairOptimization(newCfg);
+                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 90 }));
                       }}
                       className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
                     >

@@ -40,32 +40,33 @@ export async function removeBackgroundWithAI(
   onProgress?.({
     stage: 'loading',
     progress: 10,
-    message: '正在加载 AI 视觉分割模型...',
+    message: '正在启动人物智能识别与抠图...',
   });
 
   try {
-    // Pre-downscale large images to max 1200px so ONNX WebAssembly / Canvas operations don't freeze the browser
+    // Pre-downscale large images to max 900px so WebAssembly / Canvas operations are fast and never freeze the browser
     let processedSource: Blob | File | string = imageSource as any;
     if (imageSource instanceof HTMLImageElement || imageSource instanceof File || imageSource instanceof Blob) {
       let srcImg: HTMLImageElement;
+      let tempUrl: string | null = null;
       if (imageSource instanceof HTMLImageElement) {
         srcImg = imageSource;
       } else {
-        const u = URL.createObjectURL(imageSource);
+        tempUrl = URL.createObjectURL(imageSource);
         srcImg = new Image();
         srcImg.crossOrigin = 'anonymous';
         await new Promise<void>((res, rej) => {
           srcImg.onload = () => res();
           srcImg.onerror = () => rej(new Error('无法读取源图'));
-          srcImg.src = u;
+          srcImg.src = tempUrl!;
         });
-        URL.revokeObjectURL(u);
+        URL.revokeObjectURL(tempUrl);
       }
 
       const sw = srcImg.naturalWidth || srcImg.width;
       const sh = srcImg.naturalHeight || srcImg.height;
-      if (sw > 1200 || sh > 1200) {
-        const scale = 1200 / Math.max(sw, sh);
+      if (sw > 900 || sh > 900) {
+        const scale = 900 / Math.max(sw, sh);
         const nw = Math.round(sw * scale);
         const nh = Math.round(sh * scale);
         const downCanvas = document.createElement('canvas');
@@ -84,7 +85,7 @@ export async function removeBackgroundWithAI(
       model: 'isnet_fp16',
       output: {
         format: 'image/png',
-        quality: 1.0,
+        quality: 0.95,
       },
       progress: (key: string, current: number, total: number) => {
         const pct = total > 0 ? Math.round((current / total) * 100) : 50;
@@ -121,10 +122,10 @@ export async function removeBackgroundWithAI(
       message: 'AI 正在智能分离主体人物与阴影背景...',
     });
 
-    // Run with a 5000ms safety timeout to avoid hanging if network model download fails
+    // Run with a 2500ms safety timeout to avoid hanging if network model download stalls
     const aiExecutionPromise = imglyRemoveBackground(inputSource, config);
     const timeoutPromise = new Promise<Blob>((_, reject) =>
-      setTimeout(() => reject(new Error('AI 模型加载超时，自动平滑切换至自适应色阶算法')), 4500)
+      setTimeout(() => reject(new Error('AI 模型加载超时，自动平滑切换至自适应色阶算法')), 2500)
     );
     const outputBlob = await Promise.race([aiExecutionPromise, timeoutPromise]);
 
@@ -202,21 +203,21 @@ export async function smartEdgeGuidedKeying(
 ): Promise<{ blob: Blob; url: string; imageData: ImageData; width: number; height: number }> {
   // 1. Get HTMLImageElement or Canvas from source
   let img: HTMLImageElement;
+  let tempSrcUrl: string | null = null;
   if (imageSource instanceof HTMLImageElement) {
     img = imageSource;
   } else {
-    let srcUrl = '';
     if (typeof imageSource === 'string') {
-      srcUrl = imageSource;
+      tempSrcUrl = imageSource;
     } else if (imageSource instanceof File || imageSource instanceof Blob) {
-      srcUrl = URL.createObjectURL(imageSource);
+      tempSrcUrl = URL.createObjectURL(imageSource);
     } else if (imageSource instanceof ImageData) {
       const c = document.createElement('canvas');
       c.width = imageSource.width;
       c.height = imageSource.height;
       const ctx = c.getContext('2d')!;
       ctx.putImageData(imageSource, 0, 0);
-      srcUrl = c.toDataURL('image/png');
+      tempSrcUrl = c.toDataURL('image/png');
     }
 
     img = new Image();
@@ -224,21 +225,41 @@ export async function smartEdgeGuidedKeying(
     await new Promise<void>((resolve, reject) => {
       img.onload = () => resolve();
       img.onerror = () => reject(new Error('无法读取原始图片进行智能抠图'));
-      img.src = srcUrl;
+      img.src = tempSrcUrl!;
     });
+    if (tempSrcUrl && (imageSource instanceof File || imageSource instanceof Blob)) {
+      URL.revokeObjectURL(tempSrcUrl);
+    }
   }
 
-  const width = img.naturalWidth || img.width;
-  const height = img.naturalHeight || img.height;
+  // Pre-downscale to max 900px so processing is ultra-fast and never locks the UI
+  const origW = img.naturalWidth || img.width;
+  const origH = img.naturalHeight || img.height;
+  const scale = Math.min(1, 900 / Math.max(origW, origH));
+  const width = Math.round(origW * scale);
+  const height = Math.round(origH * scale);
+
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(img, 0, 0, width, height);
 
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
   const totalPixels = width * height;
+
+  // Check if image already has transparent channel (e.g. pre-cutout PNG)
+  let existingTransparent = 0;
+  for (let i = 0; i < totalPixels; i++) {
+    if (data[i * 4 + 3] < 35) existingTransparent++;
+  }
+  if (existingTransparent > totalPixels * 0.05) {
+    // Already has transparency, return directly
+    const outBlob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+    const outUrl = URL.createObjectURL(outBlob);
+    return { blob: outBlob, url: outUrl, imageData: imgData, width, height };
+  }
 
   // 2. Sample border colors to detect background color
   let sumR = 0, sumG = 0, sumB = 0, samples = 0;
@@ -251,8 +272,12 @@ export async function smartEdgeGuidedKeying(
     samples++;
   };
 
-  // Top border
-  for (let x = 0; x < width; x += 4) {
+  // Top border corners & top strip (avoiding center hair)
+  for (let x = 0; x < width * 0.3; x += 4) {
+    sample(x, 0);
+    sample(x, 2);
+  }
+  for (let x = Math.round(width * 0.7); x < width; x += 4) {
     sample(x, 0);
     sample(x, 2);
   }
@@ -282,18 +307,17 @@ export async function smartEdgeGuidedKeying(
 
   // Human skin detector (protects ears, face, and neck from being flooded or erased)
   const isSkinPixel = (r: number, g: number, b: number) => {
-    if (r < 90 || g < 50 || b < 30) return false;
-    // Human skin is warm with R > G and R significantly higher than B
-    if (r <= g || r - b < 18) return false;
+    if (r < 80 || g < 45 || b < 25) return false;
+    if (r <= g || r - b < 14) return false;
     const l = 0.299 * r + 0.587 * g + 0.114 * b;
-    return l > 55 && l < 235;
+    return l > 50 && l < 240;
   };
 
-  // Dark hair & sideburns detector (Hair ONLY exists on upper head above collar)
+  // Dark hair detector (Hair exists on upper head above collar)
   const isHairPixel = (r: number, g: number, b: number, y: number) => {
     if (y >= height * 0.58) return false;
     const l = 0.299 * r + 0.587 * g + 0.114 * b;
-    return l < 80 || (r < 90 && g < 90 && b < 90);
+    return l < 85 || (r < 90 && g < 90 && b < 90);
   };
 
   const visited = new Uint8Array(totalPixels);
@@ -303,10 +327,17 @@ export async function smartEdgeGuidedKeying(
   let tail = 0;
   const maxTol = 55; // accommodates background lighting gradient
 
+  // Center portrait protection bounds (Head and Torso core)
+  const coreLeft = Math.round(width * 0.28);
+  const coreRight = Math.round(width * 0.72);
+  const coreTop = Math.round(height * 0.15);
+  const coreBottom = Math.round(height * 0.90);
+
   const enqueue = (x: number, y: number, fromIdx?: number) => {
     if (x < 0 || x >= width || y < 0 || y >= height) return;
     const idx = y * width + x;
     if (visited[idx]) return;
+    visited[idx] = 1; // Mark visited immediately to prevent duplicate checks
 
     const p = idx * 4;
     const r = data[p];
@@ -315,33 +346,39 @@ export async function smartEdgeGuidedKeying(
     const a = data[p + 3];
 
     if (a < 50) {
-      visited[idx] = 1;
       isBg[idx] = 1;
       queue[tail++] = idx;
       return;
     }
 
-    // CRITICAL: NEVER flood fill into person's ears, skin, or upper head hair!
+    // Never flood fill into person's ears, skin, or hair
     if (isSkinPixel(r, g, b) || isHairPixel(r, g, b, y)) {
       return;
     }
 
+    // Never flood into core torso / face zone
+    if (x >= coreLeft && x <= coreRight && y >= coreTop && y <= coreBottom) {
+      const cDist = colorDist(r, g, b);
+      if (cDist > maxTol * 0.6) {
+        return;
+      }
+    }
+
     if (fromIdx !== undefined) {
       const deltaLum = Math.abs(lum[fromIdx] - lum[idx]);
-      // Contrast edge between background and subject stops flood
-      if (deltaLum > 40) return;
+      if (deltaLum > 35) return;
     }
 
     if (colorDist(r, g, b) <= maxTol) {
-      visited[idx] = 1;
       isBg[idx] = 1;
       queue[tail++] = idx;
     }
   };
 
-  // Seed top, left, right edges down past the shoulders
-  for (let x = 0; x < width; x++) enqueue(x, 0);
-  const seedMaxY = Math.round(height * 0.88);
+  // Seed top corners and side borders
+  for (let x = 0; x < width * 0.35; x++) enqueue(x, 0);
+  for (let x = Math.round(width * 0.65); x < width; x++) enqueue(x, 0);
+  const seedMaxY = Math.round(height * 0.85);
   for (let y = 0; y < seedMaxY; y++) {
     enqueue(0, y);
     enqueue(width - 1, y);
@@ -365,75 +402,33 @@ export async function smartEdgeGuidedKeying(
     }
   }
 
-  // Clean unnatural vertical shadow spikes/horns sticking out around the collar
-  const collarScanTop = Math.round(height * 0.50);
-  const collarScanBottom = Math.round(height * 0.85);
-  for (let y = collarScanTop; y < collarScanBottom; y++) {
+  // Soften fringe boundary pixels
+  for (let y = 1; y < height - 1; y++) {
     const row = y * width;
-    let inRun = false;
-    let startX = 0;
-    for (let x = 0; x < width; x++) {
+    for (let x = 1; x < width - 1; x++) {
       const i = row + x;
-      const a = data[i * 4 + 3];
-      if (a > 40 && !inRun) {
-        inRun = true;
-        startX = x;
-      } else if (a <= 40 && inRun) {
-        inRun = false;
-        const runLen = x - startX;
-        // Narrow isolated vertical projection on the outer sides (shadow horn)
-        if (runLen <= 14 && (startX < width * 0.40 || x > width * 0.60)) {
-          let hasEmptySurround = false;
-          if (y > 2) {
-            const midX = Math.round((startX + x) / 2);
-            if (data[((y - 2) * width + midX) * 4 + 3] === 0) {
-              hasEmptySurround = true;
-            }
-          }
-          if (hasEmptySurround) {
-            for (let sx = startX; sx < x; sx++) {
-              data[(row + sx) * 4 + 3] = 0;
-            }
-          }
+      if (data[i * 4 + 3] === 0) continue;
+
+      const hasBgNeighbor =
+        data[(i - 1) * 4 + 3] === 0 ||
+        data[(i + 1) * 4 + 3] === 0 ||
+        data[(i - width) * 4 + 3] === 0 ||
+        data[(i + width) * 4 + 3] === 0;
+
+      if (hasBgNeighbor) {
+        const p = i * 4;
+        const r = data[p];
+        const g = data[p + 1];
+        const b = data[p + 2];
+
+        if (isSkinPixel(r, g, b) || isHairPixel(r, g, b, y)) {
+          continue;
+        }
+
+        if (colorDist(r, g, b) <= maxTol * 0.75) {
+          data[p + 3] = 0;
         }
       }
-    }
-  }
-
-  // Clean boundary background fringe pixels (without eroding ears or sideburns)
-  for (let pass = 0; pass < 2; pass++) {
-    const toClear: number[] = [];
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const i = y * width + x;
-        if (data[i * 4 + 3] === 0) continue;
-
-        const hasBgNeighbor =
-          data[(i - 1) * 4 + 3] === 0 ||
-          data[(i + 1) * 4 + 3] === 0 ||
-          data[(i - width) * 4 + 3] === 0 ||
-          data[(i + width) * 4 + 3] === 0;
-
-        if (hasBgNeighbor) {
-          const p = i * 4;
-          const r = data[p];
-          const g = data[p + 1];
-          const b = data[p + 2];
-
-          // Never erase ears, skin, or hair/sideburns
-          if (isSkinPixel(r, g, b) || isHairPixel(r, g, b, y)) {
-            continue;
-          }
-
-          // Only clear if pixel matches background color
-          if (colorDist(r, g, b) <= maxTol * 0.75) {
-            toClear.push(i);
-          }
-        }
-      }
-    }
-    for (const idx of toClear) {
-      data[idx * 4 + 3] = 0;
     }
   }
 

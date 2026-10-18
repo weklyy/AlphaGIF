@@ -81,8 +81,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const [customHeightPx, setCustomHeightPx] = useState<number>(413);
 
   // Background color state
-  const [selectedColorId, setSelectedColorId] = useState<string>('red-classic');
-  const [customColorHex, setCustomColorHex] = useState<string>('#C8102E');
+  const [selectedColorId, setSelectedColorId] = useState<string>('red-guobiao');
+  const [customColorHex, setCustomColorHex] = useState<string>('#D9001B');
+  const [bgLightingMode, setBgLightingMode] = useState<'auto' | 'spotlight' | 'solid'>('auto');
 
   // Portrait State
   const [portraitState, setPortraitState] = useState<IdPhotoState>({
@@ -156,8 +157,8 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const targetHeightPx =
     selectedPresetKey === 'custom' ? customHeightPx : currentSpec.heightPx;
 
-  // Selected color profile
-  const currentColor: IdColorPreset =
+  // Selected color profile with optional lighting mode override
+  const baseColor: IdColorPreset =
     selectedColorId === 'custom'
       ? {
           id: 'custom',
@@ -168,7 +169,19 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
           style: 'solid',
           secondaryHex: undefined,
         }
-      : POPULAR_ID_COLORS.find((c) => c.id === selectedColorId) || POPULAR_ID_COLORS[1];
+      : POPULAR_ID_COLORS.find((c) => c.id === selectedColorId) || POPULAR_ID_COLORS[0];
+
+  const currentColor: IdColorPreset = {
+    ...baseColor,
+    style:
+      baseColor.type === 'transparent'
+        ? 'solid'
+        : bgLightingMode === 'spotlight'
+        ? 'radial-spotlight'
+        : bgLightingMode === 'solid'
+        ? 'solid'
+        : baseColor.style || 'solid',
+  };
 
   // Helper to ensure we have raw ImageData from transparentImgRef if needed
   // Helper to ensure we have raw ImageData from transparentImgRef if needed
@@ -326,24 +339,24 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const handleOneClickAutoEnhance = () => {
     const newHairConfig: HairOptimizationConfig = {
       enabled: true,
-      deFringe: 100,
-      feather: 1.0,
-      edgeShift: -2.8, // 物理内收 2.8px，彻底切除任何残存白边
-      textureBoost: 50,
-      skinSmoothing: 65, // 65% 自然影楼级磨皮，抚平脸部粗糙与暗沉
+      deFringe: 90,
+      feather: 0.5,
+      edgeShift: -1.2, // 默认物理微收 1.2px，配合消色溢彻底消除红底白边
+      textureBoost: 45,
+      skinSmoothing: 50, // 自然影楼级磨皮，抚平脸部粗糙与暗沉
     };
     setHairConfig(newHairConfig);
     applyHairOptimization(newHairConfig);
 
     setClarityConfig({
       enabled: true,
-      strength: 70,
+      strength: 65,
       detailMode: 'balanced',
       exportDpiMultiplier: 2,
     });
-    setBrightness(4);
-    setContrast(6);
-    onNotification?.('⚡ 已一键应用智能最佳调优：物理切除白边 + 发丝去杂色 + 五官超清增强！');
+    setBrightness(2);
+    setContrast(4);
+    onNotification?.('⚡ 已一键应用智能最佳调优：白边净化 + 发际精修 + 衣服边缘锐利保护 + 五官超清增强！');
   };
 
   // -------------------------------------------------------------
@@ -1044,16 +1057,139 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
 
           {/* Section 3: Background Transparency & Color Switcher */}
           <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
                   3
                 </div>
-                <h3 className="text-sm font-bold text-stone-900">一键换底色与背景透明化</h3>
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+                    一键换底色与背景光效
+                    <span className="text-[10px] bg-rose-50 text-rose-600 px-2 py-0.5 rounded-full font-bold">
+                      影楼级聚光优化
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-stone-400">
+                    当前底色：<span className="text-stone-700 font-bold">{currentColor.name}</span>
+                  </p>
+                </div>
               </div>
-              <span className="text-xs text-stone-500 font-bold">
-                当前底色：{currentColor.name}
-              </span>
+
+              {/* Lighting Mode Switcher */}
+              <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl text-xs self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setBgLightingMode('auto')}
+                  className={`px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer ${
+                    bgLightingMode === 'auto'
+                      ? 'bg-white text-stone-900 font-bold shadow-2xs'
+                      : 'text-stone-500 hover:text-stone-700'
+                  }`}
+                  title="使用所选色块的专属默认效果"
+                >
+                  智能预设
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBgLightingMode('spotlight')}
+                  className={`px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer flex items-center gap-1 ${
+                    bgLightingMode === 'spotlight'
+                      ? 'bg-white text-rose-600 font-bold shadow-2xs'
+                      : 'text-stone-500 hover:text-stone-700'
+                  }`}
+                  title="背后柔和聚光立体光晕，衬托人物红润气色"
+                >
+                  <span>✨ 影楼立体柔光</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBgLightingMode('solid')}
+                  className={`px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer ${
+                    bgLightingMode === 'solid'
+                      ? 'bg-white text-stone-900 font-bold shadow-2xs'
+                      : 'text-stone-500 hover:text-stone-700'
+                  }`}
+                  title="国家官方规范纯平底色"
+                >
+                  官方纯色
+                </button>
+              </div>
+            </div>
+
+            {/* Dedicated Red ID Photo Quick Selector Bar */}
+            <div className="p-3.5 bg-gradient-to-r from-rose-50 via-red-50 to-orange-50 rounded-xl border border-rose-200/80 space-y-2.5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-rose-950 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse"></span>
+                    证件照标准红底专区 (专为国家正式证件/结婚登记/海马体影楼调教)
+                  </span>
+                  <span className="text-[10px] bg-red-600 text-white px-1.5 py-0.2 rounded font-bold">
+                    官方规范
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const newCfg: HairOptimizationConfig = {
+                      ...hairConfig,
+                      enabled: true,
+                      deFringe: 100,
+                      edgeShift: -2.0,
+                      feather: 0.5,
+                      textureBoost: 45,
+                      skinSmoothing: 50,
+                    };
+                    setHairConfig(newCfg);
+                    applyHairOptimization(newCfg);
+                    onNotification?.('✨ 已执行红底白边净化：边缘微收2.0px + 消色溢100%，红底白边彻底消除！');
+                  }}
+                  className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-2xs transition-all flex items-center gap-1 cursor-pointer self-start sm:self-auto"
+                  title="一键立即彻底去除红底人像周边的所有白边和反光"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>一键彻底除红底白边</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {[
+                  { id: 'red-guobiao', name: '中国国标规范红', tag: '国家官方标准', hex: '#D9001B', desc: '资格考/政务规范' },
+                  { id: 'red-spotlight', name: '影楼立体柔光红', tag: '海马体柔光', hex: '#E21E2C', desc: '雷达罩立体聚光' },
+                  { id: 'red-classic', name: '结婚登记经典正红', tag: '婚姻登记照', hex: '#C8102E', desc: '结婚证/团员证' },
+                  { id: 'red-carmine', name: '典雅中国深绯红', tag: '典雅沉稳', hex: '#BA1422', desc: '证书/荣誉表彰' },
+                  { id: 'red-rose', name: '温润暖玫瑰红', tag: '文艺柔美', hex: '#D32738', desc: '社交履历/形象照' },
+                  { id: 'red-wine', name: '高端商务酒红', tag: '商务典雅', hex: '#8B0D16', desc: '企业高管年鉴' },
+                ].map((item) => {
+                  const isCur = selectedColorId === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setSelectedColorId(item.id)}
+                      className={`p-2 rounded-lg border text-left flex items-center gap-2 transition-all cursor-pointer ${
+                        isCur
+                          ? 'bg-white border-red-600 shadow-2xs ring-1 ring-red-500'
+                          : 'bg-white/80 hover:bg-white border-rose-200/60'
+                      }`}
+                    >
+                      <div
+                        className="w-5 h-5 rounded-md shrink-0 border border-black/10 shadow-2xs"
+                        style={{ backgroundColor: item.hex }}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[11px] font-bold text-stone-900 truncate flex items-center justify-between">
+                          <span>{item.name}</span>
+                          <span className="text-[9px] text-red-700 bg-red-100/70 px-1 py-0.2 rounded font-normal">
+                            {item.tag}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-stone-500 font-mono truncate">{item.desc}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Background Color Swatches */}
@@ -1121,7 +1257,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
             </div>
           </div>
 
-          {/* Section 4: Hair & Neck Detail & Edge Optimization (发丝与颈部去白边精修) */}
+          {/* Section 4: Hair & Neck Detail & Edge Optimization (发丝与全身去白边精修) */}
           <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -1130,13 +1266,13 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
-                    发丝与颈部边缘精修
+                    边缘去白边与发丝精修
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-pink-100 text-pink-700">
-                      消除头发与颈部白边
+                      消除红底发际/颈部/肩膀白边
                     </span>
                   </h3>
                   <p className="text-[11px] text-stone-400">
-                    针对红/蓝底色下头发顶端与颈部两侧的白色残留进行距离场物理内切与消色溢
+                    针对红底人像头发边缘、颈部及双肩衣服的浅色白边进行物理内收剪切与消色溢，衣服保持高质感不虚化
                   </p>
                 </div>
               </div>
@@ -1154,31 +1290,31 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
               </label>
             </div>
 
-            {/* Quick Hair & Neck Presets */}
+            {/* Quick Hair & Edge Presets */}
             <div className="space-y-1.5">
               <span className="text-[11px] text-stone-500 font-medium">快捷去白边与发丝调优预设（点击即刻实时生效）：</span>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
                   {
-                    name: '强力去白边 (强烈推荐)',
-                    desc: '物理内收2.8px，消除白边与面部粗糙',
+                    name: '一键彻底消除白边 (推荐)',
+                    desc: '物理内收1.8px+消色溢95%，彻底去除白边',
                     highlight: true,
-                    config: { deFringe: 100, feather: 1.0, edgeShift: -2.8, textureBoost: 50, skinSmoothing: 65 },
+                    config: { deFringe: 95, feather: 0.5, edgeShift: -1.8, textureBoost: 45, skinSmoothing: 50 },
                   },
                   {
-                    name: '✂️ 超深切除 (顽固白边专用)',
-                    desc: '物理内收5.0px，彻底切除任何顽固白边',
-                    config: { deFringe: 100, feather: 1.2, edgeShift: -5.0, textureBoost: 40, skinSmoothing: 70 },
+                    name: '✂️ 强力切除顽固白边',
+                    desc: '物理内收3.5px，切除复杂粗糙白色毛边',
+                    config: { deFringe: 100, feather: 0.5, edgeShift: -3.5, textureBoost: 45, skinSmoothing: 55 },
                   },
                   {
-                    name: '自然发丝 (标准)',
+                    name: '官方证件规范微收',
                     desc: '微收1.2px，兼顾发梢细节与净边磨皮',
-                    config: { deFringe: 90, feather: 1.0, edgeShift: -1.2, textureBoost: 50, skinSmoothing: 55 },
+                    config: { deFringe: 85, feather: 0.5, edgeShift: -1.2, textureBoost: 45, skinSmoothing: 50 },
                   },
                   {
-                    name: '柔和过渡',
-                    desc: '内收2.0px+大羽化平滑柔肤',
-                    config: { deFringe: 95, feather: 2.2, edgeShift: -2.0, textureBoost: 30, skinSmoothing: 65 },
+                    name: '柔和发丝微过渡',
+                    desc: '微收0.6px+发丝柔和羽化过渡',
+                    config: { deFringe: 80, feather: 0.8, edgeShift: -0.6, textureBoost: 40, skinSmoothing: 50 },
                   },
                 ].map((preset) => {
                   const isActive =
@@ -1226,7 +1362,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   <div className="flex items-center justify-between text-xs text-stone-800 font-bold">
                     <span className="flex items-center gap-1">
                       <span>边缘物理内收剪切 (Edge Trim)</span>
-                      <span className="text-[10px] font-normal text-pink-700 bg-pink-200/60 px-1.5 py-0.2 rounded">
+                      <span className="text-[10px] font-normal text-pink-700 bg-pink-200/60 px-1.5 py-0.2 rounded font-bold">
                         消除白边核心
                       </span>
                     </span>
@@ -1249,20 +1385,21 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   />
                   <div className="flex justify-between text-[10px] text-stone-500 font-mono">
                     <span>强力切除 (-10px)</span>
-                    <span>推荐 (-2.8px)</span>
+                    <span>深度净边 (-3.5px)</span>
+                    <span className="text-pink-700 font-bold">推荐微收 (-1.2px)</span>
                     <span>原边 (0px)</span>
                     <span>外扩 (+2px)</span>
                   </div>
                   <p className="text-[10px] text-pink-600/90 leading-tight pt-0.5">
-                    💡 往左滑动可将头发、耳朵与颈部外围残存的原图白边整圈切除，画面实时跟随变化！
+                    💡 双肩衣服锐利保护：边缘物理微收剪切与消色溢已全域覆盖头发发际、颈部轮廓与双肩衣服，消除白边的同时衣服保持 100% 实体高密度不虚化！
                   </p>
                 </div>
 
                 {/* 2. De-fringe */}
                 <div className="bg-stone-50 p-3 rounded-xl border border-stone-200/70 space-y-1">
                   <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
-                    <span title="消除原图背景色在发丝和颈部边缘形成的浅色反光与光晕">
-                      发丝与颈部消色溢 (De-fringe)
+                    <span title="消除原图背景色在发丝、颈部及衣服边缘形成的浅色反光与光晕">
+                      全域消色溢净化 (De-fringe)
                     </span>
                     <span className="font-mono text-pink-600 font-bold">{hairConfig.deFringe}%</span>
                   </div>
@@ -1281,10 +1418,10 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   />
                   <div className="flex justify-between text-[10px] text-stone-400">
                     <span>原样保留</span>
-                    <span>深度净边 (推荐 90%~100%)</span>
+                    <span>深度消色溢 (推荐 85%~100%)</span>
                   </div>
                   <p className="text-[10px] text-stone-400 leading-tight pt-0.5">
-                    将浅色边缘自动替换为真实的黑发发色与红润颈部肤色。
+                    将浅色杂色反光智能替换为真实的头发深色、颈部健康肤色与正宗衣服布料原色。
                   </p>
                 </div>
 

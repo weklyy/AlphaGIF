@@ -164,25 +164,48 @@ export interface IdColorPreset {
 
 export const POPULAR_ID_COLORS: IdColorPreset[] = [
   {
-    id: 'transparent',
-    name: '透明背景',
-    type: 'transparent',
-    hex: 'transparent',
-    description: '无背景 PNG 透明图层，方便后续合成任意文档或自选底色',
+    id: 'red-guobiao',
+    name: '中国国标规范红 (官方标准)',
+    type: 'color',
+    hex: '#D9001B',
+    description: 'RGB(217, 0, 27) 国家官方标准规范红，资格考、正式证件、国家级官方标准首选',
+  },
+  {
+    id: 'red-spotlight',
+    name: '影楼立体柔光红 (推荐)',
+    type: 'gradient',
+    hex: '#E21E2C',
+    secondaryHex: '#9E0E18',
+    style: 'radial-spotlight',
+    description: '海马体/照相馆雷达罩立体柔光：中心温润饱满，自然烘托面部白皙气色，高级立体',
   },
   {
     id: 'red-classic',
-    name: '经典标准红',
+    name: '结婚登记经典正红',
     type: 'color',
     hex: '#C8102E',
-    description: 'RGB(200, 16, 46) 党政机关、团员证、暂住证、结婚登记红',
+    description: 'Pantone 186 C / RGB(200, 16, 46) 结婚登记红本、党团入职经典庄重红',
   },
   {
-    id: 'red-festive',
-    name: '喜庆深红',
+    id: 'red-carmine',
+    name: '典雅中国深绯红',
     type: 'color',
-    hex: '#BF1E24',
-    description: '婚姻登记处、荣誉证书、颁奖证书常用典雅深红',
+    hex: '#BA1422',
+    description: 'RGB(186, 20, 34) 荣誉表彰、学术证书、典雅喜庆端庄红',
+  },
+  {
+    id: 'red-rose',
+    name: '温润暖玫瑰红',
+    type: 'color',
+    hex: '#D32738',
+    description: '微暖调文艺红，适合社交履历、文艺肖像与形象照',
+  },
+  {
+    id: 'red-wine',
+    name: '高端商务酒红',
+    type: 'color',
+    hex: '#8B0D16',
+    description: '深邃典雅酒红，高管履历、商务年鉴推荐',
   },
   {
     id: 'blue-classic',
@@ -190,6 +213,15 @@ export const POPULAR_ID_COLORS: IdColorPreset[] = [
     type: 'color',
     hex: '#0066FF',
     description: 'RGB(0, 102, 255) 毕业证、工作证、简历、考试报名最常用蓝底',
+  },
+  {
+    id: 'gradient-blue-spotlight',
+    name: '影楼渐变蓝',
+    type: 'gradient',
+    hex: '#3B82F6',
+    secondaryHex: '#1E3A8A',
+    style: 'radial-spotlight',
+    description: '专业照相馆雷达罩柔光效果，人像背后聚光更显立体',
   },
   {
     id: 'blue-deep',
@@ -213,24 +245,6 @@ export const POPULAR_ID_COLORS: IdColorPreset[] = [
     description: '身份证、护照、港澳台通行证、驾照、教师资格证官方规定纯白底',
   },
   {
-    id: 'gradient-blue-spotlight',
-    name: '影楼渐变蓝',
-    type: 'gradient',
-    hex: '#3B82F6',
-    secondaryHex: '#1E3A8A',
-    style: 'radial-spotlight',
-    description: '专业照相馆雷达罩柔光效果，人像背后聚光更显立体',
-  },
-  {
-    id: 'gradient-red-spotlight',
-    name: '影楼渐变红',
-    type: 'gradient',
-    hex: '#EF4444',
-    secondaryHex: '#991B1B',
-    style: 'radial-spotlight',
-    description: '摄影棚经典渐变红，温润饱满不单调',
-  },
-  {
     id: 'morandi-gray',
     name: '高级莫兰迪灰',
     type: 'color',
@@ -243,6 +257,13 @@ export const POPULAR_ID_COLORS: IdColorPreset[] = [
     type: 'color',
     hex: '#E2DCD5',
     description: '文艺优雅、个人作品集、生活履历常用暖调',
+  },
+  {
+    id: 'transparent',
+    name: '透明背景',
+    type: 'transparent',
+    hex: 'transparent',
+    description: '无背景 PNG 透明图层，方便后续合成任意文档或自选底色',
   },
 ];
 
@@ -267,22 +288,24 @@ export function drawIdBackground(
 
   if (gradientStyle === 'radial-spotlight' || secondaryColor) {
     const centerColor = colorHex;
-    const outerColor = secondaryColor || adjustColorBrightness(colorHex, -40);
-    // Radial gradient from upper chest/neck position outward
+    const outerColor = secondaryColor || adjustColorBrightness(colorHex, -28);
+    // Smooth natural studio lighting falloff with wide soft highlight behind upper chest & neck
     const grad = ctx.createRadialGradient(
       width * 0.5,
-      height * 0.45,
-      Math.min(width, height) * 0.08,
+      height * 0.40,
+      Math.min(width, height) * 0.16,
       width * 0.5,
-      height * 0.5,
-      Math.max(width, height) * 0.75
+      height * 0.42,
+      Math.max(width, height) * 0.90
     );
     grad.addColorStop(0, centerColor);
+    grad.addColorStop(0.45, adjustColorBrightness(centerColor, -8));
+    grad.addColorStop(0.75, adjustColorBrightness(centerColor, -18));
     grad.addColorStop(1, outerColor);
     ctx.fillStyle = grad;
   } else if (gradientStyle === 'linear-top-down') {
     const grad = ctx.createLinearGradient(0, 0, 0, height);
-    grad.addColorStop(0, adjustColorBrightness(colorHex, 20));
+    grad.addColorStop(0, adjustColorBrightness(colorHex, 14));
     grad.addColorStop(1, colorHex);
     ctx.fillStyle = grad;
   } else {

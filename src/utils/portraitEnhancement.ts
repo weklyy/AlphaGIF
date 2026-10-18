@@ -28,11 +28,11 @@ export interface ClarityConfig {
 
 export const DEFAULT_HAIR_CONFIG: HairOptimizationConfig = {
   enabled: true,
-  deFringe: 95,
-  feather: 1.0,
-  edgeShift: -2.0, // 默认物理内收 2.0px 证件照标准像素，彻底切除白边
-  textureBoost: 50,
-  skinSmoothing: 65, // 默认 65% 自然磨皮平滑，抚平面部粗糙与暗沉
+  deFringe: 85,
+  feather: 0.5,
+  edgeShift: -1.2, // 默认物理微收 1.2px，配合智能消色溢，彻底消除红底白边
+  textureBoost: 45,
+  skinSmoothing: 50, // 自然柔和磨皮
 };
 
 export const DEFAULT_CLARITY_CONFIG: ClarityConfig = {
@@ -117,7 +117,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       sample(x, 0);
       sample(x, 2);
     }
-    const maxY = Math.round(height * 0.7);
+    const maxY = Math.round(height * 0.28);
     for (let y = 0; y < maxY; y += 4) {
       sample(0, y);
       sample(2, y);
@@ -153,6 +153,9 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
 
     const enqueue = (x: number, y: number) => {
       if (x < 0 || x >= width || y < 0 || y >= height) return;
+      // Absolute barrier: NEVER flood fill into torso / shoulders area below chin level
+      if (y >= height * 0.32) return;
+
       const idx = y * width + x;
       if (visited[idx]) return;
       visited[idx] = 1;
@@ -227,7 +230,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
     }
   }
 
-  const hairMaxY = Math.round(height * 0.52);
+  const hairMaxY = Math.round(height * 0.36);
 
   return {
     width,
@@ -296,6 +299,7 @@ export function renderSilhouetteData(
     const rampWidth = Math.max(0.6, 0.5 * scaleRatio);
     for (let y = 0; y < height; y++) {
       const row = y * width;
+      const isTorso = y >= height * 0.32;
       for (let x = 0; x < width; x++) {
         const i = row + x;
         const d = distMap[i];
@@ -307,26 +311,41 @@ export function renderSilhouetteData(
         const b = rawSrc[p + 2];
         const isSkin = isSkinPixel(r, g, b);
         const isHair = isHairPixel(r, g, b);
+        const isClothing = isTorso && !isSkin;
 
         let curTrimPx = actualTrimRawPx;
-        if (isSkin) {
-          // Protect entire face, jawline, ears, and neck from deep cuts (smooth continuous contour)
-          curTrimPx = Math.min(actualTrimRawPx, 0.25 * scaleRatio);
-        } else if (y >= height * 0.26 && isHair) {
+        if (isClothing) {
+          // Clothing & shoulders: trim outer white spill cleanly with crisp subpixel anti-aliasing
+          curTrimPx = actualTrimRawPx * 0.90;
+        } else if (isSkin) {
+          // Protect face, jawline, ears, and neck from deep cuts
+          curTrimPx = Math.min(actualTrimRawPx, 0.40 * scaleRatio);
+        } else if (y >= height * 0.24 && isHair) {
           // Protect sideburns and lower head hair
-          curTrimPx = Math.min(actualTrimRawPx, 0.35 * scaleRatio);
-        } else if (y >= height * 0.58) {
-          // Protect shirt, collar, and shoulders: maintain smooth natural cloth folds
-          curTrimPx = Math.min(actualTrimRawPx, 0.5 * scaleRatio);
+          curTrimPx = Math.min(actualTrimRawPx, 0.50 * scaleRatio);
         }
 
-        if (d <= curTrimPx) {
-          if (d <= curTrimPx - rampWidth) {
-            dst[i * 4 + 3] = 0; // Cut off completely
+        if (curTrimPx > 0 && d <= curTrimPx) {
+          if (isClothing) {
+            // Clothing edge has crisp 0.4px subpixel anti-aliasing (never blurry or transparent)
+            const clothRamp = Math.max(0.3, 0.35 * scaleRatio);
+            if (d <= curTrimPx - clothRamp) {
+              dst[i * 4 + 3] = 0; // Cut off white fringe completely
+            } else {
+              const ratio = Math.max(0, Math.min(1, (d - (curTrimPx - clothRamp)) / (clothRamp * 2)));
+              dst[i * 4 + 3] = Math.round(255 * ratio);
+            }
           } else {
-            const ratio = Math.max(0, Math.min(1, (d - (curTrimPx - rampWidth)) / rampWidth));
-            dst[i * 4 + 3] = Math.round(dst[i * 4 + 3] * ratio);
+            if (d <= curTrimPx - rampWidth) {
+              dst[i * 4 + 3] = 0; // Cut off completely
+            } else {
+              const ratio = Math.max(0, Math.min(1, (d - (curTrimPx - rampWidth)) / rampWidth));
+              dst[i * 4 + 3] = Math.round(dst[i * 4 + 3] * ratio);
+            }
           }
+        } else if (isClothing && d > curTrimPx) {
+          // Fabric inside is 100% solid opaque (eliminates any clothing blur or translucency)
+          dst[i * 4 + 3] = 255;
         }
       }
     }
@@ -341,15 +360,16 @@ export function renderSilhouetteData(
   }
 
   // 2. White Halo / De-fringe Spill Decontamination
-  // For pixels near the trimmed boundary, detect whitish residue and replace with genuine inner hair or skin color
+  // Operates across the ENTIRE silhouette (hair, neck, ears, and clothing/shoulders)
   if (deFringeRate > 0) {
-    const searchDepth = Math.round(Math.min(8, Math.max(4, 3.5 * scaleRatio)));
+    const searchDepth = Math.round(Math.min(9, Math.max(4, 4.0 * scaleRatio)));
     const deFringeZoneDepth = actualTrimRawPx + searchDepth;
-    const searchRadius = Math.round(Math.min(6, Math.max(3, 2.5 * scaleRatio)));
+    const searchRadius = Math.round(Math.min(7, Math.max(3, 3.0 * scaleRatio)));
 
     for (let y = 0; y < height; y++) {
       const isHairZone = y < hairMaxY;
       const inEarSideburnZone = y >= earTopY && y <= earBottomY;
+      const isTorso = y >= height * 0.32;
 
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
@@ -367,22 +387,24 @@ export function renderSilhouetteData(
         const isEarSideburnX = x < earLeftX || x > earRightX;
         const isSkin = isSkinPixel(curR, curG, curB);
         const isHair = isHairPixel(curR, curG, curB);
+        const isClothing = isTorso && !isSkin;
 
-        // Protect ears and sideburns
-        if (inEarSideburnZone && isEarSideburnX && (isSkin || isHair)) {
+        // Protect inner ears and sideburns
+        if (inEarSideburnZone && isEarSideburnX && (isSkin || isHair) && d > actualTrimRawPx + 2.5 * scaleRatio) {
           continue;
         }
 
-        const isPale = curR > 140 && curG > 140 && curB > 140;
-        const isWhitishOnHair = isHairZone && !isSkin && (curLum > 95 || isPale);
-        const isWhitishOnSkin = (!isHairZone || isSkin) && (curLum > 200 || (curR > 180 && curG > 180 && curB > 180 && Math.abs(curR - curB) < 30));
+        const isPale = curR > 135 && curG > 135 && curB > 135;
+        const isWhitishOnHair = isHairZone && !isSkin && (curLum > 85 || isPale);
+        const isWhitishOnSkin = (!isHairZone || isSkin) && (curLum > 190 || (curR > 170 && curG > 170 && curB > 170 && Math.abs(curR - curB) < 35));
+        const isWhitishOnClothing = isClothing && (curLum > 125 || isPale);
 
-        if (!isWhitishOnHair && !isWhitishOnSkin && !isPale) continue;
+        if (!isWhitishOnHair && !isWhitishOnSkin && !isWhitishOnClothing && !isPale) continue;
 
-        // Search inward for authentic inner hair or skin color
-        let innerR = isHairZone ? 24 : 215;
-        let innerG = isHairZone ? 22 : 160;
-        let innerB = isHairZone ? 20 : 140;
+        // Search inward along distMap for authentic inner color (hair, skin, or clothing fabric)
+        let innerR = isHairZone ? 24 : (isClothing ? 35 : 215);
+        let innerG = isHairZone ? 22 : (isClothing ? 35 : 160);
+        let innerB = isHairZone ? 20 : (isClothing ? 40 : 140);
         let foundInner = false;
         let minSearchDist = 99999;
         const minTargetDist = actualTrimRawPx + Math.max(2, 2.0 * scaleRatio);
@@ -407,6 +429,16 @@ export function renderSilhouetteData(
 
                 if (isHairZone && !isSkin) {
                   if (l0 < 110) {
+                    innerR = r0;
+                    innerG = g0;
+                    innerB = b0;
+                    minSearchDist = distSq;
+                    foundInner = true;
+                    if (distSq <= 8) break;
+                  }
+                } else if (isClothing) {
+                  // For clothing: sample authentic suit/shirt fabric color
+                  if (l0 < 190 || Math.abs(r0 - g0) > 10) {
                     innerR = r0;
                     innerG = g0;
                     innerB = b0;
@@ -439,7 +471,8 @@ export function renderSilhouetteData(
         dst[i * 4 + 1] = Math.round(curG * (1 - blendRatio) + innerG * blendRatio);
         dst[i * 4 + 2] = Math.round(curB * (1 - blendRatio) + innerB * blendRatio);
 
-        if (isPale && !isSkin && distFromCut <= 1.2 * scaleRatio) {
+        // Soften alpha only on fine hair tips, NEVER on skin or clothing
+        if (isPale && isHair && distFromCut <= 1.2 * scaleRatio) {
           dst[i * 4 + 3] = Math.round(a * (1 - 0.45 * deFringeRate));
         }
       }
@@ -474,6 +507,20 @@ export function renderSilhouetteData(
         const curA = alphaCopy[i];
 
         if (curA > 5 && curA < 250) {
+          const p = i * 4;
+          const isSkin = isSkinPixel(dst[p], dst[p + 1], dst[p + 2]);
+
+          // CLOTHING / SHOULDER CRISP PRESERVATION:
+          // Never blur or soften clothing edges into fuzzy translucent gradient!
+          if (y >= height * 0.32 && !isSkin) {
+            if (curA >= 115) {
+              dst[p + 3] = 255; // CLOTHING FABRIC IS 100% SOLID OPAQUE
+            } else {
+              dst[p + 3] = 0; // Cut off leftover weak background noise
+            }
+            continue; // Do NOT Gaussian blur clothing edges!
+          }
+
           let sumA = 0;
           let weightSum = 0;
 

@@ -425,17 +425,17 @@ export const PRINT_LAYOUT_PRESETS: PrintLayoutPreset[] = [
   {
     id: '8-1inch',
     name: '8 张 1 寸照排版 (4×2)',
-    description: '经典冲印版，整洁排列8张标准1寸照，含虚线裁剪辅助标记',
+    description: '标准 1 寸 (25×35mm / 295×413 px @ 300DPI)，冲印剪裁即为 8 张标准一寸照',
   },
   {
     id: '4-2inch',
     name: '4 张 2 寸照排版 (2×2)',
-    description: '排列4张标准2寸照，适合签证、学位证书备用冲印',
+    description: '标准 2 寸 (35×49mm / 413×579 px @ 300DPI)，适合签证、学位考试等冲印备用',
   },
   {
     id: 'mixed-1-and-2',
     name: '混拼版：4 张 1 寸 + 2 张 2 寸',
-    description: '实用混拼：一张相纸同时拥有1寸与2寸，满足不同场景备用',
+    description: '实用混拼：4 张 1 寸 (25×35mm) + 2 张 2 寸 (35×49mm)，一张相纸备齐常用规格',
   },
 ];
 
@@ -443,9 +443,10 @@ export async function generate6InchPrintSheet(
   idPhotoCanvas: HTMLCanvasElement,
   layoutType: '8-1inch' | '4-2inch' | 'mixed-1-and-2',
   oneInchCanvas?: HTMLCanvasElement,
-  twoInchCanvas?: HTMLCanvasElement
+  twoInchCanvas?: HTMLCanvasElement,
+  withCropMarks: boolean = true
 ): Promise<{ blob: Blob; url: string; width: number; height: number }> {
-  // 6寸相纸标准像素: 1205 x 1795 (300 DPI)
+  // 6寸相纸标准像素: 1205 x 1795 (300 DPI, 对应国际 4R / 102×152mm)
   const sheetW = 1795; // 宽版横向
   const sheetH = 1205;
   const canvas = document.createElement('canvas');
@@ -462,54 +463,63 @@ export async function generate6InchPrintSheet(
   ctx.lineWidth = 1;
   ctx.strokeRect(30, 30, sheetW - 60, sheetH - 60);
 
+  // Bottom info text (on white paper margin)
   ctx.fillStyle = '#94A3B8';
-  ctx.font = '14px sans-serif';
+  ctx.font = '13px sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('6寸 (4R / 102×152mm) 照相馆标准排版冲印照 • 请沿灰色裁剪线剪开使用', sheetW / 2, sheetH - 40);
+  const subText =
+    layoutType === '8-1inch'
+      ? '6寸 (4R / 102×152mm) 照相馆标准排版冲印照 • 单张标准 1 寸 (25×35mm / 300DPI) • 纯净无屏幕构图线'
+      : layoutType === '4-2inch'
+      ? '6寸 (4R / 102×152mm) 照相馆标准排版冲印照 • 单张标准 2 寸 (35×49mm / 300DPI) • 纯净无屏幕构图线'
+      : '6寸 (4R / 102×152mm) 照相馆标准排版冲印照 • 4 张 1 寸 (25×35mm) + 2 张 2 寸 (35×49mm) 混拼 • 纯净无屏幕构图线';
+  ctx.fillText(subText, sheetW / 2, sheetH - 40);
 
-  const drawPhotoWithGuides = (imgCanvas: HTMLCanvasElement, x: number, y: number, w: number, h: number) => {
-    // Draw photo
+  const drawPhotoItem = (imgCanvas: HTMLCanvasElement, x: number, y: number, w: number, h: number) => {
+    // 1. Draw photo (100% pristine photo, no guidelines across person)
     ctx.drawImage(imgCanvas, x, y, w, h);
 
-    // Draw subtle border around photo
-    ctx.strokeStyle = '#CBD5E1';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, w, h);
+    if (withCropMarks) {
+      // 2. Draw subtle boundary border around photo to guide scissors
+      ctx.strokeStyle = '#E2E8F0';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x, y, w, h);
 
-    // Draw scissor cutting tick marks at corners
-    ctx.strokeStyle = '#94A3B8';
-    ctx.setLineDash([4, 4]);
-    ctx.lineWidth = 1;
-
-    // Corner crosshairs / tick marks (extend 8px outwards)
-    const tick = 10;
-    // Top-left
-    ctx.beginPath();
-    ctx.moveTo(x - tick, y);
-    ctx.lineTo(x, y);
-    ctx.moveTo(x, y - tick);
-    ctx.lineTo(x, y);
-    // Top-right
-    ctx.moveTo(x + w + tick, y);
-    ctx.lineTo(x + w, y);
-    ctx.moveTo(x + w, y - tick);
-    ctx.lineTo(x + w, y);
-    // Bottom-left
-    ctx.moveTo(x - tick, y + h);
-    ctx.lineTo(x, y + h);
-    ctx.moveTo(x, y + h + tick);
-    ctx.lineTo(x, y + h);
-    // Bottom-right
-    ctx.moveTo(x + w + tick, y + h);
-    ctx.lineTo(x + w, y + h);
-    ctx.moveTo(x + w, y + h + tick);
-    ctx.lineTo(x + w, y + h);
-    ctx.stroke();
-    ctx.setLineDash([]); // reset dash
+      // 3. Draw scissor cutting tick marks at corners on white photo paper margin
+      ctx.strokeStyle = '#94A3B8';
+      ctx.lineWidth = 1;
+      const tick = 10;
+      ctx.beginPath();
+      // Top-left corner tick marks extending outwards onto white margin
+      ctx.moveTo(x - tick, y);
+      ctx.lineTo(x, y);
+      ctx.moveTo(x, y - tick);
+      ctx.lineTo(x, y);
+      // Top-right corner tick marks
+      ctx.moveTo(x + w + tick, y);
+      ctx.lineTo(x + w, y);
+      ctx.moveTo(x + w, y - tick);
+      ctx.lineTo(x + w, y);
+      // Bottom-left corner tick marks
+      ctx.moveTo(x - tick, y + h);
+      ctx.lineTo(x, y + h);
+      ctx.moveTo(x, y + h + tick);
+      ctx.lineTo(x, y + h);
+      // Bottom-right corner tick marks
+      ctx.moveTo(x + w + tick, y + h);
+      ctx.lineTo(x + w, y + h);
+      ctx.moveTo(x + w, y + h + tick);
+      ctx.lineTo(x + w, y + h);
+      ctx.stroke();
+    }
   };
 
+  // Strictly use 1-inch and 2-inch sources to prevent wrong aspect ratio distortion
+  const sourceOne = oneInchCanvas || idPhotoCanvas;
+  const sourceTwo = twoInchCanvas || idPhotoCanvas;
+
   if (layoutType === '8-1inch') {
-    // 8x 1-inch (295 x 413 px) in 4 columns x 2 rows
+    // 8x 1-inch (295 x 413 px @ 300DPI, 物理尺寸严格对应 25mm x 35mm) in 4 columns x 2 rows
     const photoW = 295;
     const photoH = 413;
     const cols = 4;
@@ -525,11 +535,11 @@ export async function generate6InchPrintSheet(
       for (let c = 0; c < cols; c++) {
         const x = startX + c * (photoW + gapX);
         const y = startY + r * (photoH + gapY);
-        drawPhotoWithGuides(idPhotoCanvas, x, y, photoW, photoH);
+        drawPhotoItem(sourceOne, x, y, photoW, photoH);
       }
     }
   } else if (layoutType === '4-2inch') {
-    // 4x 2-inch (413 x 579 px) in 2 columns x 2 rows
+    // 4x 2-inch (413 x 579 px @ 300DPI, 物理尺寸严格对应 35mm x 49mm) in 2 columns x 2 rows
     const photoW = 413;
     const photoH = 579;
     const cols = 2;
@@ -545,7 +555,7 @@ export async function generate6InchPrintSheet(
       for (let c = 0; c < cols; c++) {
         const x = startX + c * (photoW + gapX);
         const y = startY + r * (photoH + gapY);
-        drawPhotoWithGuides(idPhotoCanvas, x, y, photoW, photoH);
+        drawPhotoItem(sourceTwo, x, y, photoW, photoH);
       }
     }
   } else {
@@ -555,15 +565,12 @@ export async function generate6InchPrintSheet(
     const twoW = 413;
     const twoH = 579;
 
-    const sourceOne = oneInchCanvas || idPhotoCanvas;
-    const sourceTwo = twoInchCanvas || idPhotoCanvas;
-
     // Left: 2x 2-inch placed vertically
     const leftX1 = 160;
     const leftX2 = 160 + twoW + 60;
     const top2 = Math.round((sheetH - twoH) / 2) - 15;
-    drawPhotoWithGuides(sourceTwo, leftX1, top2, twoW, twoH);
-    drawPhotoWithGuides(sourceTwo, leftX2, top2, twoW, twoH);
+    drawPhotoItem(sourceTwo, leftX1, top2, twoW, twoH);
+    drawPhotoItem(sourceTwo, leftX2, top2, twoW, twoH);
 
     // Right: 4x 1-inch in 2x2 grid
     const rightStartX = leftX2 + twoW + 100;
@@ -572,7 +579,7 @@ export async function generate6InchPrintSheet(
       for (let c = 0; c < 2; c++) {
         const x = rightStartX + c * (oneW + 40);
         const y = rightStartY + r * (oneH + 40);
-        drawPhotoWithGuides(sourceOne, x, y, oneW, oneH);
+        drawPhotoItem(sourceOne, x, y, oneW, oneH);
       }
     }
   }

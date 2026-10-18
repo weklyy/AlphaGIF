@@ -24,6 +24,7 @@ export const PrintLayoutModal: React.FC<PrintLayoutModalProps> = ({
   currentPresetName,
 }) => {
   const [selectedLayout, setSelectedLayout] = useState<'8-1inch' | '4-2inch' | 'mixed-1-and-2'>('8-1inch');
+  const [withCropMarks, setWithCropMarks] = useState<boolean>(true);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [downloadBlob, setDownloadBlob] = useState<Blob | null>(null);
@@ -38,7 +39,7 @@ export const PrintLayoutModal: React.FC<PrintLayoutModalProps> = ({
     }
 
     generateSheet();
-  }, [isOpen, selectedLayout, idPhotoCanvas]);
+  }, [isOpen, selectedLayout, idPhotoCanvas, oneInchCanvas, twoInchCanvas, withCropMarks]);
 
   const generateSheet = async () => {
     if (!idPhotoCanvas) return;
@@ -48,7 +49,8 @@ export const PrintLayoutModal: React.FC<PrintLayoutModalProps> = ({
         idPhotoCanvas,
         selectedLayout,
         oneInchCanvas || undefined,
-        twoInchCanvas || undefined
+        twoInchCanvas || undefined,
+        withCropMarks
       );
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(res.url);
@@ -82,11 +84,14 @@ export const PrintLayoutModal: React.FC<PrintLayoutModalProps> = ({
               <Printer className="w-4.5 h-4.5" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-stone-900">
-                6 寸照相馆标准排版冲印照生成 (4R / 102×152mm)
+              <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+                <span>6 寸照相馆标准排版冲印照生成 (4R / 102×152mm)</span>
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full font-bold">
+                  纯净冲印版 • 0杂线
+                </span>
               </h3>
               <p className="text-[11px] text-stone-500">
-                符合照相馆 300DPI 高清冲印规格，自带十字与虚线裁切辅助标，洗印后剪开即用
+                符合照相馆 300DPI 冲印规格：8张版单张严格对应 25×35mm（标准1寸），已彻底去除任何屏幕构图虚线，洗印即用
               </p>
             </div>
           </div>
@@ -100,7 +105,21 @@ export const PrintLayoutModal: React.FC<PrintLayoutModalProps> = ({
         </div>
 
         {/* Content body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-5 bg-stone-100/60">
+        <div className="flex-1 overflow-y-auto p-6 space-y-4 bg-stone-100/60">
+          {/* Top Options Bar */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
+            <span className="text-xs font-bold text-stone-700">选择冲印排版规格：</span>
+            <label className="flex items-center gap-1.5 cursor-pointer text-xs text-stone-600 bg-white px-2.5 py-1 rounded-lg border border-stone-200 shadow-2xs">
+              <input
+                type="checkbox"
+                checked={withCropMarks}
+                onChange={(e) => setWithCropMarks(e.target.checked)}
+                className="rounded text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5 cursor-pointer"
+              />
+              <span className="font-medium">在白相纸留白处绘制外围裁剪角线标记（绝不覆盖照片画面）</span>
+            </label>
+          </div>
+
           {/* Layout Selector Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {PRINT_LAYOUT_PRESETS.map((p) => {

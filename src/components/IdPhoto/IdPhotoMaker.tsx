@@ -28,6 +28,9 @@ import {
   SlidersHorizontal,
   Layers,
   ZoomIn,
+  Plus,
+  Minus,
+  RotateCcw,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import {
@@ -136,17 +139,27 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   // Modals
   const [isCameraOpen, setIsCameraOpen] = useState<boolean>(false);
   const [isPrintModalOpen, setIsPrintModalOpen] = useState<boolean>(false);
+  const [printCanvases, setPrintCanvases] = useState<{
+    main: HTMLCanvasElement | null;
+    oneInch: HTMLCanvasElement | null;
+    twoInch: HTMLCanvasElement | null;
+  }>({ main: null, oneInch: null, twoInch: null });
+  const [isPreparingPrint, setIsPreparingPrint] = useState<boolean>(false);
   const [isExportingZip, setIsExportingZip] = useState<boolean>(false);
 
   // Drag interaction on preview canvas
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
+  // Apple-style Step 2 tab state: 'spec' | 'color' | 'retouch'
+  const [activeStepTab, setActiveStepTab] = useState<'spec' | 'color' | 'retouch'>('spec');
+
   // Canvas Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const rawCutoutImageDataRef = useRef<ImageData | null>(null);
   const transparentImgRef = useRef<HTMLImageElement | null>(null);
+  const originalImgRef = useRef<HTMLImageElement | null>(null);
 
   // Find current spec
   const currentSpec =
@@ -213,6 +226,13 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   // -------------------------------------------------------------
   const processImageFile = async (file: File) => {
     const originalUrl = URL.createObjectURL(file);
+    const origImg = new Image();
+    origImg.onload = () => {
+      originalImgRef.current = origImg;
+    };
+    origImg.src = originalUrl;
+    originalImgRef.current = origImg;
+
     setPortraitState({
       file,
       originalUrl,
@@ -384,6 +404,35 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
 
+      // 0. Hold-to-Compare Original Photo: If user is actively holding Compare Original,
+      // render the pristine unedited uploaded photo in natural framing!
+      if (isComparingOriginal && originalImgRef.current) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.save();
+        const orig = originalImgRef.current;
+        const origW = orig.naturalWidth || orig.width;
+        const origH = orig.naturalHeight || orig.height;
+        const imgAspect = origW / origH;
+        const canvasAspect = width / height;
+        let drawW = width;
+        let drawH = height;
+        if (imgAspect > canvasAspect) {
+          drawH = height;
+          drawW = height * imgAspect;
+        } else {
+          drawW = width;
+          drawH = width / imgAspect;
+        }
+        drawW *= zoom;
+        drawH *= zoom;
+        ctx.translate(width / 2 + panX * dpiScale, height / 2 + panY * dpiScale);
+        if (rotation !== 0) ctx.rotate((rotation * Math.PI) / 180);
+        if (flipX) ctx.scale(-1, 1);
+        ctx.drawImage(orig, -drawW / 2, -drawH / 2, drawW, drawH);
+        ctx.restore();
+        return;
+      }
+
       // 1. Draw Background
       if (currentColor.type === 'transparent') {
         ctx.clearRect(0, 0, width, height);
@@ -400,11 +449,10 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       }
 
       // 2. Draw Subject Portrait (with Hair & Edge Optimization)
-      // If comparing original, use raw transparent img; otherwise use optimized canvas or override
       const subjectSource: HTMLCanvasElement | HTMLImageElement | null =
         overrideSubjectSource !== undefined
           ? overrideSubjectSource
-          : (!isComparingOriginal && hairConfig.enabled && optimizedCanvas
+          : (hairConfig.enabled && optimizedCanvas
               ? optimizedCanvas
               : transparentImgRef.current);
 
@@ -457,6 +505,29 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         drawH *= zoom;
 
         ctx.drawImage(subjectSource, -drawW / 2, -drawH / 2, drawW, drawH);
+
+        // TORSO BOTTOM EXTENSION (Eliminates bottom red background box / gap):
+        // When user drags subject upwards (panY < 0), or due to aspect ratio / zoom,
+        // the bottom edge of the subject (-drawH/2 to drawH/2) might end above canvas bottom (height).
+        // In local coordinates, canvas bottom is (height - centerY).
+        // If (height - centerY) > drawH / 2, an exposed gap of background color (e.g. red) would appear under the clothes!
+        // We seamlessly extend the bottom-most 4px strip of the clothing fabric down to the canvas bottom.
+        const canvasBottomInLocal = height - centerY;
+        if (canvasBottomInLocal > drawH / 2) {
+          const extensionHeight = canvasBottomInLocal - drawH / 2 + 3;
+          ctx.drawImage(
+            subjectSource,
+            0,
+            Math.max(0, naturalH - 4),
+            naturalW,
+            4,
+            -drawW / 2,
+            drawH / 2 - 1,
+            drawW,
+            extensionHeight
+          );
+        }
+
         ctx.restore();
       }
 
@@ -593,18 +664,26 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDragging) return;
-    setPanX(e.clientX - dragStart.x);
-    setPanY(e.clientY - dragStart.y);
+    const newPanX = e.clientX - dragStart.x;
+    const newPanY = e.clientY - dragStart.y;
+    // Bounding limits to keep portrait grounded and natural
+    const limitX = targetWidthPx * 0.6;
+    const limitY = targetHeightPx * 0.6;
+    setPanX(Math.max(-limitX, Math.min(limitX, newPanX)));
+    setPanY(Math.max(-limitY, Math.min(limitY, newPanY)));
   };
 
   const handleMouseUp = () => {
     setIsDragging(false);
   };
 
+  // Wheel zoom is kept only when Ctrl/Cmd is pressed to prevent hijacking normal page scroll
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.05 : -0.05;
-    setZoom((prev) => Math.max(0.4, Math.min(3.0, Number((prev + delta).toFixed(2)))));
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 0.05 : -0.05;
+      setZoom((prev) => Math.max(0.5, Math.min(2.5, Number((prev + delta).toFixed(2)))));
+    }
   };
 
   // -------------------------------------------------------------
@@ -825,6 +904,58 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       onNotification?.('导出失败，请重试');
     } finally {
       setIsExportingZip(false);
+    }
+  };
+
+  // Generate pristine, 100% guideline-free canvases for 6-inch print layout
+  const handleOpenPrintModal = async () => {
+    setIsPreparingPrint(true);
+    onNotification?.('正在排版冲印底图（已自动清除屏幕构图辅助线）...');
+    try {
+      // 1. Current specification clean photo (STRICTLY withGuides = false)
+      const mainCanvas = document.createElement('canvas');
+      await renderIdPhotoToCanvas(
+        mainCanvas,
+        targetWidthPx,
+        targetHeightPx,
+        false, // withGuides: false (NEVER include blue dashed guidelines or guide text!)
+        2,     // 600 DPI for high fidelity
+        clarityConfig.enabled
+      );
+
+      // 2. Standard 1-inch clean photo (STRICTLY withGuides = false)
+      const oneInchCanvas = document.createElement('canvas');
+      await renderIdPhotoToCanvas(
+        oneInchCanvas,
+        295,
+        413,
+        false, // withGuides: false
+        2,
+        clarityConfig.enabled
+      );
+
+      // 3. Standard 2-inch clean photo (STRICTLY withGuides = false)
+      const twoInchCanvas = document.createElement('canvas');
+      await renderIdPhotoToCanvas(
+        twoInchCanvas,
+        413,
+        579,
+        false, // withGuides: false
+        2,
+        clarityConfig.enabled
+      );
+
+      setPrintCanvases({
+        main: mainCanvas,
+        oneInch: oneInchCanvas,
+        twoInch: twoInchCanvas,
+      });
+      setIsPrintModalOpen(true);
+    } catch (err) {
+      console.error('Failed to prepare print canvas:', err);
+      onNotification?.('排版底图生成失败，请重试');
+    } finally {
+      setIsPreparingPrint(false);
     }
   };
 
@@ -1767,52 +1898,93 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         </div>
 
         {/* Right Column: Live High-Definition Canvas Preview & Smart Clarity Controls (Width: 5 / 12) */}
-        <div className="lg:col-span-5 space-y-5 lg:sticky lg:top-24">
+        <div className="lg:col-span-5 space-y-4 lg:sticky lg:top-24">
           <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
-            {/* Header info */}
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
-                  实时超清预览 • {currentSpec.name}
-                </h3>
-                <p className="text-[11px] text-stone-500 font-mono">
-                  {targetWidthPx} × {targetHeightPx} px @ 300 DPI (冲印级精度)
-                </p>
+            {/* Header info & Top Controls */}
+            <div className="flex flex-col gap-2 pb-1 border-b border-stone-100">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
+                    实时效果预览 • {currentSpec.name}
+                  </h3>
+                  <p className="text-[11px] text-stone-500 font-mono">
+                    {targetWidthPx} × {targetHeightPx} px @ 300 DPI
+                  </p>
+                </div>
+
+                {/* Format selection */}
+                <div className="flex items-center gap-1 bg-stone-100 p-0.5 rounded-xl text-xs font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => setExportFormat('png')}
+                    className={`px-2 py-0.5 rounded-lg transition-colors cursor-pointer ${
+                      exportFormat === 'png'
+                        ? 'bg-white text-stone-900 shadow-2xs'
+                        : 'text-stone-500 hover:text-stone-800'
+                    }`}
+                  >
+                    PNG
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExportFormat('jpg')}
+                    className={`px-2 py-0.5 rounded-lg transition-colors cursor-pointer ${
+                      exportFormat === 'jpg'
+                        ? 'bg-white text-stone-900 shadow-2xs'
+                        : 'text-stone-500 hover:text-stone-800'
+                    }`}
+                  >
+                    JPG
+                  </button>
+                </div>
               </div>
 
-              {/* Format selection */}
-              <div className="flex items-center gap-1 bg-stone-100 p-1 rounded-xl text-xs font-bold">
+              {/* Toolbar: Compare Original & Guidelines (Moved Outside the Photo!) */}
+              <div className="flex items-center justify-between gap-2 pt-1">
+                {portraitState.originalUrl ? (
+                  <button
+                    type="button"
+                    onMouseDown={() => setIsComparingOriginal(true)}
+                    onMouseUp={() => setIsComparingOriginal(false)}
+                    onMouseLeave={() => setIsComparingOriginal(false)}
+                    onTouchStart={() => setIsComparingOriginal(true)}
+                    onTouchEnd={() => setIsComparingOriginal(false)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer select-none active:scale-95 ${
+                      isComparingOriginal
+                        ? 'bg-amber-500 text-white shadow-sm ring-2 ring-amber-300'
+                        : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
+                    }`}
+                    title="按住即可查看原始上传照片，松开即刻恢复精修证件照"
+                  >
+                    <Eye className="w-3.5 h-3.5 text-amber-500" />
+                    <span>{isComparingOriginal ? '正在对比原图...' : '按住对比原图'}</span>
+                  </button>
+                ) : (
+                  <span className="text-[11px] text-stone-400">上传人像后可对比原图</span>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => setExportFormat('png')}
-                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                    exportFormat === 'png'
-                      ? 'bg-white text-stone-900 shadow-2xs'
-                      : 'text-stone-500 hover:text-stone-800'
+                  onClick={() => setShowGuidelines((v) => !v)}
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    showGuidelines
+                      ? 'bg-blue-50 text-blue-700 border-blue-200 shadow-2xs'
+                      : 'bg-stone-50 text-stone-500 border-stone-200 hover:bg-stone-100'
                   }`}
+                  title="开关官方人像对称构图三线（头顶/双眼/下巴）"
                 >
-                  PNG
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setExportFormat('jpg')}
-                  className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
-                    exportFormat === 'jpg'
-                      ? 'bg-white text-stone-900 shadow-2xs'
-                      : 'text-stone-500 hover:text-stone-800'
-                  }`}
-                >
-                  JPG
+                  {showGuidelines ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                  <span>{showGuidelines ? '构图虚线: 开' : '构图虚线: 关'}</span>
                 </button>
               </div>
             </div>
 
             {/* Interactive Canvas Viewport */}
             <div
-              className={`relative rounded-xl overflow-hidden border border-stone-200 flex items-center justify-center p-4 min-h-[380px] select-none ${
+              className={`relative rounded-2xl overflow-hidden border border-stone-200/90 flex items-center justify-center p-4 min-h-[380px] select-none ${
                 currentColor.type === 'transparent'
                   ? 'bg-[linear-gradient(45deg,#f0f0f0_25%,transparent_25%),linear-gradient(-45deg,#f0f0f0_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#f0f0f0_75%),linear-gradient(-45deg,transparent_75%,#f0f0f0_75%)] bg-[size:16px_16px] bg-[position:0_0,0_8px,8px_-8px,-8px_0]'
-                  : 'bg-stone-100'
+                  : 'bg-stone-100/70'
               }`}
             >
               <canvas
@@ -1821,38 +1993,63 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
                 onMouseLeave={handleMouseUp}
-                onWheel={handleWheel}
                 className="max-h-[340px] max-w-full rounded shadow-md border border-stone-300/80 cursor-grab active:cursor-grabbing transition-transform"
                 style={{
                   aspectRatio: `${targetWidthPx} / ${targetHeightPx}`,
                 }}
               />
 
-              {/* Top compare badge button: Hold to Compare original */}
-              <div className="absolute top-2.5 right-2.5">
+              {/* Floating Compare Original Indicator Badge */}
+              {isComparingOriginal && (
+                <div className="absolute top-3 inset-x-0 flex justify-center z-20 pointer-events-none animate-in fade-in duration-100">
+                  <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-500 text-white shadow-md flex items-center gap-1.5">
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>当前展示：原始拍摄照片（松开返回精修）</span>
+                  </span>
+                </div>
+              )}
+
+              {/* Floating Zoom & Framing Toolbar on the Right Side of Preview */}
+              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex flex-col items-center bg-white/95 backdrop-blur-md rounded-2xl p-1.5 shadow-md border border-stone-200/90 z-20 gap-1.5">
                 <button
                   type="button"
-                  onMouseDown={() => setIsComparingOriginal(true)}
-                  onMouseUp={() => setIsComparingOriginal(false)}
-                  onMouseLeave={() => setIsComparingOriginal(false)}
-                  onTouchStart={() => setIsComparingOriginal(true)}
-                  onTouchEnd={() => setIsComparingOriginal(false)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold shadow-sm transition-all flex items-center gap-1 cursor-pointer select-none ${
-                    isComparingOriginal
-                      ? 'bg-amber-500 text-white ring-2 ring-amber-300'
-                      : 'bg-black/60 hover:bg-black/75 text-white/90 backdrop-blur-xs'
-                  }`}
-                  title="按住即可查看未进行发丝去白边与清晰度增强的原始画质"
+                  onClick={() => setZoom((prev) => Math.min(2.5, Number((prev + 0.1).toFixed(2))))}
+                  className="w-8 h-8 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center justify-center transition-all active:scale-90 cursor-pointer shadow-2xs"
+                  title="放大照片 (+10%)"
                 >
-                  <Eye className="w-3 h-3" />
-                  <span>{isComparingOriginal ? '正在显示原画质...' : '按住对比原画质'}</span>
+                  <Plus className="w-4 h-4 text-stone-700" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setZoom(1.0); setPanX(0); setPanY(0); }}
+                  className="text-[10px] font-bold font-mono text-stone-600 hover:text-indigo-600 px-1 py-0.5 rounded cursor-pointer transition-colors"
+                  title="点击复位缩放到 100%"
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoom((prev) => Math.max(0.5, Number((prev - 0.1).toFixed(2))))}
+                  className="w-8 h-8 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center justify-center transition-all active:scale-90 cursor-pointer shadow-2xs"
+                  title="缩小照片 (-10%)"
+                >
+                  <Minus className="w-4 h-4 text-stone-700" />
+                </button>
+                <div className="w-4 h-[1px] bg-stone-200 my-0.5" />
+                <button
+                  type="button"
+                  onClick={() => { setZoom(1.0); setPanX(0); setPanY(0); setRotation(0); }}
+                  className="w-8 h-8 rounded-xl bg-stone-50 hover:bg-stone-100 text-stone-500 hover:text-stone-800 flex items-center justify-center transition-all active:scale-90 cursor-pointer"
+                  title="重置居中与平移"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
                 </button>
               </div>
 
-              {/* Drag instruction overlay badge */}
+              {/* Drag instruction overlay badge at bottom */}
               <div className="absolute bottom-2.5 inset-x-0 flex justify-center pointer-events-none">
                 <span className="px-2.5 py-1 rounded-full text-[10px] font-medium bg-black/60 text-white/90 backdrop-blur-xs">
-                  按住左键拖拽平移 • 滚轮缩放 • 超清去白边实时呈现
+                  按住左键拖拽平移 • 右侧加减号缩放 • 自动贴底无红框
                 </span>
               </div>
             </div>
@@ -2087,11 +2284,13 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  onClick={() => setIsPrintModalOpen(true)}
-                  className="py-2.5 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs border border-emerald-300 flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  onClick={handleOpenPrintModal}
+                  disabled={isPreparingPrint}
+                  className="py-2.5 px-3 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs border border-emerald-300 flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  title="生成 6 寸照相馆标准排版冲印照，纯净无屏幕构图辅助线"
                 >
                   <Printer className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>6寸排版冲印照</span>
+                  <span>{isPreparingPrint ? '排版准备中...' : '6寸排版冲印照'}</span>
                 </button>
 
                 <button
@@ -2138,7 +2337,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       <PrintLayoutModal
         isOpen={isPrintModalOpen}
         onClose={() => setIsPrintModalOpen(false)}
-        idPhotoCanvas={previewCanvasRef.current}
+        idPhotoCanvas={printCanvases.main}
+        oneInchCanvas={printCanvases.oneInch}
+        twoInchCanvas={printCanvases.twoInch}
         currentPresetName={currentSpec.name}
       />
     </div>

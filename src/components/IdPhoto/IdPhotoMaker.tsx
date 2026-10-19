@@ -125,6 +125,8 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     ...DEFAULT_CLARITY_CONFIG,
   });
   const [isComparingOriginal, setIsComparingOriginal] = useState<boolean>(false);
+  // Pure Original Photo Mode: Keeps the original photo unedited and unoptimized, just cropped to ID photo spec
+  const [useOriginalOnly, setUseOriginalOnly] = useState<boolean>(false);
 
   // Suit Attire Overlay
   const [selectedSuitId, setSelectedSuitId] = useState<string>('none');
@@ -151,8 +153,8 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Apple-style Step 2 tab state: 'spec' | 'color' | 'retouch'
-  const [activeStepTab, setActiveStepTab] = useState<'spec' | 'color' | 'retouch'>('spec');
+  // Apple-style Step 2 tab state: 'spec' | 'color' | 'suit' | 'retouch'
+  const [activeStepTab, setActiveStepTab] = useState<'spec' | 'color' | 'suit' | 'retouch'>('spec');
 
   // Canvas Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -222,16 +224,42 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   }, []);
 
   // -------------------------------------------------------------
-  // File Upload & Automatic Matting Process
+  // File Upload & Processing (Supports Pure Original Crop vs AI Matting)
   // -------------------------------------------------------------
-  const processImageFile = async (file: File) => {
+  const processImageFile = async (file: File, forceMode?: boolean) => {
     const originalUrl = URL.createObjectURL(file);
     const origImg = new Image();
-    origImg.onload = () => {
-      originalImgRef.current = origImg;
-    };
-    origImg.src = originalUrl;
+    origImg.crossOrigin = 'anonymous';
+    await new Promise<void>((resolve, reject) => {
+      origImg.onload = () => resolve();
+      origImg.onerror = () => reject(new Error('无法读取图片'));
+      origImg.src = originalUrl;
+    });
     originalImgRef.current = origImg;
+
+    // Reset framing transforms to natural center
+    setZoom(1.0);
+    setPanX(0);
+    setPanY(0);
+    setRotation(0);
+    setFlipX(false);
+
+    const isOrig = forceMode !== undefined ? forceMode : useOriginalOnly;
+
+    if (isOrig) {
+      setPortraitState({
+        file,
+        originalUrl,
+        transparentUrl: originalUrl,
+        transparentBlob: null,
+        transparentImageData: null,
+        isMatting: false,
+        mattingProgress: 100,
+        mattingMessage: '原图已就绪！仅按证件照规格裁剪，保持原始画质与原图背景',
+      });
+      onNotification?.(`📷 已成功载入原图！仅按「${currentSpec.name}」规格尺寸剪切，保持原图画质未做任何优化`);
+      return;
+    }
 
     setPortraitState({
       file,
@@ -243,13 +271,6 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       mattingProgress: 10,
       mattingMessage: '正在启动 AI 人物智能分割识别...',
     });
-
-    // Reset framing transforms to natural center
-    setZoom(1.0);
-    setPanX(0);
-    setPanY(0);
-    setRotation(0);
-    setFlipX(false);
 
     try {
       const cacheKey = `id_matting_${file.name}_${file.size}_${file.lastModified}`;
@@ -332,6 +353,71 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     }
   };
 
+  // Switch to AI matting on-demand if user was in pure original mode
+  const triggerAiMatting = async () => {
+    if (!portraitState.file) return;
+    if (portraitState.transparentBlob && rawCutoutImageDataRef.current) {
+      setUseOriginalOnly(false);
+      onNotification?.('已切换至「智能抠图换底精修」模式：支持替换底色、智能正装与发丝超清优化');
+      return;
+    }
+
+    setPortraitState((prev) => ({
+      ...prev,
+      isMatting: true,
+      mattingProgress: 15,
+      mattingMessage: '正在启动 AI 抠图引擎分割发丝与人像...',
+    }));
+
+    try {
+      const cacheKey = `id_matting_${portraitState.file.name}_${portraitState.file.size}_${portraitState.file.lastModified}`;
+      const mattingResult = await removeBackgroundWithAI(
+        portraitState.file,
+        cacheKey,
+        (progress) => {
+          setPortraitState((prev) => ({
+            ...prev,
+            mattingProgress: progress.progress,
+            mattingMessage: progress.message,
+          }));
+        }
+      );
+
+      rawCutoutImageDataRef.current = mattingResult.imageData;
+      const field = buildSilhouetteField(mattingResult.imageData);
+      silhouetteFieldRef.current = field;
+
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('无法解析抠图结果图像'));
+        img.src = mattingResult.url;
+      });
+      transparentImgRef.current = img;
+
+      const optCanvas = createOptimizedPortraitCanvas(field, hairConfig);
+      setOptimizedCanvas(optCanvas);
+
+      setPortraitState((prev) => ({
+        ...prev,
+        transparentUrl: mattingResult.url,
+        transparentBlob: mattingResult.blob,
+        transparentImageData: mattingResult.imageData,
+        isMatting: false,
+        mattingProgress: 100,
+        mattingMessage: 'AI 抠图完成！发丝细节精细提取，已去除杂色光晕',
+      }));
+
+      setUseOriginalOnly(false);
+      onNotification?.('✨ AI 智能抠图成功！已完成人像提取与发丝颈部去白边优化');
+    } catch (err: any) {
+      console.error('AI Matting failed, falling back:', err);
+      setUseOriginalOnly(false);
+      onNotification?.('已切换为智能换底模式');
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -404,9 +490,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
 
-      // 0. Hold-to-Compare Original Photo: If user is actively holding Compare Original,
-      // render the pristine unedited uploaded photo in natural framing!
-      if (isComparingOriginal && originalImgRef.current) {
+      // 0. Pure Original Photo Mode OR Hold-to-Compare:
+      // If user enabled "纯原图仅裁剪" or is holding "对比原图", render pristine original photo without ANY modification!
+      if ((useOriginalOnly || isComparingOriginal) && originalImgRef.current) {
         ctx.clearRect(0, 0, width, height);
         ctx.save();
         const orig = originalImgRef.current;
@@ -430,6 +516,47 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         if (flipX) ctx.scale(-1, 1);
         ctx.drawImage(orig, -drawW / 2, -drawH / 2, drawW, drawH);
         ctx.restore();
+
+        // Standard Guidelines for on-screen composition (if enabled)
+        if (withGuides) {
+          ctx.save();
+          ctx.strokeStyle = 'rgba(59, 130, 246, 0.75)';
+          ctx.lineWidth = Math.max(1, Math.round(dpiScale));
+          ctx.setLineDash([4 * dpiScale, 4 * dpiScale]);
+
+          const topHeadY = Math.round(height * 0.12);
+          ctx.beginPath();
+          ctx.moveTo(0, topHeadY);
+          ctx.lineTo(width, topHeadY);
+          ctx.stroke();
+
+          const eyesY = Math.round(height * 0.38);
+          ctx.beginPath();
+          ctx.moveTo(0, eyesY);
+          ctx.lineTo(width, eyesY);
+          ctx.stroke();
+
+          const chinY = Math.round(height * 0.68);
+          ctx.beginPath();
+          ctx.moveTo(0, chinY);
+          ctx.lineTo(width, chinY);
+          ctx.stroke();
+
+          const midX = Math.round(width / 2);
+          ctx.beginPath();
+          ctx.moveTo(midX, 0);
+          ctx.lineTo(midX, height);
+          ctx.stroke();
+
+          ctx.fillStyle = 'rgba(59, 130, 246, 0.9)';
+          ctx.font = `${Math.round(10 * dpiScale)}px sans-serif`;
+          ctx.textAlign = 'left';
+          ctx.fillText('头顶基准线', 8 * dpiScale, topHeadY - 4 * dpiScale);
+          ctx.fillText('双眼水平线', 8 * dpiScale, eyesY - 4 * dpiScale);
+          ctx.fillText('下巴基准线', 8 * dpiScale, chinY - 4 * dpiScale);
+
+          ctx.restore();
+        }
         return;
       }
 
@@ -606,6 +733,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       selectedSuitId,
       suitScale,
       suitOffsetY,
+      useOriginalOnly,
     ]
   );
 
@@ -650,12 +778,14 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     targetHeightPx,
     showGuidelines,
     portraitState.transparentUrl,
+    portraitState.originalUrl,
     optimizedCanvas,
     isComparingOriginal,
+    useOriginalOnly,
   ]);
 
   // -------------------------------------------------------------
-  // Drag & Wheel Interaction for Quick Repositioning
+  // Drag & Zoom Interaction with Bottom Torso Anchoring (NO Red Box at Bottom)
   // -------------------------------------------------------------
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     setIsDragging(true);
@@ -666,24 +796,65 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     if (!isDragging) return;
     const newPanX = e.clientX - dragStart.x;
     const newPanY = e.clientY - dragStart.y;
-    // Bounding limits to keep portrait grounded and natural
-    const limitX = targetWidthPx * 0.6;
-    const limitY = targetHeightPx * 0.6;
-    setPanX(Math.max(-limitX, Math.min(limitX, newPanX)));
-    setPanY(Math.max(-limitY, Math.min(limitY, newPanY)));
+
+    // Calculate actual drawn height to strictly anchor bottom edge
+    const subject = useOriginalOnly
+      ? originalImgRef.current
+      : (optimizedCanvas || transparentImgRef.current);
+    let drawW = targetWidthPx;
+    let drawH = targetHeightPx;
+    if (subject) {
+      const naturalW =
+        subject instanceof HTMLImageElement ? subject.naturalWidth || subject.width : subject.width;
+      const naturalH =
+        subject instanceof HTMLImageElement ? subject.naturalHeight || subject.height : subject.height;
+      const imgAspect = naturalW / naturalH;
+      const canvasAspect = targetWidthPx / targetHeightPx;
+      if (imgAspect > canvasAspect) {
+        drawH = targetHeightPx;
+        drawW = targetHeightPx * imgAspect;
+      } else {
+        drawW = targetWidthPx;
+        drawH = targetWidthPx / imgAspect;
+      }
+      drawW *= zoom;
+      drawH *= zoom;
+    }
+
+    if (useOriginalOnly) {
+      // In original photo cropping mode, allow smooth flexible panning within bounds to compose the portrait
+      const maxPanX = Math.max(targetWidthPx * 0.8, (drawW - targetWidthPx) / 2);
+      const maxPanY = Math.max(targetHeightPx * 0.8, (drawH - targetHeightPx) / 2);
+      setPanX(Math.max(-maxPanX, Math.min(maxPanX, newPanX)));
+      setPanY(Math.max(-maxPanY, Math.min(maxPanY, newPanY)));
+    } else {
+      // STRICT CLAMPING for AI mode: In canvas coordinates, the bottom of the subject is:
+      //   bottomY = targetHeightPx / 2 + panY + drawH / 2
+      // To ensure the torso clothes ALWAYS touch or exceed the bottom of the canvas:
+      //   targetHeightPx / 2 + panY + drawH / 2 >= targetHeightPx
+      //   => panY >= (targetHeightPx - drawH) / 2
+      // Thus minimum panY (most upward movement allowed) is:
+      const minPanY = (targetHeightPx - drawH) / 2;
+      // Maximum downward movement allowed (prevents head sinking off screen)
+      const maxPanY = targetHeightPx * 0.25;
+      // Horizontal bounds
+      const limitX = targetWidthPx * 0.35;
+
+      setPanX(Math.max(-limitX, Math.min(limitX, newPanX)));
+      setPanY(Math.max(minPanY, Math.min(maxPanY, newPanY)));
+    }
   };
 
   const handleMouseUp = () => {
     setIsDragging(false);
   };
 
-  // Wheel zoom is kept only when Ctrl/Cmd is pressed to prevent hijacking normal page scroll
-  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      const delta = e.deltaY < 0 ? 0.05 : -0.05;
-      setZoom((prev) => Math.max(0.5, Math.min(2.5, Number((prev + delta).toFixed(2)))));
-    }
+  const handleSnapToBottomCenter = () => {
+    setZoom(1.0);
+    setPanX(0);
+    setPanY(0);
+    setRotation(0);
+    onNotification?.('已复位居中对齐');
   };
 
   // -------------------------------------------------------------
@@ -702,7 +873,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       targetHeightPx,
       false,
       dpiMultiplier,
-      clarityConfig.enabled
+      useOriginalOnly ? false : clarityConfig.enabled
     );
 
     const isTransparent = currentColor.type === 'transparent';
@@ -719,14 +890,18 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
 
     const a = document.createElement('a');
     a.href = res.url;
-    a.download = `证件照_${currentSpec.name}_${currentColor.name}_${dpiLabel}${sizeNote}.${effectiveFormat}`;
+    a.download = useOriginalOnly
+      ? `证件照_原图裁剪_${currentSpec.name}_${targetWidthPx}x${targetHeightPx}_${dpiLabel}${sizeNote}.${effectiveFormat}`
+      : `证件照_${currentSpec.name}_${currentColor.name}_${dpiLabel}${sizeNote}.${effectiveFormat}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(res.url);
 
     onNotification?.(
-      `🎉 智能证件照已成功导出！(${finalW}×${finalH} px @ ${300 * dpiMultiplier} DPI, ${Math.round(res.size / 1024)} KB)！`
+      useOriginalOnly
+        ? `🎉 已成功导出「${currentSpec.name}」原图剪裁照！(${finalW}×${finalH} px @ ${300 * dpiMultiplier} DPI，保持原图画质未做任何优化)`
+        : `🎉 智能证件照已成功导出！(${finalW}×${finalH} px @ ${300 * dpiMultiplier} DPI, ${Math.round(res.size / 1024)} KB)！`
     );
   };
 
@@ -920,7 +1095,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         targetHeightPx,
         false, // withGuides: false (NEVER include blue dashed guidelines or guide text!)
         2,     // 600 DPI for high fidelity
-        clarityConfig.enabled
+        useOriginalOnly ? false : clarityConfig.enabled
       );
 
       // 2. Standard 1-inch clean photo (STRICTLY withGuides = false)
@@ -931,7 +1106,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         413,
         false, // withGuides: false
         2,
-        clarityConfig.enabled
+        useOriginalOnly ? false : clarityConfig.enabled
       );
 
       // 3. Standard 2-inch clean photo (STRICTLY withGuides = false)
@@ -942,7 +1117,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
         579,
         false, // withGuides: false
         2,
-        clarityConfig.enabled
+        useOriginalOnly ? false : clarityConfig.enabled
       );
 
       setPrintCanvases({
@@ -972,52 +1147,48 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
-      {/* Top Banner / Feature Intro */}
-      <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 rounded-2xl p-5 text-white shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-        <div className="space-y-1.5">
+      {/* Apple-style Minimal Header */}
+      <div className="bg-white/80 backdrop-blur-md rounded-2xl p-4 md:p-5 border border-stone-200/90 shadow-2xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+        <div className="space-y-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-pink-500/30 text-pink-200 border border-pink-400/30 flex items-center gap-1">
-              <Scissors className="w-3 h-3 text-pink-300" />
-              发丝与颈部深度去白边 • 边缘微收内剪
+            <h2 className="text-base md:text-lg font-bold text-stone-900 tracking-tight flex items-center gap-2">
+              <span>智能证件照制作工坊</span>
+            </h2>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-stone-100 text-stone-600 border border-stone-200">
+              极简极速
             </span>
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-400/30 flex items-center gap-1">
-              <Zap className="w-3 h-3 text-amber-300" />
-              智能超清增强 (600DPI 极清)
-            </span>
-            <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
-              国家通用标准规范
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              国标 300/600 DPI
             </span>
           </div>
-          <h2 className="text-lg font-bold">证件照一键智能生成与发丝超清优化套件</h2>
-          <p className="text-xs text-blue-200/80 leading-relaxed max-w-2xl">
-            深度优化头发与颈部边缘：采用精确距离场物理收边与去色溢算法，消除红蓝底色下的白边与阶梯锯齿；提供 300DPI 官方标准与 600DPI 双倍超清下载，解决下载图片模糊问题。
+          <p className="text-xs text-stone-500">
+            三步自然逻辑：<span className="text-stone-800 font-semibold">① 上传正面人像</span> → <span className="text-stone-800 font-semibold">② 选规格换底色</span> → <span className="text-stone-800 font-semibold">③ 实时预览下载</span>
           </p>
         </div>
 
-        {/* Quick Actions & Demo Portrait Loaders */}
-        <div className="shrink-0 flex flex-col sm:flex-row items-start sm:items-center gap-2">
-          {/* One click auto enhance button */}
+        {/* Quick Actions & Demo Portals */}
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={handleOneClickAutoEnhance}
-            className="px-3.5 py-2 text-xs font-bold bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 rounded-xl shadow-md text-white flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+            className="px-3.5 py-1.5 text-xs font-semibold bg-stone-900 hover:bg-black text-white rounded-xl shadow-xs flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
             title="一键切除白边、消除光晕杂色、提升五官清晰度"
           >
-            <Zap className="w-3.5 h-3.5 fill-white" />
-            <span>⚡ 一键强力去白边超清</span>
+            <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
+            <span>智能一键调优</span>
           </button>
 
-          <div className="flex items-center gap-1.5 bg-white/10 p-1.5 rounded-xl border border-white/10 backdrop-blur-xs">
-            <span className="text-[11px] text-blue-200 font-medium pl-1">快速测试：</span>
+          <div className="flex items-center gap-1 bg-stone-100/90 p-1 rounded-xl text-xs border border-stone-200/60">
+            <span className="text-[11px] text-stone-400 pl-1.5 font-medium">示例：</span>
             {DEMO_PORTRAITS.map((demo) => (
               <button
                 key={demo.id}
                 type="button"
                 onClick={() => handleSelectDemoPortrait(demo)}
                 disabled={portraitState.isMatting}
-                className="px-2.5 py-1 text-xs font-bold bg-white/15 hover:bg-white/25 rounded-lg border border-white/20 transition-all text-white flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                className="px-2.5 py-1 text-xs font-medium text-stone-700 hover:text-stone-950 hover:bg-white rounded-lg transition-all cursor-pointer disabled:opacity-50"
               >
-                <span>{demo.id === 'demo-male-mature' ? '👨 自然发丝' : demo.gender === 'male' ? '👨 青年男士' : '👩 职场女士'}</span>
+                {demo.id === 'demo-male-mature' ? '👨 自然发丝' : demo.gender === 'male' ? '👨 青年男' : '👩 职场女'}
               </button>
             ))}
           </div>
@@ -1028,80 +1199,195 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Configuration Controls (Width: 7 / 12) */}
         <div className="lg:col-span-7 space-y-5">
-          {/* Section 1: Upload & Input Card */}
-          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
+          {/* Apple-style Step 1: Upload Photo Card */}
+          <div className="bg-white rounded-2xl p-5 border border-stone-200/90 shadow-2xs space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
+                <span className="w-6 h-6 rounded-full bg-stone-900 text-white flex items-center justify-center font-bold text-xs">
                   1
-                </div>
-                <h3 className="text-sm font-bold text-stone-900">上传人像照片</h3>
+                </span>
+                <h3 className="text-sm font-bold text-stone-900">第一步：上传照片</h3>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setIsCameraOpen(true)}
-                  className="px-3 py-1.5 text-xs font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                  className="px-3 py-1.5 text-xs font-semibold text-stone-700 bg-stone-100 hover:bg-stone-200 rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>摄像头直接拍摄</span>
+                  <Camera className="w-3.5 h-3.5 text-stone-600" />
+                  <span>摄像头拍照</span>
                 </button>
               </div>
             </div>
 
-            {/* Dropzone */}
-            <div
-              onDrop={handleDrop}
-              onDragOver={(e) => e.preventDefault()}
-              onClick={() => fileInputRef.current?.click()}
-              className={`border-2 border-dashed rounded-xl p-5 text-center transition-all cursor-pointer ${
-                portraitState.file
-                  ? 'border-indigo-300 bg-indigo-50/20 hover:bg-indigo-50/40'
-                  : 'border-stone-300 hover:border-indigo-500 hover:bg-stone-50'
-              }`}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/jpg"
-                onChange={handleFileChange}
-                className="hidden"
-              />
-              <div className="flex flex-col items-center justify-center gap-2">
-                <div className="w-10 h-10 rounded-full bg-stone-100 text-stone-600 flex items-center justify-center">
-                  <Upload className="w-5 h-5 text-indigo-600" />
+            {/* Mode Switcher in Step 1: Pure Original Crop (No Optimization) vs AI Matting & Enhance */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-1 bg-stone-100 rounded-xl border border-stone-200/70">
+              <button
+                type="button"
+                onClick={() => {
+                  setUseOriginalOnly(true);
+                  onNotification?.('已启用「纯原图直接裁切」：使用原图仅按证件照尺寸裁剪，保留原图真实画质与原图背景，不做任何优化');
+                }}
+                className={`px-3 py-2.5 rounded-lg text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+                  useOriginalOnly
+                    ? 'bg-white text-stone-900 shadow-2xs font-bold border border-stone-200'
+                    : 'text-stone-600 hover:text-stone-900'
+                }`}
+              >
+                <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${useOriginalOnly ? 'bg-blue-600 text-white' : 'bg-stone-200 text-stone-500'}`}>
+                  <Camera className="w-4 h-4" />
                 </div>
-                <div className="space-y-0.5">
-                  <p className="text-xs font-bold text-stone-800">
-                    {portraitState.file ? (
-                      <span className="text-indigo-600">
-                        当前文件: {portraitState.file.name} (点击可更换照片)
+                <div className="min-w-0">
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span>纯原图直接裁切</span>
+                    <span className="text-[10px] px-1 py-0.2 rounded bg-blue-100 text-blue-800 font-semibold">
+                      原图零优化
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-stone-400 truncate">保留原图背景与画质 • 仅按一寸等规格裁剪</p>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (portraitState.file && !portraitState.transparentBlob) {
+                    await triggerAiMatting();
+                  } else {
+                    setUseOriginalOnly(false);
+                    onNotification?.('已切换至「智能抠图换底精修」模式：支持替换底色、智能正装与发丝超清优化');
+                  }
+                }}
+                className={`px-3 py-2.5 rounded-lg text-left transition-all cursor-pointer flex items-center gap-2.5 ${
+                  !useOriginalOnly
+                    ? 'bg-white text-stone-900 shadow-2xs font-bold border border-stone-200'
+                    : 'text-stone-600 hover:text-stone-900'
+                }`}
+              >
+                <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${!useOriginalOnly ? 'bg-stone-900 text-white' : 'bg-stone-200 text-stone-500'}`}>
+                  <Sparkles className="w-4 h-4 text-amber-300" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span>智能抠图换底精修</span>
+                    <span className="text-[10px] px-1 py-0.2 rounded bg-emerald-100 text-emerald-800 font-semibold">
+                      AI换底 • 正装
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-stone-400 truncate">自动去背景 • 红/蓝/白底 • 正装换装</p>
+                </div>
+              </button>
+            </div>
+
+            {/* If photo is already uploaded, show clean minimal summary card */}
+            {portraitState.file ? (
+              <div className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 ${
+                useOriginalOnly ? 'bg-blue-50/70 border-blue-200' : 'bg-stone-50/80 border-stone-200'
+              }`}>
+                <div className="flex items-center gap-3 min-w-0">
+                  {portraitState.originalUrl ? (
+                    <img
+                      src={portraitState.originalUrl}
+                      alt="已上传照片"
+                      className="w-12 h-14 object-cover rounded-lg border border-stone-300/80 shrink-0 shadow-2xs"
+                    />
+                  ) : (
+                    <div className="w-12 h-14 rounded-lg bg-stone-200 flex items-center justify-center text-stone-400 shrink-0">
+                      <Upload className="w-5 h-5" />
+                    </div>
+                  )}
+                  <div className="min-w-0 space-y-0.5">
+                    <p className="text-xs font-bold text-stone-900 truncate">
+                      {portraitState.file.name}
+                    </p>
+                    <p className="text-[11px] text-stone-500 font-mono">
+                      {(portraitState.file.size / 1024).toFixed(1)} KB • {useOriginalOnly ? '纯原图模式 (100% 原始画质与原背景)' : 'AI 抠图与发丝优化已就绪'}
+                    </p>
+                    {useOriginalOnly ? (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-blue-700 bg-blue-100/80 px-2 py-0.5 rounded-full border border-blue-200">
+                        <Check className="w-3 h-3 text-blue-600" />
+                        原图载入成功 • 仅裁剪未做任何优化
                       </span>
                     ) : (
-                      '点击或拖拽上传人像正面照片（支持 JPG/PNG/WEBP）'
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                        <Check className="w-3 h-3 text-emerald-600" />
+                        人像识别成功
+                      </span>
                     )}
-                  </p>
-                  <p className="text-[11px] text-stone-400">
-                    光线均匀、正面免冠拍摄效果最佳；系统将自动精修发丝与五官细节
-                  </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {useOriginalOnly && (
+                    <button
+                      type="button"
+                      onClick={triggerAiMatting}
+                      className="px-2.5 py-1.5 text-xs font-semibold text-stone-700 bg-white hover:bg-stone-100 border border-stone-300 rounded-xl shadow-2xs transition-all cursor-pointer flex items-center gap-1"
+                      title="切换为 AI 抠图换底色"
+                    >
+                      <Sparkles className="w-3 h-3 text-amber-500" />
+                      <span>开启AI换底</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3 py-1.5 text-xs font-semibold bg-white hover:bg-stone-100 text-stone-800 border border-stone-300 rounded-xl shadow-2xs transition-all cursor-pointer"
+                  >
+                    更换照片
+                  </button>
                 </div>
               </div>
-            </div>
+            ) : (
+              /* Dropzone when no photo is uploaded */
+              <div
+                onDrop={handleDrop}
+                onDragOver={(e) => e.preventDefault()}
+                onClick={() => fileInputRef.current?.click()}
+                className="border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer border-stone-300 hover:border-stone-500 hover:bg-stone-50/60"
+              >
+                <div className="flex flex-col items-center justify-center gap-2.5">
+                  <div className={`w-11 h-11 rounded-full flex items-center justify-center shadow-2xs ${useOriginalOnly ? 'bg-blue-50 text-blue-600' : 'bg-stone-100 text-stone-600'}`}>
+                    {useOriginalOnly ? <Camera className="w-5 h-5 text-blue-600" /> : <Upload className="w-5 h-5 text-stone-700" />}
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-stone-800">
+                      {useOriginalOnly
+                        ? `点击选取照片，直接按「${currentSpec.name}」规格精准剪切原图`
+                        : '点击选取照片，或将人像图片拖拽到这里'}
+                    </p>
+                    <p className="text-[11px] text-stone-400">
+                      {useOriginalOnly
+                        ? '📷 保持原图真实画质与原图背景，不做抠图换底与磨皮滤镜，0 秒极速完成'
+                        : '支持 JPG / PNG / WEBP，自动人像抠图、发丝去白边与智能换底'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/jpg"
+              onChange={handleFileChange}
+              className="hidden"
+            />
 
             {/* Matting Progress Indicator */}
             {portraitState.isMatting && (
-              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl space-y-2 animate-in fade-in duration-150">
+              <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl space-y-2 animate-in fade-in duration-150">
                 <div className="flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2 text-blue-900 font-bold">
-                    <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+                  <div className="flex items-center gap-2 text-stone-800 font-bold">
+                    <div className="w-4 h-4 border-2 border-stone-800 border-t-transparent rounded-full animate-spin" />
                     <span>{portraitState.mattingMessage || 'AI 正在自动抠图精修发丝中...'}</span>
                   </div>
-                  <span className="font-mono text-blue-700">{portraitState.mattingProgress}%</span>
+                  <span className="font-mono text-stone-600">{portraitState.mattingProgress}%</span>
                 </div>
-                <div className="w-full bg-blue-200/60 rounded-full h-1.5 overflow-hidden">
+                <div className="w-full bg-stone-200 rounded-full h-1.5 overflow-hidden">
                   <div
-                    className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                    className="bg-stone-900 h-1.5 rounded-full transition-all duration-300"
                     style={{ width: `${portraitState.mattingProgress}%` }}
                   />
                 </div>
@@ -1109,805 +1395,708 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
             )}
           </div>
 
-          {/* Section 2: Preset Size Specifications */}
-          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
-                  2
+          {/* Apple-style Step 2: Specification & Customization Card with Segmented Tabs */}
+          <div className="bg-white rounded-2xl p-5 border border-stone-200/90 shadow-2xs space-y-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-stone-900 text-white flex items-center justify-center font-bold text-xs">
+                    2
+                  </span>
+                  <h3 className="text-sm font-bold text-stone-900">第二步：选择规格与调整</h3>
                 </div>
-                <h3 className="text-sm font-bold text-stone-900">选择证件照规格</h3>
-              </div>
-              <span className="text-xs text-stone-500 font-mono">
-                {currentSpec.widthMm} × {currentSpec.heightMm} mm ({targetWidthPx} × {targetHeightPx} px @ 300DPI)
-              </span>
-            </div>
 
-            {/* Specification Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-              {ID_PHOTO_PRESETS.map((spec) => {
-                const active = selectedPresetKey === spec.key;
-                return (
+                {/* Mode Switcher: AI Smart Retouch vs Pure Original Crop */}
+                <div className="flex items-center p-1 bg-stone-100 rounded-xl text-xs font-semibold gap-1 self-start sm:self-auto border border-stone-200/60">
                   <button
-                    key={spec.key}
                     type="button"
-                    onClick={() => setSelectedPresetKey(spec.key)}
-                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
-                      active
-                        ? 'bg-blue-50 border-blue-500 shadow-xs ring-1 ring-blue-500/20'
-                        : 'bg-white border-stone-200 hover:border-stone-300 hover:bg-stone-50'
+                    onClick={() => {
+                      setUseOriginalOnly(false);
+                      onNotification?.('已切换至「智能抠图换底精修」模式：支持替换底色、智能正装与发丝超清优化');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                      !useOriginalOnly
+                        ? 'bg-white text-stone-900 shadow-2xs font-bold'
+                        : 'text-stone-500 hover:text-stone-800'
                     }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className={`text-xs font-bold ${active ? 'text-blue-700' : 'text-stone-800'}`}>
-                        {spec.name}
-                      </span>
-                      {active && <Check className="w-3.5 h-3.5 text-blue-600" />}
-                    </div>
-                    <span className="text-[10px] text-stone-500 font-mono mt-1">
-                      {spec.widthMm}×{spec.heightMm}mm
-                    </span>
+                    <Sparkles className={`w-3.5 h-3.5 ${!useOriginalOnly ? 'text-amber-500' : 'text-stone-400'}`} />
+                    <span>智能抠图换底精修</span>
                   </button>
-                );
-              })}
-            </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUseOriginalOnly(true);
+                      onNotification?.('已开启「纯原图仅裁剪」模式：保持上传原图背景与 100% 原始画质，不做任何换底磨皮优化');
+                    }}
+                    className={`px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                      useOriginalOnly
+                        ? 'bg-stone-900 text-white shadow-2xs font-bold'
+                        : 'text-stone-500 hover:text-stone-800'
+                    }`}
+                  >
+                    <Camera className={`w-3.5 h-3.5 ${useOriginalOnly ? 'text-amber-300' : 'text-stone-400'}`} />
+                    <span>纯原图仅裁剪规格 (不做任何优化)</span>
+                  </button>
+                </div>
+              </div>
 
-            {/* Spec info detail banner */}
-            <div className="p-3 bg-stone-50 rounded-xl border border-stone-200/80 text-xs text-stone-600 flex items-start gap-2">
-              <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-bold text-stone-800">{currentSpec.name}：</span>
-                <span>{currentSpec.description}</span>
+              {/* Informative Banner for Pure Original Photo Mode */}
+              {useOriginalOnly && (
+                <div className="p-3 bg-blue-50/70 border border-blue-200/80 rounded-xl text-xs text-blue-950 flex items-start gap-2.5 animate-in fade-in duration-150">
+                  <Info className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <p className="font-bold flex items-center gap-1.5">
+                      <span>纯原图剪裁模式生效中</span>
+                      <span className="px-1.5 py-0.2 rounded text-[10px] bg-blue-200/70 text-blue-800 font-semibold">
+                        原图原画质 • 零优化
+                      </span>
+                    </p>
+                    <p className="text-[11px] text-blue-800/90 leading-relaxed">
+                      当前直接使用您上传的 100% 原始照片，<strong>保留原图背景、不做抠图换底、不做磨皮滤镜</strong>；仅精准裁剪为所选规格尺寸（如标准 1 寸 25×35mm）。可在预览区使用右侧加减号缩放，拖动画面对齐构图基准线。
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Apple-style Segmented Control Bar */}
+              <div className="flex items-center p-1 bg-stone-100 rounded-xl text-xs font-semibold gap-1 self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setActiveStepTab('spec')}
+                  className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                    activeStepTab === 'spec'
+                      ? 'bg-white text-stone-900 shadow-2xs font-bold'
+                      : 'text-stone-500 hover:text-stone-800'
+                  }`}
+                >
+                  📏 证件规格
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStepTab('color')}
+                  className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                    activeStepTab === 'color'
+                      ? 'bg-white text-stone-900 shadow-2xs font-bold'
+                      : 'text-stone-500 hover:text-stone-800'
+                  }`}
+                >
+                  🎨 背景底色 {useOriginalOnly && <span className="text-[10px] text-stone-400 font-normal">(原图背景)</span>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStepTab('suit')}
+                  className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                    activeStepTab === 'suit'
+                      ? 'bg-white text-stone-900 shadow-2xs font-bold'
+                      : 'text-stone-500 hover:text-stone-800'
+                  }`}
+                >
+                  👔 正装换装
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStepTab('retouch')}
+                  className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                    activeStepTab === 'retouch'
+                      ? 'bg-white text-stone-900 shadow-2xs font-bold'
+                      : 'text-stone-500 hover:text-stone-800'
+                  }`}
+                >
+                  ✨ 发丝美化
+                </button>
               </div>
             </div>
 
-            {/* Custom size inputs if 'custom' is selected */}
-            {selectedPresetKey === 'custom' && (
-              <div className="p-3 bg-blue-50/50 rounded-xl border border-blue-200 grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="block text-stone-600 font-medium mb-1">宽度 (像素 px):</label>
-                  <input
-                    type="number"
-                    value={customWidthPx}
-                    onChange={(e) => setCustomWidthPx(Math.max(50, Number(e.target.value)))}
-                    className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-stone-600 font-medium mb-1">高度 (像素 px):</label>
-                  <input
-                    type="number"
-                    value={customHeightPx}
-                    onChange={(e) => setCustomHeightPx(Math.max(50, Number(e.target.value)))}
-                    className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Section 3: Background Transparency & Color Switcher */}
-          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
-                  3
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
-                    一键换底色与背景光效
-                    <span className="text-[10px] bg-rose-50 text-rose-600 px-2 py-0.5 rounded-full font-bold">
-                      影楼级聚光优化
+            {/* TAB CONTENT 1: SPECIFICATION */}
+            {activeStepTab === 'spec' && (
+              <div className="space-y-3.5 animate-in fade-in duration-150">
+                {useOriginalOnly && (
+                  <div className="p-3 bg-blue-50/80 border border-blue-200/90 rounded-xl text-xs text-blue-950 flex items-center justify-between gap-3 animate-in fade-in duration-150">
+                    <div className="flex items-center gap-2">
+                      <Camera className="w-4 h-4 text-blue-600 shrink-0" />
+                      <span>
+                        纯原图剪裁模式生效中：仅按所选「<strong>{currentSpec.name}</strong>（{currentSpec.widthMm}×{currentSpec.heightMm}mm）」裁剪，保持 100% 原始画质与原图背景，不做任何修改。
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-md shrink-0">
+                      {targetWidthPx} × {targetHeightPx} px
                     </span>
-                  </h3>
-                  <p className="text-[11px] text-stone-400">
-                    当前底色：<span className="text-stone-700 font-bold">{currentColor.name}</span>
-                  </p>
-                </div>
-              </div>
+                  </div>
+                )}
 
-              {/* Lighting Mode Switcher */}
-              <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl text-xs self-start sm:self-auto">
-                <button
-                  type="button"
-                  onClick={() => setBgLightingMode('auto')}
-                  className={`px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer ${
-                    bgLightingMode === 'auto'
-                      ? 'bg-white text-stone-900 font-bold shadow-2xs'
-                      : 'text-stone-500 hover:text-stone-700'
-                  }`}
-                  title="使用所选色块的专属默认效果"
-                >
-                  智能预设
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBgLightingMode('spotlight')}
-                  className={`px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer flex items-center gap-1 ${
-                    bgLightingMode === 'spotlight'
-                      ? 'bg-white text-rose-600 font-bold shadow-2xs'
-                      : 'text-stone-500 hover:text-stone-700'
-                  }`}
-                  title="背后柔和聚光立体光晕，衬托人物红润气色"
-                >
-                  <span>✨ 影楼立体柔光</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBgLightingMode('solid')}
-                  className={`px-2.5 py-1 rounded-lg text-xs transition-all cursor-pointer ${
-                    bgLightingMode === 'solid'
-                      ? 'bg-white text-stone-900 font-bold shadow-2xs'
-                      : 'text-stone-500 hover:text-stone-700'
-                  }`}
-                  title="国家官方规范纯平底色"
-                >
-                  官方纯色
-                </button>
-              </div>
-            </div>
-
-            {/* Dedicated Red ID Photo Quick Selector Bar */}
-            <div className="p-3.5 bg-gradient-to-r from-rose-50 via-red-50 to-orange-50 rounded-xl border border-rose-200/80 space-y-2.5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-rose-950 flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse"></span>
-                    证件照标准红底专区 (专为国家正式证件/结婚登记/海马体影楼调教)
-                  </span>
-                  <span className="text-[10px] bg-red-600 text-white px-1.5 py-0.2 rounded font-bold">
-                    官方规范
+                <div className="flex items-center justify-between text-xs text-stone-500">
+                  <span>常用国家官方标准规格（点击即可切换）：</span>
+                  <span className="font-mono font-medium">
+                    {currentSpec.widthMm} × {currentSpec.heightMm} mm ({targetWidthPx} × {targetHeightPx} px @ 300DPI)
                   </span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const newCfg: HairOptimizationConfig = {
-                      ...hairConfig,
-                      enabled: true,
-                      deFringe: 100,
-                      edgeShift: -2.0,
-                      feather: 0.5,
-                      textureBoost: 45,
-                      skinSmoothing: 50,
-                    };
-                    setHairConfig(newCfg);
-                    applyHairOptimization(newCfg);
-                    onNotification?.('✨ 已执行红底白边净化：边缘微收2.0px + 消色溢100%，红底白边彻底消除！');
-                  }}
-                  className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-bold shadow-2xs transition-all flex items-center gap-1 cursor-pointer self-start sm:self-auto"
-                  title="一键立即彻底去除红底人像周边的所有白边和反光"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  <span>一键彻底除红底白边</span>
-                </button>
-              </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {[
-                  { id: 'red-guobiao', name: '中国国标规范红', tag: '国家官方标准', hex: '#D9001B', desc: '资格考/政务规范' },
-                  { id: 'red-spotlight', name: '影楼立体柔光红', tag: '海马体柔光', hex: '#E21E2C', desc: '雷达罩立体聚光' },
-                  { id: 'red-classic', name: '结婚登记经典正红', tag: '婚姻登记照', hex: '#C8102E', desc: '结婚证/团员证' },
-                  { id: 'red-carmine', name: '典雅中国深绯红', tag: '典雅沉稳', hex: '#BA1422', desc: '证书/荣誉表彰' },
-                  { id: 'red-rose', name: '温润暖玫瑰红', tag: '文艺柔美', hex: '#D32738', desc: '社交履历/形象照' },
-                  { id: 'red-wine', name: '高端商务酒红', tag: '商务典雅', hex: '#8B0D16', desc: '企业高管年鉴' },
-                ].map((item) => {
-                  const isCur = selectedColorId === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setSelectedColorId(item.id)}
-                      className={`p-2 rounded-lg border text-left flex items-center gap-2 transition-all cursor-pointer ${
-                        isCur
-                          ? 'bg-white border-red-600 shadow-2xs ring-1 ring-red-500'
-                          : 'bg-white/80 hover:bg-white border-rose-200/60'
-                      }`}
-                    >
-                      <div
-                        className="w-5 h-5 rounded-md shrink-0 border border-black/10 shadow-2xs"
-                        style={{ backgroundColor: item.hex }}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-[11px] font-bold text-stone-900 truncate flex items-center justify-between">
-                          <span>{item.name}</span>
-                          <span className="text-[9px] text-red-700 bg-red-100/70 px-1 py-0.2 rounded font-normal">
-                            {item.tag}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                  {ID_PHOTO_PRESETS.map((spec) => {
+                    const active = selectedPresetKey === spec.key;
+                    return (
+                      <button
+                        key={spec.key}
+                        type="button"
+                        onClick={() => setSelectedPresetKey(spec.key)}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-1.5 ${
+                          active
+                            ? 'bg-stone-900 text-white border-stone-900 shadow-xs'
+                            : 'bg-stone-50/60 hover:bg-stone-100/80 border-stone-200 text-stone-800'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className={`text-xs font-bold ${active ? 'text-white' : 'text-stone-900'}`}>
+                            {spec.name}
+                          </span>
+                          {active && <Check className="w-3.5 h-3.5 text-white" />}
+                        </div>
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className={active ? 'text-stone-300 font-mono' : 'text-stone-500 font-mono'}>
+                            {spec.widthMm}×{spec.heightMm}mm
+                          </span>
+                          <span className={`text-[10px] ${active ? 'text-stone-300' : 'text-stone-400'}`}>
+                            {spec.key === '1-inch'
+                              ? '常用报名'
+                              : spec.key === '2-inch'
+                              ? '护照签证'
+                              : spec.key === 'small-2-inch'
+                              ? '通行证'
+                              : '官方规范'}
                           </span>
                         </div>
-                        <div className="text-[10px] text-stone-500 font-mono truncate">{item.desc}</div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+                      </button>
+                    );
+                  })}
+                </div>
 
-            {/* Background Color Swatches */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-              {POPULAR_ID_COLORS.map((col) => {
-                const active = selectedColorId === col.id;
-                const isTrans = col.id === 'transparent';
-                return (
-                  <button
-                    key={col.id}
-                    type="button"
-                    onClick={() => setSelectedColorId(col.id)}
-                    className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer ${
-                      active
-                        ? 'border-indigo-600 bg-indigo-50/50 shadow-xs ring-1 ring-indigo-600/30'
-                        : 'border-stone-200 hover:border-stone-300 bg-white'
-                    }`}
-                  >
-                    {/* Color dot */}
-                    <div
-                      className={`w-6 h-6 rounded-lg shrink-0 border border-stone-300/80 shadow-2xs ${
-                        isTrans
-                          ? 'bg-[linear-gradient(45deg,#ccc_25%,transparent_25%),linear-gradient(-45deg,#ccc_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#ccc_75%),linear-gradient(-45deg,transparent_75%,#ccc_75%)] bg-[size:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0]'
-                          : ''
-                      }`}
-                      style={{
-                        backgroundColor: isTrans ? undefined : col.hex,
-                        backgroundImage: col.secondaryHex
-                          ? `radial-gradient(circle, ${col.hex}, ${col.secondaryHex})`
-                          : undefined,
-                      }}
-                    />
-                    <div className="text-left overflow-hidden">
-                      <div className="text-xs font-bold text-stone-800 truncate">{col.name}</div>
-                      <div className="text-[10px] text-stone-400 font-mono truncate">
-                        {isTrans ? 'PNG 透明' : col.hex}
+                {/* Spec description card */}
+                <div className="p-3 bg-stone-50 rounded-xl border border-stone-200/80 text-xs text-stone-600 flex items-start gap-2">
+                  <Info className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold text-stone-800">{currentSpec.name}：</span>
+                    <span>{currentSpec.description}</span>
+                  </div>
+                </div>
+
+                {/* Custom size inputs if 'custom' is selected */}
+                {selectedPresetKey === 'custom' && (
+                  <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="block text-stone-600 font-medium mb-1">宽度 (像素 px):</label>
+                      <input
+                        type="number"
+                        value={customWidthPx}
+                        onChange={(e) => setCustomWidthPx(Math.max(50, Number(e.target.value)))}
+                        className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-stone-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-stone-600 font-medium mb-1">高度 (像素 px):</label>
+                      <input
+                        type="number"
+                        value={customHeightPx}
+                        onChange={(e) => setCustomHeightPx(Math.max(50, Number(e.target.value)))}
+                        className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-stone-800"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB CONTENT 2: BACKGROUND COLOR */}
+            {activeStepTab === 'color' && (
+              <div className="space-y-4 animate-in fade-in duration-150">
+                {useOriginalOnly && (
+                  <div className="p-3.5 bg-amber-50/80 border border-amber-200/90 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-in fade-in duration-150">
+                    <div className="flex items-center gap-2">
+                      <Camera className="w-4 h-4 text-amber-600 shrink-0" />
+                      <div>
+                        <p className="font-bold">当前处于「纯原图直接裁切」模式</p>
+                        <p className="text-[11px] text-amber-800">
+                          正在直接使用您上传照片的原始背景，未做任何换底。若需要更换底色（红/蓝/白），请开启智能换底。
+                        </p>
                       </div>
                     </div>
-                  </button>
-                );
-              })}
-
-              {/* Custom Color Picker Button */}
-              <label
-                className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer ${
-                  selectedColorId === 'custom'
-                    ? 'border-indigo-600 bg-indigo-50/50 shadow-xs ring-1 ring-indigo-600/30'
-                    : 'border-stone-200 hover:border-stone-300 bg-white'
-                }`}
-              >
-                <input
-                  type="color"
-                  value={customColorHex}
-                  onChange={(e) => {
-                    setCustomColorHex(e.target.value);
-                    setSelectedColorId('custom');
-                  }}
-                  className="w-6 h-6 rounded-lg shrink-0 border border-stone-300 cursor-pointer p-0 bg-transparent"
-                />
-                <div className="text-left overflow-hidden">
-                  <div className="text-xs font-bold text-stone-800">自定义颜色</div>
-                  <div className="text-[10px] text-stone-400 font-mono">{customColorHex}</div>
-                </div>
-              </label>
-            </div>
-          </div>
-
-          {/* Section 4: Hair & Neck Detail & Edge Optimization (发丝与全身去白边精修) */}
-          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-pink-50 text-pink-600 flex items-center justify-center font-bold text-xs">
-                  <Scissors className="w-3.5 h-3.5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
-                    边缘去白边与发丝精修
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-pink-100 text-pink-700">
-                      消除红底发际/颈部/肩膀白边
-                    </span>
-                  </h3>
-                  <p className="text-[11px] text-stone-400">
-                    针对红底人像头发边缘、颈部及双肩衣服的浅色白边进行物理内收剪切与消色溢，衣服保持高质感不虚化
-                  </p>
-                </div>
-              </div>
-
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={hairConfig.enabled}
-                  onChange={(e) =>
-                    setHairConfig((prev) => ({ ...prev, enabled: e.target.checked }))
-                  }
-                  className="rounded text-pink-600 focus:ring-pink-500 w-4 h-4 cursor-pointer"
-                />
-                <span className="text-xs font-bold text-stone-700">开启边缘优化</span>
-              </label>
-            </div>
-
-            {/* Quick Hair & Edge Presets */}
-            <div className="space-y-1.5">
-              <span className="text-[11px] text-stone-500 font-medium">快捷去白边与发丝调优预设（点击即刻实时生效）：</span>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {[
-                  {
-                    name: '一键彻底消除白边 (推荐)',
-                    desc: '物理内收1.8px+消色溢95%，彻底去除白边',
-                    highlight: true,
-                    config: { deFringe: 95, feather: 0.5, edgeShift: -1.8, textureBoost: 45, skinSmoothing: 50 },
-                  },
-                  {
-                    name: '✂️ 强力切除顽固白边',
-                    desc: '物理内收3.5px，切除复杂粗糙白色毛边',
-                    config: { deFringe: 100, feather: 0.5, edgeShift: -3.5, textureBoost: 45, skinSmoothing: 55 },
-                  },
-                  {
-                    name: '官方证件规范微收',
-                    desc: '微收1.2px，兼顾发梢细节与净边磨皮',
-                    config: { deFringe: 85, feather: 0.5, edgeShift: -1.2, textureBoost: 45, skinSmoothing: 50 },
-                  },
-                  {
-                    name: '柔和发丝微过渡',
-                    desc: '微收0.6px+发丝柔和羽化过渡',
-                    config: { deFringe: 80, feather: 0.8, edgeShift: -0.6, textureBoost: 40, skinSmoothing: 50 },
-                  },
-                ].map((preset) => {
-                  const isActive =
-                    hairConfig.enabled &&
-                    hairConfig.edgeShift === preset.config.edgeShift &&
-                    hairConfig.deFringe === preset.config.deFringe;
-                  return (
                     <button
-                      key={preset.name}
+                      type="button"
+                      onClick={triggerAiMatting}
+                      className="px-3 py-1.5 bg-stone-900 hover:bg-black text-white rounded-lg font-bold text-xs shadow-2xs transition-all cursor-pointer shrink-0 flex items-center justify-center gap-1.5"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>一键开启智能换底</span>
+                    </button>
+                  </div>
+                )}
+                {/* Lighting Mode Switcher */}
+                <div className="flex items-center justify-between text-xs pb-1 border-b border-stone-100">
+                  <span className="text-stone-500 font-medium">背景渲染光效风格：</span>
+                  <div className="flex items-center gap-1 p-0.5 bg-stone-100 rounded-lg text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setBgLightingMode('auto')}
+                      className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                        bgLightingMode === 'auto'
+                          ? 'bg-white text-stone-900 font-bold shadow-2xs'
+                          : 'text-stone-500 hover:text-stone-700'
+                      }`}
+                    >
+                      智能预设
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBgLightingMode('spotlight')}
+                      className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1 ${
+                        bgLightingMode === 'spotlight'
+                          ? 'bg-white text-rose-600 font-bold shadow-2xs'
+                          : 'text-stone-500 hover:text-stone-700'
+                      }`}
+                    >
+                      <span>✨ 影楼柔光</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBgLightingMode('solid')}
+                      className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                        bgLightingMode === 'solid'
+                          ? 'bg-white text-stone-900 font-bold shadow-2xs'
+                          : 'text-stone-500 hover:text-stone-700'
+                      }`}
+                    >
+                      官方纯色
+                    </button>
+                  </div>
+                </div>
+
+                {/* Red ID Photo Specialized Bar */}
+                <div className="p-3 bg-red-50/60 rounded-xl border border-red-200/80 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-red-950 flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse" />
+                      红底标准专区 (国家考试 / 婚姻登记 / 影楼调优)
+                    </span>
+                    <button
                       type="button"
                       onClick={() => {
                         const newCfg: HairOptimizationConfig = {
                           ...hairConfig,
                           enabled: true,
-                          ...preset.config,
+                          deFringe: 100,
+                          edgeShift: -1.8,
+                          feather: 0.5,
+                          textureBoost: 45,
+                          skinSmoothing: 50,
                         };
                         setHairConfig(newCfg);
                         applyHairOptimization(newCfg);
-                        onNotification?.(`已切换至「${preset.name}」模式，白边已立即切除`);
+                        onNotification?.('✨ 已执行红底白边净化：微收1.8px + 消色溢100%，红底白边已彻底消除');
                       }}
-                      className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
-                        isActive
-                          ? 'bg-pink-50 border-pink-500 shadow-2xs ring-1 ring-pink-400'
-                          : preset.highlight
-                          ? 'border-pink-300 bg-pink-50/40 hover:bg-pink-50'
-                          : 'border-stone-200 bg-stone-50 hover:bg-stone-100'
-                      }`}
+                      className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[11px] font-bold shadow-2xs transition-all flex items-center gap-1 cursor-pointer"
                     >
-                      <div className="text-xs font-bold text-stone-900 flex items-center justify-between">
-                        <span>{preset.name}</span>
-                        {isActive && <Check className="w-3.5 h-3.5 text-pink-600" />}
-                      </div>
-                      <div className="text-[10px] text-stone-400 mt-0.5">{preset.desc}</div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Detailed Sliders */}
-            <div className="space-y-3.5 pt-2 border-t border-stone-100">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                {/* 1. Edge Inward Shift (Key Slider for White Edges) */}
-                <div className="bg-pink-50/40 p-3 rounded-xl border border-pink-100 space-y-1">
-                  <div className="flex items-center justify-between text-xs text-stone-800 font-bold">
-                    <span className="flex items-center gap-1">
-                      <span>边缘物理内收剪切 (Edge Trim)</span>
-                      <span className="text-[10px] font-normal text-pink-700 bg-pink-200/60 px-1.5 py-0.2 rounded font-bold">
-                        消除白边核心
-                      </span>
-                    </span>
-                    <span className="font-mono text-pink-700 text-sm">
-                      {hairConfig.edgeShift > 0 ? `+${hairConfig.edgeShift}` : hairConfig.edgeShift} px
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min="-10.0"
-                    max="2.0"
-                    step="0.2"
-                    value={hairConfig.edgeShift}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setHairConfig((prev) => ({ ...prev, edgeShift: val }));
-                    }}
-                    disabled={!hairConfig.enabled}
-                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
-                  />
-                  <div className="flex justify-between text-[10px] text-stone-500 font-mono">
-                    <span>强力切除 (-10px)</span>
-                    <span>深度净边 (-3.5px)</span>
-                    <span className="text-pink-700 font-bold">推荐微收 (-1.2px)</span>
-                    <span>原边 (0px)</span>
-                    <span>外扩 (+2px)</span>
-                  </div>
-                  <p className="text-[10px] text-pink-600/90 leading-tight pt-0.5">
-                    💡 双肩衣服锐利保护：边缘物理微收剪切与消色溢已全域覆盖头发发际、颈部轮廓与双肩衣服，消除白边的同时衣服保持 100% 实体高密度不虚化！
-                  </p>
-                </div>
-
-                {/* 2. De-fringe */}
-                <div className="bg-stone-50 p-3 rounded-xl border border-stone-200/70 space-y-1">
-                  <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
-                    <span title="消除原图背景色在发丝、颈部及衣服边缘形成的浅色反光与光晕">
-                      全域消色溢净化 (De-fringe)
-                    </span>
-                    <span className="font-mono text-pink-600 font-bold">{hairConfig.deFringe}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="5"
-                    value={hairConfig.deFringe}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setHairConfig((prev) => ({ ...prev, deFringe: val }));
-                    }}
-                    disabled={!hairConfig.enabled}
-                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
-                  />
-                  <div className="flex justify-between text-[10px] text-stone-400">
-                    <span>原样保留</span>
-                    <span>深度消色溢 (推荐 85%~100%)</span>
-                  </div>
-                  <p className="text-[10px] text-stone-400 leading-tight pt-0.5">
-                    将浅色杂色反光智能替换为真实的头发深色、颈部健康肤色与正宗衣服布料原色。
-                  </p>
-                </div>
-
-                {/* 3. Feathering / Anti-aliasing */}
-                <div>
-                  <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
-                    <span title="消除边缘阶梯锯齿与生硬轮廓，使发梢与颈部自然融入底色">
-                      边缘柔和羽化与抗锯齿 (Feather)
-                    </span>
-                    <span className="font-mono text-pink-600 font-bold">{hairConfig.feather} px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="3.5"
-                    step="0.1"
-                    value={hairConfig.feather}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setHairConfig((prev) => ({ ...prev, feather: val }));
-                    }}
-                    disabled={!hairConfig.enabled}
-                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
-                  />
-                  <div className="flex justify-between text-[10px] text-stone-400 mt-0.5">
-                    <span>硬边干净</span>
-                    <span>柔和过渡 (1.0px 推荐)</span>
-                  </div>
-                </div>
-
-                {/* 4. Hair Texture Boost */}
-                <div>
-                  <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
-                    <span title="增强深色头发的微发缕对比与光泽，使头发不再是一团死黑">
-                      发丝纹理立体感与光泽
-                    </span>
-                    <span className="font-mono text-pink-600 font-bold">
-                      {hairConfig.textureBoost}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="5"
-                    value={hairConfig.textureBoost}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setHairConfig((prev) => ({ ...prev, textureBoost: val }));
-                    }}
-                    disabled={!hairConfig.enabled}
-                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
-                  />
-                  <div className="flex justify-between text-[10px] text-stone-400 mt-0.5">
-                    <span>平滑</span>
-                    <span>发缕分明 (50% 推荐)</span>
-                  </div>
-                </div>
-
-                {/* 5. Smart Facial Skin Smoothing (面部智能磨皮与自然平滑) */}
-                <div className="sm:col-span-2 bg-gradient-to-r from-amber-50/60 via-pink-50/50 to-rose-50/60 p-3.5 rounded-xl border border-pink-200 shadow-2xs space-y-2">
-                  <div className="flex items-center justify-between text-xs text-stone-800 font-bold">
-                    <span className="flex items-center gap-1.5">
-                      <Sparkles className="w-4 h-4 text-pink-600" />
-                      <span>面部智能磨皮与自然平滑 (Skin Smoothing)</span>
-                      <span className="text-[10px] font-normal text-pink-700 bg-pink-100 px-2 py-0.5 rounded-full font-sans">
-                        抚平粗糙毛孔与暗沉
-                      </span>
-                    </span>
-                    <span className="font-mono text-pink-700 font-bold text-sm">
-                      {hairConfig.skinSmoothing ?? 65}%
-                    </span>
-                  </div>
-
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    step="5"
-                    value={hairConfig.skinSmoothing ?? 65}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setHairConfig((prev) => ({ ...prev, skinSmoothing: val }));
-                    }}
-                    disabled={!hairConfig.enabled}
-                    className="w-full accent-pink-600 cursor-pointer disabled:opacity-50"
-                  />
-
-                  <div className="flex justify-between items-center text-[10px] text-stone-600 font-medium pt-0.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 0 }));
-                      }}
-                      className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
-                    >
-                      关闭磨皮 (0%)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 35 }));
-                      }}
-                      className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
-                    >
-                      轻微平滑 (35%)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 65 }));
-                      }}
-                      className="font-bold text-pink-600 hover:text-pink-700 px-1.5 py-0.5 rounded bg-pink-100/70 cursor-pointer transition-colors"
-                    >
-                      自然影楼精修 (65% 推荐)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHairConfig((prev) => ({ ...prev, skinSmoothing: 90 }));
-                      }}
-                      className="hover:text-stone-900 px-1.5 py-0.5 rounded hover:bg-white/60 cursor-pointer transition-colors"
-                    >
-                      强效柔肤 (90%)
+                      <Sparkles className="w-3 h-3" />
+                      <span>一键消除红底白边</span>
                     </button>
                   </div>
 
-                  <p className="text-[10px] text-pink-700/80 leading-relaxed">
-                    💡 智能双边边缘保留滤波：深度抚平面部粗糙、毛孔暗沉与胡茬斑驳，精准保留双眼、鼻梁高光、嘴唇轮廓与耳朵结构的极致清晰！
-                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: 'red-guobiao', name: '国标标准红', hex: '#D9001B', tag: '官方考试' },
+                      { id: 'red-spotlight', name: '影楼柔光红', hex: '#E21E2C', tag: '立体聚光' },
+                      { id: 'red-classic', name: '结婚登记红', hex: '#C8102E', tag: '婚姻登记' },
+                    ].map((item) => {
+                      const isCur = selectedColorId === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => setSelectedColorId(item.id)}
+                          className={`p-2 rounded-lg border text-left flex items-center gap-2 transition-all cursor-pointer ${
+                            isCur
+                              ? 'bg-white border-red-600 shadow-2xs ring-1 ring-red-500'
+                              : 'bg-white/90 hover:bg-white border-red-200/70'
+                          }`}
+                        >
+                          <div
+                            className="w-4 h-4 rounded shrink-0 border border-black/10"
+                            style={{ backgroundColor: item.hex }}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-bold text-stone-900 truncate">
+                              {item.name}
+                            </div>
+                            <div className="text-[10px] text-stone-400 font-mono">{item.tag}</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            </div>
-          </div>
 
-          {/* Section 5: Framing, Position, Suit Attire & Beauty Controls */}
-          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs">
-                  5
-                </div>
-                <h3 className="text-sm font-bold text-stone-900">人像微调、正装换装与调光</h3>
-              </div>
+                {/* Popular Background Colors */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {POPULAR_ID_COLORS.map((col) => {
+                    const active = selectedColorId === col.id;
+                    const isTrans = col.id === 'transparent';
+                    return (
+                      <button
+                        key={col.id}
+                        type="button"
+                        onClick={() => setSelectedColorId(col.id)}
+                        className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer ${
+                          active
+                            ? 'border-stone-900 bg-stone-50 shadow-xs ring-1 ring-stone-900/20'
+                            : 'border-stone-200 hover:border-stone-300 bg-white'
+                        }`}
+                      >
+                        <div
+                          className={`w-5 h-5 rounded-md shrink-0 border border-stone-300/80 shadow-2xs ${
+                            isTrans
+                              ? 'bg-[linear-gradient(45deg,#ccc_25%,transparent_25%),linear-gradient(-45deg,#ccc_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#ccc_75%),linear-gradient(-45deg,transparent_75%,#ccc_75%)] bg-[size:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0]'
+                              : ''
+                          }`}
+                          style={{
+                            backgroundColor: isTrans ? undefined : col.hex,
+                            backgroundImage: col.secondaryHex
+                              ? `radial-gradient(circle, ${col.hex}, ${col.secondaryHex})`
+                              : undefined,
+                          }}
+                        />
+                        <div className="text-left overflow-hidden">
+                          <div className="text-xs font-bold text-stone-800 truncate">{col.name}</div>
+                          <div className="text-[10px] text-stone-400 font-mono truncate">
+                            {isTrans ? 'PNG 透明' : col.hex}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
 
-              <button
-                type="button"
-                onClick={() => {
-                  setZoom(1.0);
-                  setPanX(0);
-                  setPanY(0);
-                  setRotation(0);
-                  setFlipX(false);
-                  setBrightness(0);
-                  setContrast(0);
-                  setSelectedSuitId('none');
-                }}
-                className="text-[11px] text-stone-500 hover:text-stone-800 font-medium flex items-center gap-1 cursor-pointer"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>重置微调</span>
-              </button>
-            </div>
-
-            {/* Suit Attire Selector */}
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-stone-700 flex items-center gap-1">
-                  <Shirt className="w-3.5 h-3.5 text-indigo-600" />
-                  智能正装换装（西装/衬衫）:
-                </span>
-                <span className="text-[11px] text-stone-400">日常便服一秒变商务正装</span>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setSelectedSuitId('none')}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
-                    selectedSuitId === 'none'
-                      ? 'bg-stone-900 text-white border-stone-900'
-                      : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
-                  }`}
-                >
-                  保持原衣服
-                </button>
-                {SUIT_OVERLAYS.map((suit) => {
-                  const active = selectedSuitId === suit.id;
-                  return (
-                    <button
-                      key={suit.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedSuitId(suit.id);
-                        setSuitScale(suit.defaultScale);
-                        setSuitOffsetY(suit.defaultOffsetY);
+                  {/* Custom Color Picker Button */}
+                  <label
+                    className={`p-2.5 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer ${
+                      selectedColorId === 'custom'
+                        ? 'border-stone-900 bg-stone-50 shadow-xs ring-1 ring-stone-900/20'
+                        : 'border-stone-200 hover:border-stone-300 bg-white'
+                    }`}
+                  >
+                    <input
+                      type="color"
+                      value={customColorHex}
+                      onChange={(e) => {
+                        setCustomColorHex(e.target.value);
+                        setSelectedColorId('custom');
                       }}
-                      className={`px-3 py-2 rounded-xl text-xs font-bold border truncate transition-all cursor-pointer ${
-                        active
-                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
-                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
-                      }`}
-                      title={suit.description}
-                    >
-                      {suit.name}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Suit position fine-tuning if suit is selected */}
-            {selectedSuitId !== 'none' && (
-              <div className="p-3 bg-indigo-50/60 rounded-xl border border-indigo-100 grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <div className="flex items-center justify-between text-stone-600 mb-1">
-                    <span>西装大小缩放</span>
-                    <span className="font-mono">{Math.round(suitScale * 100)}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.7"
-                    max="1.4"
-                    step="0.02"
-                    value={suitScale}
-                    onChange={(e) => setSuitScale(Number(e.target.value))}
-                    className="w-full accent-indigo-600 cursor-pointer"
-                  />
-                </div>
-                <div>
-                  <div className="flex items-center justify-between text-stone-600 mb-1">
-                    <span>西装领口上下位置</span>
-                    <span className="font-mono">{suitOffsetY} px</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="-40"
-                    max="40"
-                    step="1"
-                    value={suitOffsetY}
-                    onChange={(e) => setSuitOffsetY(Number(e.target.value))}
-                    className="w-full accent-indigo-600 cursor-pointer"
-                  />
+                      className="w-5 h-5 rounded-md shrink-0 border border-stone-300 cursor-pointer p-0 bg-transparent"
+                    />
+                    <div className="text-left overflow-hidden">
+                      <div className="text-xs font-bold text-stone-800">自定义颜色</div>
+                      <div className="text-[10px] text-stone-400 font-mono">{customColorHex}</div>
+                    </div>
+                  </label>
                 </div>
               </div>
             )}
 
-            {/* Zoom & Framing Sliders */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-              <div>
-                <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
-                  <span>人像缩放比例</span>
-                  <span className="font-mono">{Math.round(zoom * 100)}%</span>
+            {/* TAB CONTENT 3: SUIT & ATTIRE */}
+            {activeStepTab === 'suit' && (
+              <div className="space-y-4 animate-in fade-in duration-150">
+                {useOriginalOnly && (
+                  <div className="p-3.5 bg-amber-50/80 border border-amber-200/90 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-in fade-in duration-150">
+                    <div className="flex items-center gap-2">
+                      <Camera className="w-4 h-4 text-amber-600 shrink-0" />
+                      <div>
+                        <p className="font-bold">当前处于「纯原图直接裁切」模式</p>
+                        <p className="text-[11px] text-amber-800">
+                          正在直接使用您上传照片的原衣服，未做正装叠加。若需要换上职业西装或衬衫，请开启智能换底。
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={triggerAiMatting}
+                      className="px-3 py-1.5 bg-stone-900 hover:bg-black text-white rounded-lg font-bold text-xs shadow-2xs transition-all cursor-pointer shrink-0 flex items-center justify-center gap-1.5"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>一键开启智能换底</span>
+                    </button>
+                  </div>
+                )}
+                <div className="flex items-center justify-between text-xs text-stone-500">
+                  <span>一键智能正装换装（西装/衬衫）：</span>
+                  <span className="text-stone-400">自动智能对齐双肩与领口</span>
                 </div>
-                <input
-                  type="range"
-                  min="0.5"
-                  max="2.5"
-                  step="0.05"
-                  value={zoom}
-                  onChange={(e) => setZoom(Number(e.target.value))}
-                  className="w-full accent-indigo-600 cursor-pointer"
-                />
-              </div>
 
-              <div>
-                <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
-                  <span>旋转校正</span>
-                  <span className="font-mono">{rotation}°</span>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSuitId('none')}
+                    className={`px-3 py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      selectedSuitId === 'none'
+                        ? 'bg-stone-900 text-white border-stone-900 shadow-2xs'
+                        : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                    }`}
+                  >
+                    保持原衣服
+                  </button>
+                  {SUIT_OVERLAYS.map((suit) => {
+                    const active = selectedSuitId === suit.id;
+                    return (
+                      <button
+                        key={suit.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedSuitId(suit.id);
+                          setSuitScale(suit.defaultScale);
+                          setSuitOffsetY(suit.defaultOffsetY);
+                        }}
+                        className={`px-3 py-2.5 rounded-xl text-xs font-bold border truncate transition-all cursor-pointer ${
+                          active
+                            ? 'bg-stone-900 text-white border-stone-900 shadow-2xs'
+                            : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                        }`}
+                        title={suit.description}
+                      >
+                        {suit.name}
+                      </button>
+                    );
+                  })}
                 </div>
-                <input
-                  type="range"
-                  min="-20"
-                  max="20"
-                  step="1"
-                  value={rotation}
-                  onChange={(e) => setRotation(Number(e.target.value))}
-                  className="w-full accent-indigo-600 cursor-pointer"
-                />
-              </div>
 
-              <div>
-                <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
-                  <span>人像肤色提亮</span>
-                  <span className="font-mono">{brightness > 0 ? `+${brightness}` : brightness}</span>
+                {/* Suit position fine-tuning if suit is selected */}
+                {selectedSuitId !== 'none' && (
+                  <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <div className="flex items-center justify-between text-stone-600 mb-1">
+                        <span>西装大小缩放</span>
+                        <span className="font-mono">{Math.round(suitScale * 100)}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0.7"
+                        max="1.4"
+                        step="0.02"
+                        value={suitScale}
+                        onChange={(e) => setSuitScale(Number(e.target.value))}
+                        className="w-full accent-stone-900 cursor-pointer"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between text-stone-600 mb-1">
+                        <span>领口上下位置</span>
+                        <span className="font-mono">{suitOffsetY} px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="-40"
+                        max="40"
+                        step="1"
+                        value={suitOffsetY}
+                        onChange={(e) => setSuitOffsetY(Number(e.target.value))}
+                        className="w-full accent-stone-900 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* TAB CONTENT 4: RETOUCH & BEAUTY */}
+            {activeStepTab === 'retouch' && (
+              <div className="space-y-4 animate-in fade-in duration-150">
+                {useOriginalOnly && (
+                  <div className="p-3.5 bg-amber-50/80 border border-amber-200/90 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 animate-in fade-in duration-150">
+                    <div className="flex items-center gap-2">
+                      <Camera className="w-4 h-4 text-amber-600 shrink-0" />
+                      <div>
+                        <p className="font-bold">当前处于「纯原图直接裁切」模式</p>
+                        <p className="text-[11px] text-amber-800">
+                          正在直接使用您上传照片的 100% 原始像素，未加任何磨皮与滤镜。若需要人像磨皮与发丝去白边，请开启智能换底。
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={triggerAiMatting}
+                      className="px-3 py-1.5 bg-stone-900 hover:bg-black text-white rounded-lg font-bold text-xs shadow-2xs transition-all cursor-pointer shrink-0 flex items-center justify-center gap-1.5"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>一键开启智能换底</span>
+                    </button>
+                  </div>
+                )}
+                {/* One-click white edge elimination presets */}
+                <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-stone-900 flex items-center gap-1.5">
+                      <Scissors className="w-3.5 h-3.5 text-stone-700" />
+                      边缘去白边与发丝精修
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const newCfg: HairOptimizationConfig = {
+                          ...hairConfig,
+                          enabled: true,
+                          deFringe: 95,
+                          feather: 0.5,
+                          edgeShift: -1.2,
+                          textureBoost: 45,
+                          skinSmoothing: 50,
+                        };
+                        setHairConfig(newCfg);
+                        applyHairOptimization(newCfg);
+                        onNotification?.('已启用官方证件标准微收1.2px，白边已消除');
+                      }}
+                      className="px-2.5 py-1 bg-stone-900 hover:bg-black text-white text-[11px] font-semibold rounded-lg cursor-pointer transition-all"
+                    >
+                      推荐微收 (1.2px)
+                    </button>
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
+                      <span>边缘物理微收剪切 (Edge Trim):</span>
+                      <span className="font-mono font-bold text-stone-900">
+                        {hairConfig.edgeShift} px
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-5.0"
+                      max="1.0"
+                      step="0.2"
+                      value={hairConfig.edgeShift}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setHairConfig((prev) => ({ ...prev, edgeShift: val }));
+                      }}
+                      className="w-full accent-stone-900 cursor-pointer"
+                    />
+                    <div className="flex justify-between text-[10px] text-stone-400">
+                      <span>强力内收 (-5px)</span>
+                      <span className="text-stone-800 font-bold">标准微收 (-1.2px)</span>
+                      <span>原边 (0px)</span>
+                    </div>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min="-30"
-                  max="30"
-                  step="1"
-                  value={brightness}
-                  onChange={(e) => setBrightness(Number(e.target.value))}
-                  className="w-full accent-indigo-600 cursor-pointer"
-                />
-              </div>
 
-              <div>
-                <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
-                  <span>画面对比度</span>
-                  <span className="font-mono">{contrast > 0 ? `+${contrast}` : contrast}</span>
+                {/* Facial Skin Smoothing */}
+                <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+                  <div className="flex items-center justify-between text-xs text-stone-800 font-bold">
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-stone-700" />
+                      <span>面部智能自然磨皮 (Skin Smoothing)</span>
+                    </span>
+                    <span className="font-mono text-stone-900 font-bold">
+                      {hairConfig.skinSmoothing ?? 50}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    value={hairConfig.skinSmoothing ?? 50}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setHairConfig((prev) => ({ ...prev, skinSmoothing: val }));
+                    }}
+                    className="w-full accent-stone-900 cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[10px] text-stone-400">
+                    <span>原肤色 (0%)</span>
+                    <span className="text-stone-800 font-bold">影楼自然磨皮 (50% 推荐)</span>
+                    <span>强力柔肤 (100%)</span>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min="-30"
-                  max="30"
-                  step="1"
-                  value={contrast}
-                  onChange={(e) => setContrast(Number(e.target.value))}
-                  className="w-full accent-indigo-600 cursor-pointer"
-                />
+
+                {/* Brightness & Contrast */}
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
+                      <span>人像肤色提亮</span>
+                      <span className="font-mono">{brightness > 0 ? `+${brightness}` : brightness}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-30"
+                      max="30"
+                      step="1"
+                      value={brightness}
+                      onChange={(e) => setBrightness(Number(e.target.value))}
+                      className="w-full accent-stone-900 cursor-pointer"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-stone-700 mb-1 font-medium">
+                      <span>画面对比度</span>
+                      <span className="font-mono">{contrast > 0 ? `+${contrast}` : contrast}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-30"
+                      max="30"
+                      step="1"
+                      value={contrast}
+                      onChange={(e) => setContrast(Number(e.target.value))}
+                      className="w-full accent-stone-900 cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                {/* Quick utility buttons */}
+                <div className="flex items-center justify-between pt-2 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() => setFlipX((v) => !v)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      flipX
+                        ? 'bg-stone-900 text-white border-stone-900'
+                        : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                    }`}
+                  >
+                    <FlipHorizontal className="w-3.5 h-3.5" />
+                    <span>水平镜像翻转</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBrightness(0);
+                      setContrast(0);
+                      setFlipX(false);
+                      setRotation(0);
+                      onNotification?.('已重置美化微调参数');
+                    }}
+                    className="text-xs text-stone-500 hover:text-stone-800 font-medium flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>重置微调</span>
+                  </button>
+                </div>
               </div>
-            </div>
-
-            {/* Quick buttons */}
-            <div className="flex items-center justify-between pt-1 border-t border-stone-100">
-              <button
-                type="button"
-                onClick={() => setFlipX((v) => !v)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer ${
-                  flipX
-                    ? 'bg-indigo-50 text-indigo-700 border-indigo-300'
-                    : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
-                }`}
-              >
-                <FlipHorizontal className="w-3.5 h-3.5" />
-                <span>水平翻转 (镜面校正)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowGuidelines((v) => !v)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer ${
-                  showGuidelines
-                    ? 'bg-blue-50 text-blue-700 border-blue-300'
-                    : 'bg-stone-50 text-stone-500 border-stone-200 hover:bg-stone-100'
-                }`}
-              >
-                {showGuidelines ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-                <span>{showGuidelines ? '隐藏对齐基准虚线' : '显示对齐基准虚线'}</span>
-              </button>
-            </div>
+            )}
           </div>
         </div>
 
-        {/* Right Column: Live High-Definition Canvas Preview & Smart Clarity Controls (Width: 5 / 12) */}
+        {/* Right Column: Live High-Definition Canvas Preview & Step 3 Download (Width: 5 / 12) */}
         <div className="lg:col-span-5 space-y-4 lg:sticky lg:top-24">
-          <div className="bg-white rounded-2xl p-5 border border-stone-200 shadow-2xs space-y-4">
+          <div className="bg-white rounded-2xl p-5 border border-stone-200/90 shadow-2xs space-y-4">
             {/* Header info & Top Controls */}
-            <div className="flex flex-col gap-2 pb-1 border-b border-stone-100">
+            <div className="flex flex-col gap-2 pb-2 border-b border-stone-100">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-sm font-bold text-stone-900 flex items-center gap-1.5">
-                    实时效果预览 • {currentSpec.name}
-                  </h3>
-                  <p className="text-[11px] text-stone-500 font-mono">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-stone-900 text-white flex items-center justify-center font-bold text-[10px]">
+                      3
+                    </span>
+                    <h3 className="text-sm font-bold text-stone-900">
+                      实时效果预览 • {currentSpec.name}
+                    </h3>
+                  </div>
+                  <p className="text-[11px] text-stone-500 font-mono mt-0.5">
                     {targetWidthPx} × {targetHeightPx} px @ 300 DPI
                   </p>
                 </div>
@@ -1939,9 +2128,14 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 </div>
               </div>
 
-              {/* Toolbar: Compare Original & Guidelines (Moved Outside the Photo!) */}
+              {/* Top Toolbar Outside the Photo: Compare Original & Guidelines */}
               <div className="flex items-center justify-between gap-2 pt-1">
-                {portraitState.originalUrl ? (
+                {useOriginalOnly ? (
+                  <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200/80 flex items-center gap-1.5 shadow-2xs">
+                    <Camera className="w-3.5 h-3.5 text-blue-600" />
+                    <span>原图剪裁模式 (100% 原始画质)</span>
+                  </span>
+                ) : portraitState.originalUrl ? (
                   <button
                     type="button"
                     onMouseDown={() => setIsComparingOriginal(true)}
@@ -1949,15 +2143,16 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     onMouseLeave={() => setIsComparingOriginal(false)}
                     onTouchStart={() => setIsComparingOriginal(true)}
                     onTouchEnd={() => setIsComparingOriginal(false)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer select-none active:scale-95 ${
+                    onClick={() => setIsComparingOriginal((v) => !v)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer select-none active:scale-95 border ${
                       isComparingOriginal
-                        ? 'bg-amber-500 text-white shadow-sm ring-2 ring-amber-300'
-                        : 'bg-stone-100 hover:bg-stone-200 text-stone-700'
+                        ? 'bg-amber-500 text-white border-amber-500 shadow-sm ring-2 ring-amber-300'
+                        : 'bg-stone-50 hover:bg-stone-100 text-stone-700 border-stone-200'
                     }`}
-                    title="按住即可查看原始上传照片，松开即刻恢复精修证件照"
+                    title="按住或点击对比原始拍摄照片，松开即刻恢复精修证件照"
                   >
                     <Eye className="w-3.5 h-3.5 text-amber-500" />
-                    <span>{isComparingOriginal ? '正在对比原图...' : '按住对比原图'}</span>
+                    <span>{isComparingOriginal ? '正在对比原图...' : '按住对比原画质'}</span>
                   </button>
                 ) : (
                   <span className="text-[11px] text-stone-400">上传人像后可对比原图</span>
@@ -1999,17 +2194,33 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 }}
               />
 
-              {/* Floating Compare Original Indicator Badge */}
-              {isComparingOriginal && (
-                <div className="absolute top-3 inset-x-0 flex justify-center z-20 pointer-events-none animate-in fade-in duration-100">
-                  <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-500 text-white shadow-md flex items-center gap-1.5">
-                    <Eye className="w-3.5 h-3.5" />
-                    <span>当前展示：原始拍摄照片（松开返回精修）</span>
-                  </span>
+              {/* Instant High-Performance Original Photo Overlay when Comparing */}
+              {isComparingOriginal && portraitState.originalUrl && (
+                <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center p-4">
+                  <div
+                    className="relative max-h-[340px] max-w-full rounded shadow-md overflow-hidden bg-black/5"
+                    style={{
+                      aspectRatio: `${targetWidthPx} / ${targetHeightPx}`,
+                      width: previewCanvasRef.current?.clientWidth,
+                      height: previewCanvasRef.current?.clientHeight,
+                    }}
+                  >
+                    <img
+                      src={portraitState.originalUrl}
+                      alt="原始拍摄图像"
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute top-2.5 inset-x-0 flex justify-center">
+                      <span className="px-3 py-1 rounded-full text-[10px] font-bold bg-amber-600/95 text-white shadow-md flex items-center gap-1.5 backdrop-blur-xs">
+                        <Eye className="w-3 h-3" />
+                        <span>正在对比拍摄原图（松开返回精修）</span>
+                      </span>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {/* Floating Zoom & Framing Toolbar on the Right Side of Preview */}
+              {/* Floating Zoom & Framing Toolbar on the Right Side of Preview Image */}
               <div className="absolute right-3 top-1/2 -translate-y-1/2 flex flex-col items-center bg-white/95 backdrop-blur-md rounded-2xl p-1.5 shadow-md border border-stone-200/90 z-20 gap-1.5">
                 <button
                   type="button"
@@ -2021,15 +2232,15 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setZoom(1.0); setPanX(0); setPanY(0); }}
-                  className="text-[10px] font-bold font-mono text-stone-600 hover:text-indigo-600 px-1 py-0.5 rounded cursor-pointer transition-colors"
-                  title="点击复位缩放到 100%"
+                  onClick={handleSnapToBottomCenter}
+                  className="text-[10px] font-bold font-mono text-stone-600 hover:text-stone-900 px-1 py-0.5 rounded cursor-pointer transition-colors"
+                  title="点击复位缩放与居中"
                 >
                   {Math.round(zoom * 100)}%
                 </button>
                 <button
                   type="button"
-                  onClick={() => setZoom((prev) => Math.max(0.5, Number((prev - 0.1).toFixed(2))))}
+                  onClick={() => setZoom((prev) => Math.max(0.6, Number((prev - 0.1).toFixed(2))))}
                   className="w-8 h-8 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-700 flex items-center justify-center transition-all active:scale-90 cursor-pointer shadow-2xs"
                   title="缩小照片 (-10%)"
                 >
@@ -2038,9 +2249,9 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 <div className="w-4 h-[1px] bg-stone-200 my-0.5" />
                 <button
                   type="button"
-                  onClick={() => { setZoom(1.0); setPanX(0); setPanY(0); setRotation(0); }}
+                  onClick={handleSnapToBottomCenter}
                   className="w-8 h-8 rounded-xl bg-stone-50 hover:bg-stone-100 text-stone-500 hover:text-stone-800 flex items-center justify-center transition-all active:scale-90 cursor-pointer"
-                  title="重置居中与平移"
+                  title="一键贴底居中对齐"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                 </button>
@@ -2049,169 +2260,188 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
               {/* Drag instruction overlay badge at bottom */}
               <div className="absolute bottom-2.5 inset-x-0 flex justify-center pointer-events-none">
                 <span className="px-2.5 py-1 rounded-full text-[10px] font-medium bg-black/60 text-white/90 backdrop-blur-xs">
-                  按住左键拖拽平移 • 右侧加减号缩放 • 自动贴底无红框
+                  按住左键拖拽平移 • 右侧加减号缩放 • 自动贴底无空隙
                 </span>
               </div>
             </div>
 
             {/* Smart Image Clarity Controls (智能优化图片清晰度) */}
-            <div className="bg-amber-50/50 border border-amber-200/80 rounded-xl p-4 space-y-3.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-lg bg-amber-500 text-white flex items-center justify-center font-bold text-xs shadow-2xs">
-                    <Sparkles className="w-3.5 h-3.5" />
+            {useOriginalOnly ? (
+              <div className="bg-blue-50/60 border border-blue-200/80 rounded-xl p-4 flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                  <Camera className="w-4 h-4" />
+                </div>
+                <div className="space-y-0.5">
+                  <h4 className="text-xs font-bold text-stone-900 flex items-center gap-2">
+                    <span>原图真实画质保护</span>
+                    <span className="px-1.5 py-0.2 rounded text-[10px] bg-blue-200 text-blue-900 font-bold">
+                      100% 原始像素
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-stone-600 leading-relaxed">
+                    当前为纯原图功能：已自动关闭一切 AI 锐化、滤镜与美化，保持原图真实清晰度与原背景，仅精准剪切为所选证件照尺寸。
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-amber-50/50 border border-amber-200/80 rounded-xl p-4 space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-lg bg-amber-500 text-white flex items-center justify-center font-bold text-xs shadow-2xs">
+                      <Sparkles className="w-3.5 h-3.5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-stone-900 flex items-center gap-1">
+                        智能优化图片清晰度 (AI 超清重建)
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-200 text-amber-900">
+                          解决下载模糊
+                        </span>
+                      </h4>
+                      <p className="text-[10px] text-stone-500">
+                        自适应锐化眼睛、眉毛、发丝与五官轮廓，防止画面发糊
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-stone-900 flex items-center gap-1">
-                      智能优化图片清晰度 (AI 超清重建)
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-200 text-amber-900">
-                        解决下载模糊
-                      </span>
-                    </h4>
-                    <p className="text-[10px] text-stone-500">
-                      自适应锐化眼睛、眉毛、发丝与五官轮廓，防止画面发糊
-                    </p>
-                  </div>
+
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={clarityConfig.enabled}
+                      onChange={(e) =>
+                        setClarityConfig((prev) => ({ ...prev, enabled: e.target.checked }))
+                      }
+                      className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-amber-900">开启超清</span>
+                  </label>
                 </div>
 
-                <label className="flex items-center gap-1.5 cursor-pointer">
+                {/* Clarity Intensity Slider */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
+                    <span>清晰度增强强度:</span>
+                    <span className="font-mono text-amber-700 font-bold">{clarityConfig.strength}%</span>
+                  </div>
                   <input
-                    type="checkbox"
-                    checked={clarityConfig.enabled}
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    value={clarityConfig.strength}
                     onChange={(e) =>
-                      setClarityConfig((prev) => ({ ...prev, enabled: e.target.checked }))
+                      setClarityConfig((prev) => ({ ...prev, strength: Number(e.target.value) }))
                     }
-                    className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                    disabled={!clarityConfig.enabled}
+                    className="w-full accent-amber-600 cursor-pointer disabled:opacity-50"
                   />
-                  <span className="text-xs font-bold text-amber-900">开启超清</span>
-                </label>
-              </div>
-
-              {/* Clarity Intensity Slider */}
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs text-stone-700 font-medium">
-                  <span>清晰度增强强度:</span>
-                  <span className="font-mono text-amber-700 font-bold">{clarityConfig.strength}%</span>
                 </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="5"
-                  value={clarityConfig.strength}
-                  onChange={(e) =>
-                    setClarityConfig((prev) => ({ ...prev, strength: Number(e.target.value) }))
-                  }
-                  disabled={!clarityConfig.enabled}
-                  className="w-full accent-amber-600 cursor-pointer disabled:opacity-50"
-                />
-              </div>
 
-              {/* Detail Mode Selection */}
-              <div className="space-y-1.5">
-                <span className="text-[11px] text-stone-600 font-medium">五官与细节模式:</span>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {[
-                    { id: 'balanced', label: '智能均衡', desc: '自然人像' },
-                    { id: 'features', label: '五官特清', desc: '明眸发丝' },
-                    { id: 'crisp', label: '极致锐利', desc: '照相馆原画' },
-                  ].map((mode) => {
-                    const active = clarityConfig.detailMode === mode.id;
-                    return (
-                      <button
-                        key={mode.id}
-                        type="button"
-                        onClick={() =>
-                          setClarityConfig((prev) => ({
-                            ...prev,
-                            detailMode: mode.id as any,
-                          }))
-                        }
-                        disabled={!clarityConfig.enabled}
-                        className={`p-1.5 rounded-lg border text-center transition-all cursor-pointer ${
-                          active
-                            ? 'bg-amber-100 border-amber-500 text-amber-900 font-bold shadow-2xs'
-                            : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
-                        }`}
-                      >
-                        <div className="text-xs">{mode.label}</div>
-                        <div className="text-[9px] text-stone-400">{mode.desc}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Download Resolution & DPI Multiplier Selector */}
-              <div className="pt-2 border-t border-amber-200/60 space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-stone-800">下载图片清晰度规格:</span>
-                  <span className="text-[11px] font-mono text-amber-700 font-bold">
-                    {clarityConfig.exportDpiMultiplier === 1
-                      ? `标准 300DPI (${targetWidthPx}×${targetHeightPx})`
-                      : clarityConfig.exportDpiMultiplier === 2
-                      ? `🔥 智能超清 600DPI (${targetWidthPx * 2}×${targetHeightPx * 2})`
-                      : `💎 印刷极清 1200DPI (${targetWidthPx * 4}×${targetHeightPx * 4})`}
-                  </span>
-                </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {[
-                    {
-                      mult: 1 as const,
-                      title: '300 DPI 官方',
-                      sub: `${targetWidthPx}×${targetHeightPx}`,
-                      tag: '报名规范',
-                    },
-                    {
-                      mult: 2 as const,
-                      title: '🔥 600 DPI 超清',
-                      sub: `${targetWidthPx * 2}×${targetHeightPx * 2}`,
-                      tag: '清晰翻倍/推荐',
-                    },
-                    {
-                      mult: 4 as const,
-                      title: '1200 DPI 极清',
-                      sub: `${targetWidthPx * 4}×${targetHeightPx * 4}`,
-                      tag: '印刷原画',
-                    },
-                  ].map((res) => {
-                    const active = clarityConfig.exportDpiMultiplier === res.mult;
-                    return (
-                      <button
-                        key={res.mult}
-                        type="button"
-                        onClick={() =>
-                          setClarityConfig((prev) => ({
-                            ...prev,
-                            exportDpiMultiplier: res.mult,
-                          }))
-                        }
-                        className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
-                          active
-                            ? 'bg-amber-600 text-white border-amber-600 shadow-xs ring-1 ring-amber-400'
-                            : 'bg-white border-stone-200 text-stone-700 hover:border-stone-300'
-                        }`}
-                      >
-                        <div className="text-xs font-bold">{res.title}</div>
-                        <div className={`text-[10px] font-mono ${active ? 'text-amber-100' : 'text-stone-400'}`}>
-                          {res.sub}
-                        </div>
-                        <span
-                          className={`inline-block mt-0.5 text-[9px] px-1 py-0.2 rounded font-medium ${
-                            active ? 'bg-amber-700/60 text-white' : 'bg-stone-100 text-stone-500'
+                {/* Detail Mode Selection */}
+                <div className="space-y-1.5">
+                  <span className="text-[11px] text-stone-600 font-medium">五官与细节模式:</span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      { id: 'balanced', label: '智能均衡', desc: '自然人像' },
+                      { id: 'features', label: '五官特清', desc: '明眸发丝' },
+                      { id: 'crisp', label: '极致锐利', desc: '照相馆原画' },
+                    ].map((mode) => {
+                      const active = clarityConfig.detailMode === mode.id;
+                      return (
+                        <button
+                          key={mode.id}
+                          type="button"
+                          onClick={() =>
+                            setClarityConfig((prev) => ({
+                              ...prev,
+                              detailMode: mode.id as any,
+                            }))
+                          }
+                          disabled={!clarityConfig.enabled}
+                          className={`p-1.5 rounded-lg border text-center transition-all cursor-pointer ${
+                            active
+                              ? 'bg-amber-100 border-amber-500 text-amber-900 font-bold shadow-2xs'
+                              : 'bg-white border-stone-200 text-stone-600 hover:bg-stone-50'
                           }`}
                         >
-                          {res.tag}
-                        </span>
-                      </button>
-                    );
-                  })}
+                          <div className="text-xs">{mode.label}</div>
+                          <div className="text-[9px] text-stone-400">{mode.desc}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-                <p className="text-[10px] text-stone-500">
-                  💡 很多网站下载的照片看起来模糊，是因为标准 1 寸 (295×413) 像素较小。选择「600DPI 智能超清」，导出分辨率翻倍，手机打开放大看发丝五官极其清晰！
-                </p>
+
+                {/* Download Resolution & DPI Multiplier Selector */}
+                <div className="pt-2 border-t border-amber-200/60 space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-stone-800">下载图片清晰度规格:</span>
+                    <span className="text-[11px] font-mono text-amber-700 font-bold">
+                      {clarityConfig.exportDpiMultiplier === 1
+                        ? `标准 300DPI (${targetWidthPx}×${targetHeightPx})`
+                        : clarityConfig.exportDpiMultiplier === 2
+                        ? `🔥 智能超清 600DPI (${targetWidthPx * 2}×${targetHeightPx * 2})`
+                        : `💎 印刷极清 1200DPI (${targetWidthPx * 4}×${targetHeightPx * 4})`}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {[
+                      {
+                        mult: 1 as const,
+                        title: '300 DPI 官方',
+                        sub: `${targetWidthPx}×${targetHeightPx}`,
+                        tag: '报名规范',
+                      },
+                      {
+                        mult: 2 as const,
+                        title: '🔥 600 DPI 超清',
+                        sub: `${targetWidthPx * 2}×${targetHeightPx * 2}`,
+                        tag: '清晰翻倍/推荐',
+                      },
+                      {
+                        mult: 4 as const,
+                        title: '1200 DPI 极清',
+                        sub: `${targetWidthPx * 4}×${targetHeightPx * 4}`,
+                        tag: '印刷原画',
+                      },
+                    ].map((res) => {
+                      const active = clarityConfig.exportDpiMultiplier === res.mult;
+                      return (
+                        <button
+                          key={res.mult}
+                          type="button"
+                          onClick={() =>
+                            setClarityConfig((prev) => ({
+                              ...prev,
+                              exportDpiMultiplier: res.mult,
+                            }))
+                          }
+                          className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                            active
+                              ? 'bg-amber-600 text-white border-amber-600 shadow-xs ring-1 ring-amber-400'
+                              : 'bg-white border-stone-200 text-stone-700 hover:border-stone-300'
+                          }`}
+                        >
+                          <div className="text-xs font-bold">{res.title}</div>
+                          <div className={`text-[10px] font-mono ${active ? 'text-amber-100' : 'text-stone-400'}`}>
+                            {res.sub}
+                          </div>
+                          <span
+                            className={`inline-block mt-0.5 text-[9px] px-1 py-0.2 rounded font-medium ${
+                              active ? 'bg-amber-700/60 text-white' : 'bg-stone-100 text-stone-500'
+                            }`}
+                          >
+                            {res.tag}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-stone-500">
+                    💡 很多网站下载的照片看起来模糊，是因为标准 1 寸 (295×413) 像素较小。选择「600DPI 智能超清」，导出分辨率翻倍，手机打开放大看发丝五官极其清晰！
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* File Size Constraint (Exam & System Submission) */}
             <div className="space-y-1.5 pt-1">
@@ -2261,23 +2491,31 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
               <button
                 type="button"
                 onClick={() => handleDownloadSinglePhoto(2)}
-                className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-amber-600 via-orange-600 to-indigo-700 hover:from-amber-700 hover:to-indigo-800 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-[0.99]"
+                className={`w-full py-3.5 px-4 rounded-xl text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-[0.99] ${
+                  useOriginalOnly
+                    ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-stone-900 hover:from-blue-700 hover:to-stone-950'
+                    : 'bg-gradient-to-r from-amber-600 via-orange-600 to-indigo-700 hover:from-amber-700 hover:to-indigo-800'
+                }`}
               >
                 <Zap className="w-4 h-4 fill-amber-200 text-amber-200" />
                 <span>
-                  ⚡ 智能超清下载 (推荐 600DPI • {targetWidthPx * 2}×{targetHeightPx * 2} px)
+                  {useOriginalOnly
+                    ? `⚡ 导出「${currentSpec.name}」原图超清剪裁照 (600DPI • ${targetWidthPx * 2}×${targetHeightPx * 2} px)`
+                    : `⚡ 智能超清下载 (推荐 600DPI • ${targetWidthPx * 2}×${targetHeightPx * 2} px)`}
                 </span>
               </button>
 
               {/* Secondary Download: Exact Selected DPI/Size */}
               <button
                 type="button"
-                onClick={() => handleDownloadSinglePhoto()}
+                onClick={() => handleDownloadSinglePhoto(1)}
                 className="w-full py-2.5 px-4 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-2 border border-stone-200 transition-all cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5 text-stone-600" />
                 <span>
-                  下载当前设定规格 ({currentSpec.name} • {currentColor.name} • {clarityConfig.exportDpiMultiplier * 300}DPI)
+                  {useOriginalOnly
+                    ? `下载标准规范原图照 (${currentSpec.name} • 300DPI 规范 • ${targetWidthPx}×${targetHeightPx} px)`
+                    : `下载当前设定规格 (${currentSpec.name} • ${currentColor.name} • ${clarityConfig.exportDpiMultiplier * 300}DPI)`}
                 </span>
               </button>
 
@@ -2290,7 +2528,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   title="生成 6 寸照相馆标准排版冲印照，纯净无屏幕构图辅助线"
                 >
                   <Printer className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>{isPreparingPrint ? '排版准备中...' : '6寸排版冲印照'}</span>
+                  <span>{isPreparingPrint ? '排版准备中...' : useOriginalOnly ? '6寸排版冲印照 (8张原图1寸)' : '6寸排版冲印照 (8张1寸)'}</span>
                 </button>
 
                 <button

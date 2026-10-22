@@ -10,6 +10,7 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import JSZip from 'jszip';
 import {
   Upload,
   Sparkles,
@@ -65,6 +66,8 @@ import {
   createCoverStory,
   analyzeVideoForWeChat,
   extractVideoToPngSequenceZip,
+  extractGifToPngSequenceZip,
+  generateDynamicPhotoCoverSequenceZip,
   packageAllRedPacketAssets,
   loadImageElement,
   ensureTransparentSubject,
@@ -138,12 +141,20 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [bubbleResult, setBubbleResult] = useState<MaterialResult | null>(null);
   const [storyResult, setStoryResult] = useState<MaterialResult | null>(null);
 
-  // Video State (if uploaded)
+  // Video & Dynamic Sequence State (Cover & Pendant)
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoAnalysis, setVideoAnalysis] = useState<VideoAnalysisResult | null>(null);
   const [videoTrimStart, setVideoTrimStart] = useState<number>(0);
   const [videoTrimEnd, setVideoTrimEnd] = useState<number>(3.0);
+  const [coverGifFile, setCoverGifFile] = useState<File | null>(null);
+  const [coverSequenceZip, setCoverSequenceZip] = useState<Blob | null>(null);
+  const [coverSequenceZipSizeMb, setCoverSequenceZipSizeMb] = useState<number>(0);
+  const [coverSequenceFrameCount, setCoverSequenceFrameCount] = useState<number>(0);
+  const [dynamicSourceTab, setDynamicSourceTab] = useState<'video' | 'gif' | 'photo'>('video');
+  const [dynamicDurationSec, setDynamicDurationSec] = useState<number>(2.0); // 1.0s to 3.0s (24 ~ 72 frames)
+  const [dynamicEffectType, setDynamicEffectType] = useState<'golden_sparkles' | 'festive_shimmer' | 'subtle_breathe'>('golden_sparkles');
+  const [isVideoPlaying, setIsVideoPlaying] = useState<boolean>(true);
   const [pendantSequenceZip, setPendantSequenceZip] = useState<Blob | null>(null);
   const [pendantZipSizeMb, setPendantZipSizeMb] = useState<number>(0);
 
@@ -1174,28 +1185,48 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   };
 
   const handleUploadMain = async (file: File) => {
-    const isVideo = file.type.startsWith('video/') || file.name.endsWith('.mp4');
+    const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mp4') || file.name.toLowerCase().endsWith('.webm');
+    const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
     setIsProcessing(true);
-    setProcessingStatus(isVideo ? '正在解析视频并提取封面关键帧...' : '正在准备解析图片与色彩通道...');
+    setProcessingStatus(
+      isVideo
+        ? '正在解析视频并提取封面关键帧...'
+        : isGif
+        ? '正在解析 GIF 动图通道...'
+        : '正在准备解析图片与色彩通道...'
+    );
     setProcessingProgress(15);
     await new Promise((r) => setTimeout(r, 20));
 
     try {
       let sourceImg: HTMLImageElement;
+      setCoverSequenceZip(null);
+
       if (isVideo) {
         const url = URL.createObjectURL(file);
         setVideoFile(file);
         setVideoUrl(url);
+        setCoverGifFile(null);
+        setDynamicSourceTab('video');
         const analysis = await analyzeVideoForWeChat(file);
         setVideoAnalysis(analysis);
         setVideoTrimStart(0);
         setVideoTrimEnd(Math.min(3.0, analysis.duration));
         sourceImg = await extractFrameFromVideoUrl(url, 0.5);
+      } else if (isGif) {
+        setCoverGifFile(file);
+        setVideoFile(null);
+        setVideoUrl(null);
+        setVideoAnalysis(null);
+        setDynamicSourceTab('gif');
+        sourceImg = await loadImageElement(file);
       } else {
         sourceImg = await loadImageElement(file);
         setVideoFile(null);
         setVideoUrl(null);
+        setCoverGifFile(null);
         setVideoAnalysis(null);
+        setDynamicSourceTab('photo');
       }
 
       setCachedSourceImg(sourceImg);
@@ -1280,7 +1311,11 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       setBubbleResult(bubble);
 
       setProcessingProgress(100);
-      onNotification('🎉 成功生成全套符合微信规范素材！已自动去除背景透明化，支持多图叠加与微调。');
+      onNotification(
+        `🎉 成功生成全套符合微信规范素材！${
+          isVideo ? '已解析视频，支持导出 24fps 序列帧！' : isGif ? '已就绪 GIF 动图，支持导出 24fps 序列帧！' : '支持导出静态图或贺岁微动序列帧！'
+        }`
+      );
     } catch (err: any) {
       console.error(err);
       onNotification('素材处理失败: ' + err.message);
@@ -1293,10 +1328,47 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
   const handleUploadCoverOnly = async (file: File) => {
     setIsProcessing(true);
-    setProcessingStatus('正在更新封面图 (957×1278)...');
-    setProcessingProgress(40);
+    const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mp4') || file.name.toLowerCase().endsWith('.webm');
+    const isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
+    setProcessingStatus(
+      isVideo
+        ? '正在解析视频并提取封面帧...'
+        : isGif
+        ? '正在解析 GIF 动图...'
+        : '正在更新封面图 (957×1278)...'
+    );
+    setProcessingProgress(35);
     try {
-      const img = await loadImageElement(file);
+      let img: HTMLImageElement;
+      setCoverSequenceZip(null);
+
+      if (isVideo) {
+        const url = URL.createObjectURL(file);
+        setVideoFile(file);
+        setVideoUrl(url);
+        setCoverGifFile(null);
+        setDynamicSourceTab('video');
+        const analysis = await analyzeVideoForWeChat(file);
+        setVideoAnalysis(analysis);
+        setVideoTrimStart(0);
+        setVideoTrimEnd(Math.min(3.0, analysis.duration));
+        img = await extractFrameFromVideoUrl(url, 0.5);
+      } else if (isGif) {
+        setCoverGifFile(file);
+        setVideoFile(null);
+        setVideoUrl(null);
+        setVideoAnalysis(null);
+        setDynamicSourceTab('gif');
+        img = await loadImageElement(file);
+      } else {
+        setVideoFile(null);
+        setVideoUrl(null);
+        setCoverGifFile(null);
+        setVideoAnalysis(null);
+        setDynamicSourceTab('photo');
+        img = await loadImageElement(file);
+      }
+
       setCachedSourceImg(img);
       const cover = await fitImageToTarget(img, 957, 1278, {
         mode: coverFitMode,
@@ -1307,7 +1379,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       });
       setCoverResult(cover);
       setProcessingProgress(100);
-      onNotification('已更新封面图 (957×1278)');
+      onNotification(`已更新封面素材${isVideo ? ' (MP4 视频)' : isGif ? ' (GIF 动图)' : ''}，可直接导出 24fps 动态序列帧 ZIP！`);
     } catch (e: any) {
       onNotification('封面图更新失败: ' + e.message);
     } finally {
@@ -2222,19 +2294,180 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     onNotification(`已下载 ${filename}`);
   };
 
+  const handleExportCoverSequenceZip = async (sourceType?: 'auto' | 'video' | 'gif' | 'photo') => {
+    setIsProcessing(true);
+    setProcessingProgress(5);
+    try {
+      const type = sourceType || (videoFile ? 'video' : coverGifFile ? 'gif' : 'photo');
+      let result: { zipBlob: Blob; frameCount: number; zipSize: number; duration: number };
+
+      const fitOpts = {
+        mode: coverFitMode,
+        zoom: coverZoom,
+        panY: coverPanY,
+        bgColor: coverBgColor,
+        fps: 24,
+      };
+
+      if (type === 'video' && (videoFile || videoUrl)) {
+        setProcessingStatus('正在从 MP4 视频以 24fps 提取 957×1278 官方序列帧...');
+        let vEl = videoRef.current;
+        if (!vEl) {
+          vEl = document.createElement('video');
+          vEl.muted = true;
+          vEl.playsInline = true;
+          if (videoUrl) vEl.src = videoUrl;
+          await new Promise<void>((res) => {
+            vEl!.onloadeddata = () => res();
+            setTimeout(res, 2000);
+          });
+        }
+        result = await extractVideoToPngSequenceZip(
+          vEl,
+          videoTrimStart,
+          videoTrimEnd,
+          957,
+          1278,
+          fitOpts,
+          (p, msg) => {
+            setProcessingProgress(p);
+            setProcessingStatus(msg);
+          }
+        );
+      } else if (type === 'gif' && coverGifFile) {
+        setProcessingStatus('正在将 GIF 动图重采样为 24fps 957×1278 序列帧...');
+        result = await extractGifToPngSequenceZip(
+          coverGifFile,
+          957,
+          1278,
+          fitOpts,
+          (p, msg) => {
+            setProcessingProgress(p);
+            setProcessingStatus(msg);
+          }
+        );
+      } else {
+        if (!cachedSourceImg) {
+          throw new Error('暂无可用的封面图片，请先上传主图或选择示例');
+        }
+        setProcessingStatus(`正在渲染 24fps 贺岁微动序列帧 (共 ${Math.round(dynamicDurationSec * 24)} 帧，00001.png 起)...`);
+        result = await generateDynamicPhotoCoverSequenceZip(
+          cachedSourceImg,
+          957,
+          1278,
+          {
+            ...fitOpts,
+            duration: dynamicDurationSec,
+            effect: dynamicEffectType,
+          },
+          (p, msg) => {
+            setProcessingProgress(p);
+            setProcessingStatus(msg);
+          }
+        );
+      }
+
+      setCoverSequenceZip(result.zipBlob);
+      setCoverSequenceZipSizeMb(result.zipSize / (1024 * 1024));
+      setCoverSequenceFrameCount(result.frameCount);
+
+      handleDownloadSingle(
+        result.zipBlob,
+        `01_封面图_957x1278_24fps动态序列帧_${result.frameCount}张.zip`
+      );
+
+      onNotification(
+        `🎉 成功下载动态序列帧 ZIP！共 ${result.frameCount} 张 (00001.png ~ ${String(result.frameCount).padStart(5, '0')}.png)，大小 ${(result.zipSize / 1024 / 1024).toFixed(2)}MB，100% 符合微信平台机审要求！`
+      );
+    } catch (err: any) {
+      console.error(err);
+      onNotification('导出动态序列帧失败: ' + err.message);
+    } finally {
+      setIsProcessing(false);
+      setProcessingProgress(100);
+    }
+  };
+
+  const handleExportPendantSequenceZip = async () => {
+    if (!pendantResult) {
+      onNotification('暂无封面挂件素材，请先上传或调整挂件');
+      return;
+    }
+    setIsProcessing(true);
+    setProcessingProgress(10);
+    setProcessingStatus('正在渲染 1053×1746 封面挂件 24fps 透明序列帧 ZIP (48 帧)...');
+    try {
+      const zip = new JSZip();
+      const fps = 24;
+      const duration = 2.0;
+      const totalFrames = 48;
+
+      const pImg = await loadImageElement(pendantResult.blob);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 1053;
+      canvas.height = 1746;
+      const ctx = canvas.getContext('2d')!;
+
+      for (let i = 0; i < totalFrames; i++) {
+        const t = i / totalFrames;
+        ctx.clearRect(0, 0, 1053, 1746);
+
+        // Subtle gentle breathing / floating motion for top and bottom parts
+        const breathe = 1.0 + Math.sin(t * Math.PI * 2) * 0.01;
+        const dw = 1053 * breathe;
+        const dh = 1746 * breathe;
+        const dx = (1053 - dw) / 2;
+        const dy = (1746 - dh) / 2;
+
+        ctx.drawImage(pImg, dx, dy, dw, dh);
+
+        // Enforce strictly clear middle forbidden zone (342 ~ 1650px)
+        ctx.clearRect(0, 342, 1053, 1308);
+
+        const frameFileName = `${String(i + 1).padStart(5, '0')}.png`;
+        const frameBlob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+        zip.file(frameFileName, frameBlob);
+
+        const pct = 10 + Math.round(((i + 1) / totalFrames) * 75);
+        setProcessingProgress(pct);
+      }
+
+      setProcessingStatus('正在压缩封装封面挂件序列帧 ZIP (≤20MB)...');
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      });
+
+      setPendantSequenceZip(zipBlob);
+      setPendantZipSizeMb(zipBlob.size / (1024 * 1024));
+
+      handleDownloadSingle(zipBlob, `02_封面挂件_1053x1746_24fps动态序列帧_${totalFrames}张.zip`);
+      onNotification(`🎉 封面挂件动态序列帧 ZIP 下载成功！共 48 帧 (00001.png ~ 00048.png)，大小 ${(zipBlob.size / 1024 / 1024).toFixed(2)}MB，符合微信开放平台要求！`);
+    } catch (err: any) {
+      console.error(err);
+      onNotification('导出挂件序列帧失败: ' + err.message);
+    } finally {
+      setIsProcessing(false);
+      setProcessingProgress(100);
+    }
+  };
+
   const handleDownloadAllZip = async () => {
-    if (!coverResult && !pendantResult && !bubbleResult && !storyResult && !videoFile) {
+    if (!coverResult && !pendantResult && !bubbleResult && !storyResult && !videoFile && !coverSequenceZip) {
       onNotification('暂无已生成的红包封面素材，请先上传图片或点击示范模板');
       return;
     }
 
     setIsProcessing(true);
-    setProcessingStatus('正在整合全部 4 大微信官方标准素材并打包为 ZIP...');
+    setProcessingStatus('正在整合全部微信官方标准素材并打包为 ZIP...');
 
     try {
       const allZip = await packageAllRedPacketAssets({
         cover: coverResult,
         coverVideoFile: videoFile,
+        coverSequenceZip: coverSequenceZip,
         pendant: pendantResult,
         pendantSequenceZip,
         bubble: bubbleResult,
@@ -2242,7 +2475,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       });
 
       handleDownloadSingle(allZip, '微信红包封面全套素材包_官方规范.zip');
-      onNotification('🎉 已成功打包下载全套素材包，包含规范对照表，可直接上传微信平台！');
+      onNotification('🎉 已成功打包下载全套素材包，包含 24fps 动态序列帧与官方对照表，可直接上传微信平台！');
     } catch (err: any) {
       console.error(err);
       onNotification('打包下载失败: ' + err.message);
@@ -2472,20 +2705,22 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                   </p>
                 </div>
 
-                <label className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold cursor-pointer transition-all flex items-center gap-1.5 border border-neutral-200">
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>上传图片/MP4</span>
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,video/mp4"
-                    className="hidden"
-                    onChange={(e) => {
-                      if (e.target.files && e.target.files[0]) {
-                        handleUploadMain(e.target.files[0]);
-                      }
-                    }}
-                  />
-                </label>
+                <div className="flex items-center gap-2">
+                  <label className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 text-neutral-700 text-xs font-semibold cursor-pointer transition-all flex items-center gap-1.5 border border-neutral-200">
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>上传主图/动图/视频</span>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm"
+                      className="hidden"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleUploadCoverOnly(e.target.files[0]);
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
               </div>
 
               {/* Interactive Cover Canvas with Direct Drag-to-Pan */}
@@ -2500,7 +2735,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                   }`}
                   title="鼠标按住可直接上下拖拽微调位置"
                 >
-                  {coverResult ? (
+                  {videoUrl ? (
+                    <video
+                      ref={videoRef}
+                      src={videoUrl}
+                      autoPlay
+                      loop
+                      muted
+                      playsInline
+                      className="w-full h-full object-contain rounded-xl drop-shadow-sm pointer-events-none"
+                    />
+                  ) : coverResult ? (
                     <img
                       src={coverResult.url}
                       alt="封面图"
@@ -2607,21 +2852,379 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                 </div>
               </div>
 
+              {/* Cover Quick Download Actions Bar (Static + Dynamic 24fps Sequence ZIP) */}
               {coverResult && (
-                <div className="flex items-center justify-between pt-2 text-xs">
-                  <span className="text-neutral-400 font-mono">
-                    大小: {Math.round(coverResult.size / 1024)} KB (&le; 500KB 合规 ✓)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadSingle(coverResult.blob, '01_封面图_957x1278.jpg')}
-                    className="px-4 py-2 bg-neutral-900 hover:bg-neutral-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shadow-xs"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>单独下载封面图</span>
-                  </button>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-neutral-100 text-xs">
+                  <div className="space-y-0.5">
+                    <span className="text-neutral-500 font-mono flex items-center gap-1.5">
+                      <span>静态大小: {Math.round(coverResult.size / 1024)} KB (&le; 500KB 合规 ✓)</span>
+                      {videoFile && (
+                        <span className="bg-red-50 text-red-700 px-1.5 py-0.2 rounded font-bold font-sans">
+                          MP4 视频已载入
+                        </span>
+                      )}
+                      {coverGifFile && (
+                        <span className="bg-purple-50 text-purple-700 px-1.5 py-0.2 rounded font-bold font-sans">
+                          GIF 动图已载入
+                        </span>
+                      )}
+                    </span>
+                    <p className="text-[10px] text-neutral-400">
+                      微信开放平台同时支持上传静态图或 24fps PNG 序列帧 ZIP 包
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadSingle(coverResult.blob, '01_封面图_957x1278.jpg')}
+                      className="px-3.5 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-800 font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 border border-neutral-200 shadow-2xs active:scale-95"
+                      title="下载 957x1278 单张静态封面图 (≤500KB)"
+                    >
+                      <Download className="w-3.5 h-3.5 text-neutral-600" />
+                      <span>单独下载静态封面图</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleExportCoverSequenceZip()}
+                      className="px-4 py-2 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 active:scale-95 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                      title="导出微信官方标准 24fps 序列帧 (00001.png ~ 00048.png，≤50MB ZIP 包)"
+                    >
+                      <Film className="w-3.5 h-3.5 text-amber-300" />
+                      <span>导出 24fps 动态序列帧 ZIP</span>
+                    </button>
+                  </div>
                 </div>
               )}
+
+              {/* ======================================================== */}
+              {/* Dedicated Dynamic Cover & 24fps Frame Sequence Studio      */}
+              {/* Strictly matching WeChat Red Packet Platform requirements:*/}
+              {/* 957x1278, 24fps, 1s~3s (24~72张), 00001.png, <=50MB ZIP */}
+              {/* ======================================================== */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-red-50/70 via-rose-50/40 to-neutral-50/80 border border-red-200/90 shadow-2xs space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3 border-b border-red-200/60">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-red-600 text-white flex items-center justify-center shadow-xs">
+                      <Film className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-extrabold text-xs sm:text-sm text-neutral-900 flex items-center gap-2">
+                        <span>微信动态红包封面 · 24fps 序列帧导出中心</span>
+                        <span className="text-[10px] bg-red-100 text-red-800 font-bold px-2 py-0.5 rounded-full border border-red-300 font-mono">
+                          官方机审 100% 合规
+                        </span>
+                      </h4>
+                      <p className="text-[11px] text-neutral-500 mt-0.5">
+                        微信平台严格要求：957×1278 尺寸、24fps 导出、24~72张、以 5 位数字 <code className="font-mono text-red-600 bg-red-100/60 px-1 rounded">00001.png</code> 命名并打包为 ZIP (≤50MB)。
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="font-mono text-[10px] text-red-700 bg-white/90 border border-red-200 px-2.5 py-1 rounded-xl shrink-0 font-bold self-start sm:self-center">
+                    cover.weixin.qq.com 规范
+                  </span>
+                </div>
+
+                {/* 3 Input Tabs: Video (MP4) | GIF (动图) | Static Photo (贺岁微动) */}
+                <div className="flex items-center p-1 bg-white rounded-xl border border-red-200/80 text-xs gap-1 shadow-2xs">
+                  <button
+                    type="button"
+                    onClick={() => setDynamicSourceTab('video')}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      dynamicSourceTab === 'video'
+                        ? 'bg-red-600 text-white shadow-xs'
+                        : 'text-neutral-600 hover:bg-neutral-100'
+                    }`}
+                  >
+                    <Film className="w-3.5 h-3.5" />
+                    <span>① MP4 视频截帧{videoFile ? ' (已就绪)' : ''}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDynamicSourceTab('gif')}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      dynamicSourceTab === 'gif'
+                        ? 'bg-red-600 text-white shadow-xs'
+                        : 'text-neutral-600 hover:bg-neutral-100'
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>② GIF 动图重采样{coverGifFile ? ' (已就绪)' : ''}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDynamicSourceTab('photo')}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      dynamicSourceTab === 'photo'
+                        ? 'bg-red-600 text-white shadow-xs'
+                        : 'text-neutral-600 hover:bg-neutral-100'
+                    }`}
+                  >
+                    <Wand2 className="w-3.5 h-3.5" />
+                    <span>③ 静态图一键贺岁微动</span>
+                  </button>
+                </div>
+
+                {/* Panel Tab A: MP4 Video Extraction */}
+                {dynamicSourceTab === 'video' && (
+                  <div className="p-3.5 bg-white/90 rounded-2xl border border-red-100 space-y-3 text-xs">
+                    {videoUrl ? (
+                      <div className="space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-neutral-700 font-medium">
+                          <span className="font-bold flex items-center gap-1.5 text-neutral-900">
+                            <span>当前视频: {videoFile?.name || '已载入视频'}</span>
+                            {videoAnalysis && (
+                              <span className="font-mono text-[10px] text-neutral-400">
+                                ({videoAnalysis.duration.toFixed(1)}s · {videoAnalysis.width}×{videoAnalysis.height} · {videoAnalysis.bitrateKbps}kbps)
+                              </span>
+                            )}
+                          </span>
+
+                          <span className="font-mono text-[11px] bg-red-50 text-red-700 px-2 py-0.5 rounded-md font-bold border border-red-200">
+                            截取时长: {(videoTrimEnd - videoTrimStart).toFixed(1)} 秒 (约 {Math.round((videoTrimEnd - videoTrimStart) * 24)} 帧 · 24fps)
+                          </span>
+                        </div>
+
+                        {/* Video Trim Sliders (1.0s to 3.0s strict WeChat requirement) */}
+                        <div className="space-y-1.5 bg-neutral-50 p-2.5 rounded-xl border border-neutral-200">
+                          <div className="flex justify-between items-center text-[11px] font-bold text-neutral-700">
+                            <span>剪辑区间 (微信限制 1.0s 至 3.0s)</span>
+                            <span className="font-mono text-red-600">
+                              {videoTrimStart.toFixed(1)}s ~ {videoTrimEnd.toFixed(1)}s (共 {Math.round((videoTrimEnd - videoTrimStart) * 24)} 张图)
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3 pt-1">
+                            <div>
+                              <span className="text-[10px] text-neutral-400 block mb-0.5">开始时间点</span>
+                              <input
+                                type="range"
+                                min="0"
+                                max={Math.max(0.1, (videoAnalysis?.duration || 3) - 1.0)}
+                                step="0.1"
+                                value={videoTrimStart}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  setVideoTrimStart(val);
+                                  if (videoTrimEnd < val + 1.0) {
+                                    setVideoTrimEnd(Math.min(videoAnalysis?.duration || 3, val + 1.0));
+                                  }
+                                }}
+                                className="w-full accent-red-600 cursor-pointer"
+                              />
+                            </div>
+                            <div>
+                              <span className="text-[10px] text-neutral-400 block mb-0.5">结束时间点 (至少1s, 最多3s)</span>
+                              <input
+                                type="range"
+                                min={videoTrimStart + 1.0}
+                                max={Math.min(videoTrimStart + 3.0, videoAnalysis?.duration || 3.0)}
+                                step="0.1"
+                                value={videoTrimEnd}
+                                onChange={(e) => setVideoTrimEnd(parseFloat(e.target.value))}
+                                className="w-full accent-red-600 cursor-pointer"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => handleExportCoverSequenceZip('video')}
+                            className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                          >
+                            <Film className="w-4 h-4 text-amber-300" />
+                            <span>立即导出 24fps 视频序列帧 ZIP (00001.png~)</span>
+                          </button>
+
+                          {videoFile && (
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadSingle(videoFile, `01_封面视频_3比4_${videoFile.name}`)}
+                              className="px-3.5 py-2.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1 border border-neutral-200 shadow-2xs"
+                              title="下载原始 MP4 视频"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>下载 MP4</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-4 flex flex-col items-center justify-center text-center space-y-2.5">
+                        <Film className="w-8 h-8 text-neutral-300" />
+                        <div>
+                          <p className="font-bold text-neutral-800">尚未上传视频文件</p>
+                          <p className="text-[11px] text-neutral-400 mt-0.5">
+                            请上传 1s 至 3s 的 MP4 视频，本工具将自动以 24fps 导出符合微信机审的 PNG 序列帧 ZIP。
+                          </p>
+                        </div>
+                        <label className="px-4 py-2 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold rounded-xl cursor-pointer transition-all shadow-xs flex items-center gap-1.5">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>上传 MP4 视频并截帧</span>
+                          <input
+                            type="file"
+                            accept="video/mp4,video/webm"
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files[0]) {
+                                handleUploadCoverOnly(e.target.files[0]);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Panel Tab B: GIF Animation Resampling */}
+                {dynamicSourceTab === 'gif' && (
+                  <div className="p-3.5 bg-white/90 rounded-2xl border border-red-100 space-y-3 text-xs">
+                    {coverGifFile ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between text-neutral-700 font-medium">
+                          <span className="font-bold text-neutral-900">
+                            已载入动图: {coverGifFile.name} ({Math.round(coverGifFile.size / 1024)} KB)
+                          </span>
+                          <span className="font-mono text-[11px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded-md font-bold border border-purple-200">
+                            24fps 自动重采样
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-neutral-500">
+                          本工具将自动解构 GIF 动画的每一帧与时间延迟，以精准 24fps 帧率重采样导出为 24~72 张 957×1278 像素 PNG 图片，并以 <code className="font-mono text-purple-700">00001.png</code> 连续编号打包。
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => handleExportCoverSequenceZip('gif')}
+                          className="w-full py-2.5 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-sm"
+                        >
+                          <Sparkles className="w-4 h-4 text-amber-300" />
+                          <span>导出 GIF 动图 24fps 序列帧 ZIP (957×1278)</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="py-4 flex flex-col items-center justify-center text-center space-y-2.5">
+                        <Sparkles className="w-8 h-8 text-neutral-300" />
+                        <div>
+                          <p className="font-bold text-neutral-800">尚未上传 GIF 动图</p>
+                          <p className="text-[11px] text-neutral-400 mt-0.5">
+                            支持将任何动图（如搞笑表情、生肖动画）重采样为微信 24fps 官方规格序列帧。
+                          </p>
+                        </div>
+                        <label className="px-4 py-2 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white font-bold rounded-xl cursor-pointer transition-all shadow-xs flex items-center gap-1.5">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>上传 GIF 动图并导出</span>
+                          <input
+                            type="file"
+                            accept="image/gif"
+                            className="hidden"
+                            onChange={(e) => {
+                              if (e.target.files && e.target.files[0]) {
+                                handleUploadCoverOnly(e.target.files[0]);
+                              }
+                            }}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Panel Tab C: Static Photo to Festive Motion Sequence */}
+                {dynamicSourceTab === 'photo' && (
+                  <div className="p-3.5 bg-white/90 rounded-2xl border border-red-100 space-y-3 text-xs">
+                    <div>
+                      <div className="flex items-center justify-between font-bold text-neutral-900 mb-1">
+                        <span className="flex items-center gap-1.5">
+                          <Wand2 className="w-3.5 h-3.5 text-red-600" />
+                          <span>零剪辑门槛：为静态图片智能生成 24fps 贺岁微动序列帧</span>
+                        </span>
+                        <span className="font-mono text-[10px] text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                          48 帧 · 2.0 秒 · 24fps 标配
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500 leading-relaxed">
+                        没有准备视频也不用担心！工具将基于当前封面图片（如您上传的招财卡皮巴拉），自动合成升腾金光粒子微动与舒缓呼吸循环，严格生成符合微信审核的 48 张 5位连续编号 PNG 序列帧 ZIP。
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      <div>
+                        <label className="font-bold text-neutral-700 block mb-1">微动视觉效果</label>
+                        <select
+                          value={dynamicEffectType}
+                          onChange={(e) => setDynamicEffectType(e.target.value as any)}
+                          className="w-full px-3 py-1.5 rounded-xl border border-neutral-200 bg-neutral-50 font-medium text-xs cursor-pointer"
+                        >
+                          <option value="golden_sparkles">✨ 贺岁金光粒子升腾 (推荐 · 富贵喜庆)</option>
+                          <option value="festive_shimmer">💫 金色祥光掠过扫光 (高端奢华)</option>
+                          <option value="subtle_breathe">🍃 舒缓呼吸微动缩放 (自然灵动)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="font-bold text-neutral-700 block mb-1">导出循环时长与帧数</label>
+                        <select
+                          value={dynamicDurationSec}
+                          onChange={(e) => setDynamicDurationSec(parseFloat(e.target.value))}
+                          className="w-full px-3 py-1.5 rounded-xl border border-neutral-200 bg-neutral-50 font-medium text-xs cursor-pointer font-mono"
+                        >
+                          <option value="1.5">1.5 秒 · 36 帧 (24fps 快速循环)</option>
+                          <option value="2.0">2.0 秒 · 48 帧 (24fps 微信官方推荐黄金时长)</option>
+                          <option value="3.0">3.0 秒 · 72 帧 (24fps 微信平台允许最大上限)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleExportCoverSequenceZip('photo')}
+                      className="w-full py-2.5 bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 hover:opacity-95 active:scale-98 text-white font-extrabold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm"
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-200" />
+                      <span>一键生成并导出 24fps 动态微动序列帧 ZIP ({Math.round(dynamicDurationSec * 24)} 帧 · 00001.png 起)</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Status Callout if Cover Sequence ZIP is Ready */}
+                {coverSequenceZip && (
+                  <div className="p-3.5 bg-emerald-50 rounded-2xl border border-emerald-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-1.5 font-extrabold text-emerald-950">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>24fps 动态序列帧 ZIP 已打包就绪</span>
+                        <span className="font-mono text-[10px] bg-white px-2 py-0.5 rounded-full border border-emerald-300 text-emerald-800 font-bold">
+                          957×1278 · {coverSequenceFrameCount} 帧 · {coverSequenceZipSizeMb.toFixed(2)} MB (&le; 50MB ✓)
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-emerald-900/80">
+                        包含严格以 5 位数字命名（00001.png ~ {String(coverSequenceFrameCount).padStart(5, '0')}.png）的序列帧，并已自动同步加入右上角「导出全套物料 ZIP」。
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleDownloadSingle(
+                          coverSequenceZip,
+                          `01_封面图_957x1278_24fps动态序列帧_${coverSequenceFrameCount}张.zip`
+                        )
+                      }
+                      className="px-4 py-2 bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-xs shrink-0"
+                    >
+                      <Download className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>重新下载序列帧 ZIP</span>
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -3529,14 +4132,26 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       已将顶部与底部图片合成为一张透明PNG，中间严格留空，大小 &le; 300KB，可直接提交微信红包开放平台审核。
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadSingle(pendantResult.blob, '02_封面挂件_1053x1746_微信标准合成图.png')}
-                    className="px-5 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm shrink-0 active:scale-95"
-                  >
-                    <Download className="w-4 h-4 text-amber-300" />
-                    <span>下载合成封面挂件 (1053×1746)</span>
-                  </button>
+                  <div className="flex items-center gap-2 flex-wrap shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadSingle(pendantResult.blob, '02_封面挂件_1053x1746_微信标准合成图.png')}
+                      className="px-4 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm active:scale-95"
+                    >
+                      <Download className="w-4 h-4 text-amber-300" />
+                      <span>下载静态挂件 (1053×1746)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleExportPendantSequenceZip}
+                      className="px-4 py-2.5 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-sm active:scale-95"
+                      title="以 24fps 导出 1053×1746 透明背景 PNG 序列帧 ZIP 包 (微信平台支持)"
+                    >
+                      <Film className="w-4 h-4 text-amber-200" />
+                      <span>导出 24fps 挂件序列帧 ZIP</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

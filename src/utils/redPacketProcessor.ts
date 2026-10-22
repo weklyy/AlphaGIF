@@ -1601,17 +1601,42 @@ export async function analyzeVideoForWeChat(file: File): Promise<VideoAnalysisRe
  * Extract frames from a video at exact 24fps and package them into a WeChat compliant PNG sequence ZIP
  * Conforming to: "以24fps帧率导出序列帧，全部图片打包为1个ZIP压缩包上传，压缩包不超过20MB"
  */
+export interface SequenceExtractionOptions {
+  mode?: 'contain' | 'cover';
+  zoom?: number;
+  panY?: number;
+  bgColor?: string;
+  fps?: number; // default 24
+  minFrames?: number; // default 24
+  maxFrames?: number; // default 72
+}
+
+/**
+ * Extract frames from a video at exact 24fps and package them into a WeChat compliant PNG sequence ZIP
+ * Conforming strictly to WeChat Red Packet platform requirements:
+ * 1. PNG图片尺寸: 957 × 1278 像素 (或指定 targetW x targetH)
+ * 2. 视频(1s至3s) 以 24fps 帧率导出序列帧
+ * 3. 全部图片打包为 1 个 ZIP 压缩包上传，压缩包不超过 50MB
+ * 4. 每张 PNG 图片按播放顺序以 5位连续数字命名，例如 00001.png、00002.png...
+ * 5. 图片张数不少于 24 张，不多于 72 张 (24fps * 1s = 24张, 24fps * 3s = 72张)
+ */
 export async function extractVideoToPngSequenceZip(
   videoElement: HTMLVideoElement,
   startTime: number,
   endTime: number,
-  targetW: number,
-  targetH: number,
-  fps = 24,
+  targetW = 957,
+  targetH = 1278,
+  options?: SequenceExtractionOptions,
   onProgress?: (progress: number, status: string) => void
-): Promise<{ zipBlob: Blob; frameCount: number; zipSize: number }> {
-  const duration = Math.max(0.5, endTime - startTime);
-  const totalFrames = Math.max(1, Math.round(duration * fps));
+): Promise<{ zipBlob: Blob; frameCount: number; zipSize: number; duration: number }> {
+  const fps = options?.fps || 24;
+  const rawDuration = Math.max(0.5, endTime - startTime);
+  // WeChat enforces duration between 1.0s and 3.0s (24 to 72 frames at 24fps)
+  const duration = Math.min(3.0, Math.max(1.0, rawDuration));
+  const minFrames = options?.minFrames ?? 24;
+  const maxFrames = options?.maxFrames ?? 72;
+  const totalFrames = Math.min(maxFrames, Math.max(minFrames, Math.round(duration * fps)));
+
   const zip = new JSZip();
 
   const canvas = document.createElement('canvas');
@@ -1619,53 +1644,325 @@ export async function extractVideoToPngSequenceZip(
   canvas.height = targetH;
   const ctx = canvas.getContext('2d')!;
 
-  const srcW = videoElement.videoWidth || 1053;
-  const srcH = videoElement.videoHeight || 1746;
-  const scale = Math.max(targetW / srcW, targetH / srcH);
-  const dw = srcW * scale;
-  const dh = srcH * scale;
-  const dx = (targetW - dw) / 2;
-  const dy = (targetH - dh) / 2;
+  const srcW = videoElement.videoWidth || targetW;
+  const srcH = videoElement.videoHeight || targetH;
 
-  onProgress?.(5, `准备抽帧 (共 ${totalFrames} 帧，24fps)...`);
+  const mode = options?.mode || 'contain';
+  const zoom = options?.zoom || 1.0;
+  const panY = options?.panY || 0;
+  const bgColor = options?.bgColor || '#b91c1c';
+
+  const baseScale = mode === 'cover'
+    ? Math.max(targetW / srcW, targetH / srcH)
+    : Math.min(targetW / srcW, targetH / srcH);
+  const effectiveScale = baseScale * zoom;
+  const dw = srcW * effectiveScale;
+  const dh = srcH * effectiveScale;
+  const dx = (targetW - dw) / 2;
+  const dy = (targetH - dh) / 2 + panY;
+
+  onProgress?.(5, `准备抽帧 (共 ${totalFrames} 帧，24fps 标准，命名 00001.png 起)...`);
 
   for (let i = 0; i < totalFrames; i++) {
-    const targetTime = startTime + i * (1 / fps);
+    const targetTime = startTime + i * (duration / totalFrames);
     videoElement.currentTime = targetTime;
 
     await new Promise<void>((res) => {
+      let resolved = false;
       const handler = () => {
+        if (resolved) return;
+        resolved = true;
         videoElement.removeEventListener('seeked', handler);
         res();
       };
       videoElement.addEventListener('seeked', handler);
+      // Timeout fallback in case seeked event doesn't fire
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          videoElement.removeEventListener('seeked', handler);
+          res();
+        }
+      }, 500);
     });
 
-    ctx.clearRect(0, 0, targetW, targetH);
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, targetW, targetH);
     ctx.drawImage(videoElement, dx, dy, dw, dh);
 
-    // Frame filename e.g. "frame_001.png"
-    const frameNumberStr = String(i + 1).padStart(3, '0');
+    // WeChat Platform Strict Requirement:
+    // "每张PNG图片按播放顺序以5位连续数字命名，例如00001.png、00002.png..."
+    const frameFileName = `${String(i + 1).padStart(5, '0')}.png`;
     const frameBlob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
-    zip.file(`frame_${frameNumberStr}.png`, frameBlob);
+    zip.file(frameFileName, frameBlob);
 
     const pct = 10 + Math.round(((i + 1) / totalFrames) * 75);
-    onProgress?.(pct, `正在提取并打包序列帧 ${i + 1}/${totalFrames}...`);
+    onProgress?.(pct, `正在提取并打包序列帧 ${frameFileName} (${i + 1}/${totalFrames})...`);
   }
 
-  onProgress?.(88, '正在压缩并封装为微信标准 ZIP 包...');
+  onProgress?.(88, '正在压缩并封装为微信标准 ZIP 包 (≤50MB)...');
   const zipBlob = await zip.generateAsync({
     type: 'blob',
     compression: 'DEFLATE',
     compressionOptions: { level: 6 },
   });
 
-  onProgress?.(100, `完成！成功导出 ${totalFrames} 帧，总大小 ${(zipBlob.size / 1024 / 1024).toFixed(2)} MB`);
+  onProgress?.(100, `完成！成功导出 ${totalFrames} 帧 (00001.png ~ ${String(totalFrames).padStart(5, '0')}.png)，总大小 ${(zipBlob.size / 1024 / 1024).toFixed(2)} MB`);
 
   return {
     zipBlob,
     frameCount: totalFrames,
     zipSize: zipBlob.size,
+    duration,
+  };
+}
+
+/**
+ * Extract an animated GIF into WeChat compliant 24fps PNG sequence ZIP (957x1278)
+ * Resamples to 24fps with 24~72 frames and 5-digit naming (00001.png...)
+ */
+export async function extractGifToPngSequenceZip(
+  gifData: ArrayBuffer | Blob,
+  targetW = 957,
+  targetH = 1278,
+  options?: SequenceExtractionOptions,
+  onProgress?: (progress: number, status: string) => void
+): Promise<{ zipBlob: Blob; frameCount: number; zipSize: number; duration: number }> {
+  // Dynamically import decodeGif to prevent circular dependency
+  const { decodeGif } = await import('./gifProcessor');
+
+  let buffer: ArrayBuffer;
+  if (gifData instanceof ArrayBuffer) {
+    buffer = gifData;
+  } else {
+    buffer = await gifData.arrayBuffer();
+  }
+
+  onProgress?.(10, '正在解析 GIF 动图通道与帧数据...');
+  const decoded = await decodeGif(buffer);
+  if (!decoded.frames.length) {
+    throw new Error('GIF 文件未包含任何有效图像帧');
+  }
+
+  // Calculate total gif duration in seconds
+  let gifTotalDuration = 0;
+  for (const f of decoded.frames) {
+    gifTotalDuration += (f.delay || 100) / 1000;
+  }
+  if (gifTotalDuration <= 0) gifTotalDuration = 1.0;
+
+  // Determine export duration: 1.0s to 3.0s (default ~2.0s or closest integer multiple)
+  let exportDuration = 2.0;
+  if (gifTotalDuration >= 1.0 && gifTotalDuration <= 3.0) {
+    exportDuration = gifTotalDuration;
+  } else if (gifTotalDuration < 1.0) {
+    // Loop to at least 1.0s (e.g. 2s)
+    const loops = Math.ceil(1.0 / gifTotalDuration);
+    exportDuration = Math.min(3.0, loops * gifTotalDuration);
+  } else {
+    // Crop to 3.0s
+    exportDuration = 3.0;
+  }
+
+  const fps = options?.fps || 24;
+  const totalFrames = Math.min(72, Math.max(24, Math.round(exportDuration * fps)));
+  const zip = new JSZip();
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d')!;
+
+  const frameCanvas = document.createElement('canvas');
+  frameCanvas.width = decoded.width;
+  frameCanvas.height = decoded.height;
+  const frameCtx = frameCanvas.getContext('2d')!;
+
+  const mode = options?.mode || 'contain';
+  const zoom = options?.zoom || 1.0;
+  const panY = options?.panY || 0;
+  const bgColor = options?.bgColor || '#b91c1c';
+
+  const baseScale = mode === 'cover'
+    ? Math.max(targetW / decoded.width, targetH / decoded.height)
+    : Math.min(targetW / decoded.width, targetH / decoded.height);
+  const effectiveScale = baseScale * zoom;
+  const dw = decoded.width * effectiveScale;
+  const dh = decoded.height * effectiveScale;
+  const dx = (targetW - dw) / 2;
+  const dy = (targetH - dh) / 2 + panY;
+
+  onProgress?.(20, `正在重采样为 24fps 标准序列帧 (共 ${totalFrames} 帧)...`);
+
+  for (let i = 0; i < totalFrames; i++) {
+    const currentTimeSec = (i / totalFrames) * exportDuration;
+    const loopedTimeSec = currentTimeSec % gifTotalDuration;
+
+    // Find which frame in GIF corresponds to loopedTimeSec
+    let accTime = 0;
+    let frameIdx = 0;
+    for (let f = 0; f < decoded.frames.length; f++) {
+      const frameSec = (decoded.frames[f].delay || 100) / 1000;
+      if (accTime + frameSec > loopedTimeSec) {
+        frameIdx = f;
+        break;
+      }
+      accTime += frameSec;
+    }
+
+    const currentFrame = decoded.frames[frameIdx];
+    frameCtx.putImageData(currentFrame.imageData, 0, 0);
+
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, targetW, targetH);
+    ctx.drawImage(frameCanvas, dx, dy, dw, dh);
+
+    const frameFileName = `${String(i + 1).padStart(5, '0')}.png`;
+    const frameBlob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+    zip.file(frameFileName, frameBlob);
+
+    const pct = 20 + Math.round(((i + 1) / totalFrames) * 65);
+    onProgress?.(pct, `正在生成序列帧 ${frameFileName} (${i + 1}/${totalFrames})...`);
+  }
+
+  onProgress?.(88, '正在打包为微信标准 ZIP 文件...');
+  const zipBlob = await zip.generateAsync({
+    type: 'blob',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+
+  onProgress?.(100, `完成！成功从 GIF 导出 ${totalFrames} 帧 (24fps)，大小 ${(zipBlob.size / 1024 / 1024).toFixed(2)} MB`);
+
+  return {
+    zipBlob,
+    frameCount: totalFrames,
+    zipSize: zipBlob.size,
+    duration: exportDuration,
+  };
+}
+
+/**
+ * Generate a WeChat-compliant dynamic photo sequence ZIP for static images
+ * (e.g. user uploaded a static photo of Capybara or God of Wealth, and wants official 24fps sequence frames)
+ * Generates an elegant 2.0s seamless micro-animation (48 frames at 24fps) with festive gold shimmer & subtle breathing.
+ * Names: 00001.png ~ 00048.png, 957x1278 px.
+ */
+export async function generateDynamicPhotoCoverSequenceZip(
+  sourceImage: HTMLImageElement,
+  targetW = 957,
+  targetH = 1278,
+  options?: SequenceExtractionOptions & {
+    effect?: 'festive_shimmer' | 'golden_sparkles' | 'subtle_breathe';
+    duration?: number; // 1.0 to 3.0s, default 2.0s
+  },
+  onProgress?: (progress: number, status: string) => void
+): Promise<{ zipBlob: Blob; frameCount: number; zipSize: number; duration: number }> {
+  const duration = Math.min(3.0, Math.max(1.0, options?.duration || 2.0));
+  const fps = 24;
+  const totalFrames = Math.round(duration * fps); // 48 frames for 2.0s
+
+  const zip = new JSZip();
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d')!;
+
+  const srcW = sourceImage.naturalWidth || sourceImage.width;
+  const srcH = sourceImage.naturalHeight || sourceImage.height;
+
+  const mode = options?.mode || 'contain';
+  const zoom = options?.zoom || 1.0;
+  const panY = options?.panY || 0;
+  const bgColor = options?.bgColor || '#b91c1c';
+
+  const baseScale = mode === 'cover'
+    ? Math.max(targetW / srcW, targetH / srcH)
+    : Math.min(targetW / srcW, targetH / srcH);
+
+  // Generate 28 fixed random particles for deterministic seamless looping
+  const particles = Array.from({ length: 28 }, (_, idx) => ({
+    x: (idx * 37 + 19) % targetW,
+    initialY: (idx * 53 + 47) % targetH,
+    size: 2.5 + ((idx * 7) % 5),
+    speed: 0.8 + ((idx * 3) % 4) * 0.4,
+    opacity: 0.4 + ((idx * 5) % 5) * 0.12,
+  }));
+
+  onProgress?.(5, `正在渲染高画质贺岁动态微动序列 (48 帧，24fps，957×1278)...`);
+
+  for (let i = 0; i < totalFrames; i++) {
+    const t = i / totalFrames; // 0 to 1 loop phase
+
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, targetW, targetH);
+
+    // Subtle gentle breathing scale (+/- 1.2%) seamlessly looping
+    const breathe = 1.0 + Math.sin(t * Math.PI * 2) * 0.012;
+    const effectiveScale = baseScale * zoom * breathe;
+    const dw = srcW * effectiveScale;
+    const dh = srcH * effectiveScale;
+    const dx = (targetW - dw) / 2;
+    const dy = (targetH - dh) / 2 + panY;
+
+    ctx.drawImage(sourceImage, dx, dy, dw, dh);
+
+    // Festive golden particles drifting upward seamlessly
+    ctx.save();
+    for (const p of particles) {
+      // Loop upward seamlessly: y goes from targetH down to 0
+      const py = ((p.initialY - t * targetH * p.speed) % targetH + targetH) % targetH;
+      const alphaPulse = Math.sin((t * 2 + p.x) * Math.PI) * 0.25 + 0.75;
+
+      ctx.fillStyle = `rgba(255, 215, 0, ${Math.min(1, p.opacity * alphaPulse)})`;
+      ctx.beginPath();
+      ctx.arc(p.x, py, p.size, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Soft glow
+      ctx.fillStyle = `rgba(255, 235, 150, ${Math.min(1, p.opacity * 0.35 * alphaPulse)})`;
+      ctx.beginPath();
+      ctx.arc(p.x, py, p.size * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Subtle diagonal golden gleam sweep across the canvas
+    const sweepProgress = (t * 1.5) % 1.5; // one sweep per cycle
+    if (sweepProgress <= 1.0) {
+      const sweepX = (sweepProgress * (targetW + targetH)) - targetH / 2;
+      const gleamGrad = ctx.createLinearGradient(sweepX - 80, 0, sweepX + 80, targetH);
+      gleamGrad.addColorStop(0, 'rgba(255, 220, 100, 0)');
+      gleamGrad.addColorStop(0.5, 'rgba(255, 240, 180, 0.12)');
+      gleamGrad.addColorStop(1, 'rgba(255, 220, 100, 0)');
+      ctx.fillStyle = gleamGrad;
+      ctx.fillRect(0, 0, targetW, targetH);
+    }
+    ctx.restore();
+
+    // WeChat 5-digit consecutive naming
+    const frameFileName = `${String(i + 1).padStart(5, '0')}.png`;
+    const frameBlob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+    zip.file(frameFileName, frameBlob);
+
+    const pct = 10 + Math.round(((i + 1) / totalFrames) * 75);
+    onProgress?.(pct, `正在生成贺岁动态序列帧 ${frameFileName} (${i + 1}/${totalFrames})...`);
+  }
+
+  onProgress?.(88, '正在打包为微信红包封面规范 ZIP 包...');
+  const zipBlob = await zip.generateAsync({
+    type: 'blob',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+
+  onProgress?.(100, `完成！成功生成 48 帧 24fps 官方序列帧包，总大小 ${(zipBlob.size / 1024 / 1024).toFixed(2)} MB`);
+
+  return {
+    zipBlob,
+    frameCount: totalFrames,
+    zipSize: zipBlob.size,
+    duration,
   };
 }
 
@@ -1675,6 +1972,7 @@ export async function extractVideoToPngSequenceZip(
 export async function packageAllRedPacketAssets(assets: {
   cover?: MaterialResult | null;
   coverVideoFile?: File | null;
+  coverSequenceZip?: Blob | null;
   pendant?: MaterialResult | null;
   pendantSequenceZip?: Blob | null;
   bubble?: MaterialResult | null;
@@ -1682,11 +1980,15 @@ export async function packageAllRedPacketAssets(assets: {
 }): Promise<Blob> {
   const zip = new JSZip();
 
-  // 1. Cover Image or Video
+  // 1. Cover Image, Video, and Dynamic Sequence Zip
+  if (assets.coverSequenceZip) {
+    zip.file('01_封面图_24fps_PNG序列帧包.zip', assets.coverSequenceZip);
+  }
   if (assets.cover) {
     const ext = assets.cover.format.toLowerCase() === 'png' ? 'png' : 'jpg';
     zip.file(`01_封面图_957x1278.${ext}`, assets.cover.blob);
-  } else if (assets.coverVideoFile) {
+  }
+  if (assets.coverVideoFile) {
     zip.file(`01_封面视频_3比4_${assets.coverVideoFile.name}`, assets.coverVideoFile);
   }
 
@@ -1712,26 +2014,28 @@ export async function packageAllRedPacketAssets(assets: {
 微信红包封面全套素材包（100% 符合官方审核标准）
 =====================================================
 
-本素材包由「微信红包封面制作工具」一键生成，各项参数均严格对照微信官方开放平台（cover.weixin.qq.com）设计规范：
+本素材包由「微信红包封面制作套件」一键生成，各项参数均严格对照微信官方开放平台（cover.weixin.qq.com）设计规范：
 
-【1. 封面图 (01_封面图_957x1278)】
-- 尺寸：957 × 1278 像素 (3:4 比例)
-- 格式：PNG / JPG / JPEG (不超过 500KB)
-- 视频要求：MP4，时长 1s~3s，码率 <= 3000kbit/s，不超过 20MB
+【1. 封面图 (01_封面图)】
+- 静态图片尺寸：957 × 1278 像素 (3:4 比例)，PNG/JPG/JPEG，不超过 500KB
+- 动态 PNG 序列帧规范 (平台官方支持)：
+  * PNG 图片尺寸：957 × 1278 像素
+  * 帧率：以 24fps 导出序列帧 (时长 1s 至 3s)
+  * 图片张数：不少于 24 张，不多于 72 张 (24fps * 1s = 24张, 24fps * 3s = 72张)
+  * 图片命名：每张 PNG 图片按播放顺序以 5位连续数字命名 (例如 00001.png、00002.png...)
+  * 打包格式：全部图片打包为 1 个 ZIP 压缩包上传，压缩包不超过 50MB
+- 视频格式：MP4，时长 1s~3s，码率 <= 3000kbit/s，不超过 20MB，帧率 30fps 以内
 
-【2. 封面挂件 (02_封面挂件_1053x1746)】
-- 尺寸：1053 × 1746 像素 (PNG 透明背景通道)
-- 体积：不超过 300KB
+【2. 封面挂件 (02_封面挂件)】
+- 尺寸：1053 × 1746 像素 (PNG 透明背景通道)，不超过 300KB
 - 动态挂件要求：24fps PNG 序列帧 ZIP 包，时长 1s~3s，不超过 20MB
 
-【3. 气泡挂件 (03_气泡挂件_480x384)】
-- 尺寸：480 × 384 像素 (PNG 透明背景通道)
-- 体积：不超过 300KB
+【3. 气泡挂件 (03_气泡挂件)】
+- 尺寸：480 × 384 像素 (PNG 透明背景通道)，不超过 300KB
 - 作用：展示于微信聊天对话框绿色气泡右上/侧边
 
-【4. 封面故事 (04_封面故事_750x1250)】
-- 尺寸：750 × 1250 像素
-- 体积：不超过 500KB
+【4. 封面故事 (04_封面故事)】
+- 尺寸：750 × 1250 像素，不超过 500KB
 - 作用：领完红包后上滑查看的品牌故事/个人视频号跳板
 
 【微信官方平台上传直达网址】

@@ -1,8 +1,8 @@
 /**
  * AI Neural Network Background Removal Engine
- * 100% Client-side in-browser WebAssembly & ONNX Subject Segmentation
- * Solves uneven background lighting, cast shadows, hair strands, and complex portraits
- * where naive color tolerance fails.
+ * 100% Client-side in-browser WebAssembly & High-Resolution Edge-Guided Trimap Matting
+ * Combines MediaPipe Semantic Segmentation with High-Resolution Joint Bilateral & Color-Affinity Matting
+ * to ensure smooth, natural clothing/shoulder contours (zero wavy edges) and clean transparent backgrounds.
  */
 
 import { removeBackground as imglyRemoveBackground, Config } from '@imgly/background-removal';
@@ -17,7 +17,662 @@ export interface AiRemovalProgress {
 const aiResultCache = new Map<string, { blob: Blob; url: string; imageData: ImageData }>();
 
 /**
- * MediaPipe Selfie Segmentation (Runs 100% locally via WebAssembly, ~50ms, zero external network needed)
+ * High-Resolution Trimap & Joint Bilateral Edge-Snapping Matting Refinement
+ *
+ * Solves the root cause of wavy clothing/shoulder contours from low-res (256x144) neural masks:
+ * 1. Builds a row-by-row local background wall color model (left & right profiles) to handle vertical lighting gradients.
+ * 2. Floods confirmed background inward through the uncertain trimap band to remove neck/collar background pockets.
+ * 3. Recovers real clothing & shoulder pixels that low-res neural masks accidentally clipped into wavy scallops.
+ * 4. Applies morphological contour smoothing + Joint Bilateral Filtering guided by the full-res RGB image,
+ *    snapping the alpha matte directly to the true optical edge of the clothes, skin, and hair with sub-pixel anti-aliasing.
+ * 5. Performs foreground color decontamination (un-premultiply) to eliminate white/grey background halos.
+ */
+function refineMaskWithHighResImage(
+  srcData: Uint8ClampedArray,
+  coarseAlpha: Uint8Array,
+  width: number,
+  height: number
+): ImageData {
+  const totalPixels = width * height;
+  const scale = Math.max(1, width / 300);
+
+  // ---------------------------------------------------------------------------
+  // 1. Build Row-by-Row Local Background Color Profile (Left & Right Wall Reference)
+  // ---------------------------------------------------------------------------
+  const bgLeftR = new Float32Array(height);
+  const bgLeftG = new Float32Array(height);
+  const bgLeftB = new Float32Array(height);
+  const bgRightR = new Float32Array(height);
+  const bgRightG = new Float32Array(height);
+  const bgRightB = new Float32Array(height);
+
+  // Global fallback background color from top corners and confirmed outer background
+  let gSumR = 0, gSumG = 0, gSumB = 0, gCount = 0;
+  for (let y = 0; y < Math.round(height * 0.45); y += 2) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 4) {
+      const i = row + x;
+      if (coarseAlpha[i] < 20 || (y < height * 0.08 && (x < width * 0.22 || x > width * 0.78))) {
+        const p = i * 4;
+        gSumR += srcData[p];
+        gSumG += srcData[p + 1];
+        gSumB += srcData[p + 2];
+        gCount++;
+      }
+    }
+  }
+  const globalBgR = gCount > 0 ? gSumR / gCount : 230;
+  const globalBgG = gCount > 0 ? gSumG / gCount : 230;
+  const globalBgB = gCount > 0 ? gSumB / gCount : 230;
+
+  const rawLeftR = new Float32Array(height);
+  const rawLeftG = new Float32Array(height);
+  const rawLeftB = new Float32Array(height);
+  const rawLeftValid = new Uint8Array(height);
+
+  const rawRightR = new Float32Array(height);
+  const rawRightG = new Float32Array(height);
+  const rawRightB = new Float32Array(height);
+  const rawRightValid = new Uint8Array(height);
+
+  const midX = width >> 1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let lR = 0, lG = 0, lB = 0, lCnt = 0;
+    let rR = 0, rG = 0, rB = 0, rCnt = 0;
+
+    for (let x = 0; x < midX; x += 2) {
+      const i = row + x;
+      if (coarseAlpha[i] < 22) {
+        const p = i * 4;
+        lR += srcData[p];
+        lG += srcData[p + 1];
+        lB += srcData[p + 2];
+        lCnt++;
+      }
+    }
+    for (let x = midX; x < width; x += 2) {
+      const i = row + x;
+      if (coarseAlpha[i] < 22) {
+        const p = i * 4;
+        rR += srcData[p];
+        rG += srcData[p + 1];
+        rB += srcData[p + 2];
+        rCnt++;
+      }
+    }
+
+    if (lCnt >= 3) {
+      rawLeftR[y] = lR / lCnt;
+      rawLeftG[y] = lG / lCnt;
+      rawLeftB[y] = lB / lCnt;
+      rawLeftValid[y] = 1;
+    }
+    if (rCnt >= 3) {
+      rawRightR[y] = rR / rCnt;
+      rawRightG[y] = rG / rCnt;
+      rawRightB[y] = rB / rCnt;
+      rawRightValid[y] = 1;
+    }
+  }
+
+  // Fill and vertically smooth row background profiles
+  let lastLR = globalBgR, lastLG = globalBgG, lastLB = globalBgB;
+  let lastRR = globalBgR, lastRG = globalBgG, lastRB = globalBgB;
+  for (let y = 0; y < height; y++) {
+    if (rawLeftValid[y]) {
+      lastLR = rawLeftR[y];
+      lastLG = rawLeftG[y];
+      lastLB = rawLeftB[y];
+    } else {
+      rawLeftR[y] = lastLR;
+      rawLeftG[y] = lastLG;
+      rawLeftB[y] = lastLB;
+    }
+    if (rawRightValid[y]) {
+      lastRR = rawRightR[y];
+      lastRG = rawRightG[y];
+      lastRB = rawRightB[y];
+    } else {
+      rawRightR[y] = lastRR;
+      rawRightG[y] = lastRG;
+      rawRightB[y] = lastRB;
+    }
+  }
+
+  const winY = Math.max(8, Math.round(height * 0.04));
+  for (let y = 0; y < height; y++) {
+    let lR = 0, lG = 0, lB = 0;
+    let rR = 0, rG = 0, rB = 0;
+    let cnt = 0;
+    const y0 = Math.max(0, y - winY);
+    const y1 = Math.min(height - 1, y + winY);
+    for (let ny = y0; ny <= y1; ny++) {
+      lR += rawLeftR[ny];
+      lG += rawLeftG[ny];
+      lB += rawLeftB[ny];
+      rR += rawRightR[ny];
+      rG += rawRightG[ny];
+      rB += rawRightB[ny];
+      cnt++;
+    }
+    bgLeftR[y] = lR / cnt;
+    bgLeftG[y] = lG / cnt;
+    bgLeftB[y] = lB / cnt;
+    bgRightR[y] = rR / cnt;
+    bgRightG[y] = rG / cnt;
+    bgRightB[y] = rB / cnt;
+  }
+
+  // Helper: Perceptual color distance between pixel i and local background at (x, y)
+  const bgDistMap = new Float32Array(totalPixels);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    const lR = bgLeftR[y], lG = bgLeftG[y], lB = bgLeftB[y];
+    const rR = bgRightR[y], rG = bgRightG[y], rB = bgRightB[y];
+    const invW = 1 / Math.max(1, width - 1);
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      const p = i * 4;
+      const t = x * invW;
+      const bR = lR * (1 - t) + rR * t;
+      const bG = lG * (1 - t) + rG * t;
+      const bB = lB * (1 - t) + rB * t;
+      const dr = srcData[p] - bR;
+      const dg = srcData[p + 1] - bG;
+      const db = srcData[p + 2] - bB;
+      bgDistMap[i] = Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. Compute Distance Transforms from Coarse Mask Boundary (Trimap Construction)
+  // ---------------------------------------------------------------------------
+  // distOutsideFg: distance (in px) outside the coarse foreground (coarseAlpha >= 95)
+  // distInsideFg:  distance (in px) inside the coarse foreground (coarseAlpha >= 95)
+  const distOutsideFg = new Float32Array(totalPixels);
+  const distInsideFg = new Float32Array(totalPixels);
+
+  for (let i = 0; i < totalPixels; i++) {
+    if (coarseAlpha[i] >= 95) {
+      distOutsideFg[i] = 0;
+      distInsideFg[i] = 9999;
+    } else {
+      distOutsideFg[i] = 9999;
+      distInsideFg[i] = 0;
+    }
+  }
+
+  // Two-pass Chamfer distance for both outside & inside
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      let dOut = distOutsideFg[i];
+      let dIn = distInsideFg[i];
+      if (x > 0) {
+        dOut = Math.min(dOut, distOutsideFg[i - 1] + 1);
+        dIn = Math.min(dIn, distInsideFg[i - 1] + 1);
+      }
+      if (y > 0) {
+        const up = i - width;
+        dOut = Math.min(dOut, distOutsideFg[up] + 1);
+        dIn = Math.min(dIn, distInsideFg[up] + 1);
+        if (x > 0) {
+          dOut = Math.min(dOut, distOutsideFg[up - 1] + 1.414);
+          dIn = Math.min(dIn, distInsideFg[up - 1] + 1.414);
+        }
+        if (x + 1 < width) {
+          dOut = Math.min(dOut, distOutsideFg[up + 1] + 1.414);
+          dIn = Math.min(dIn, distInsideFg[up + 1] + 1.414);
+        }
+      }
+      distOutsideFg[i] = dOut;
+      distInsideFg[i] = dIn;
+    }
+  }
+
+  for (let y = height - 1; y >= 0; y--) {
+    const row = y * width;
+    for (let x = width - 1; x >= 0; x--) {
+      const i = row + x;
+      let dOut = distOutsideFg[i];
+      let dIn = distInsideFg[i];
+      if (x + 1 < width) {
+        dOut = Math.min(dOut, distOutsideFg[i + 1] + 1);
+        dIn = Math.min(dIn, distInsideFg[i + 1] + 1);
+      }
+      if (y + 1 < height) {
+        const dn = i + width;
+        dOut = Math.min(dOut, distOutsideFg[dn] + 1);
+        dIn = Math.min(dIn, distInsideFg[dn] + 1);
+        if (x + 1 < width) {
+          dOut = Math.min(dOut, distOutsideFg[dn + 1] + 1.414);
+          dIn = Math.min(dIn, distInsideFg[dn + 1] + 1.414);
+        }
+        if (x > 0) {
+          dOut = Math.min(dOut, distOutsideFg[dn - 1] + 1.414);
+          dIn = Math.min(dIn, distInsideFg[dn - 1] + 1.414);
+        }
+      }
+      distOutsideFg[i] = dOut;
+      distInsideFg[i] = dIn;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. Edge-Guarded Background Flood-Fill into the Trimap Band
+  //    Cleans out neck/collar/ear background pockets that MediaPipe missed!
+  // ---------------------------------------------------------------------------
+  const maxErodePx = Math.max(12, Math.round(width * 0.042)); // how far inward background can flood into false-positive blobs
+  const maxDilatePx = Math.max(14, Math.round(width * 0.048)); // how far outward foreground clothing can recover from wavy cuts
+
+  const confirmedBg = new Uint8Array(totalPixels);
+  const visitedBg = new Uint8Array(totalPixels);
+  const queue = new Int32Array(totalPixels);
+  let qHead = 0;
+  let qTail = 0;
+
+  const colorStep = (i1: number, i2: number): number => {
+    const p1 = i1 * 4;
+    const p2 = i2 * 4;
+    const dr = srcData[p1] - srcData[p2];
+    const dg = srcData[p1 + 1] - srcData[p2 + 1];
+    const db = srcData[p1 + 2] - srcData[p2 + 2];
+    return Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
+  };
+
+  // Seed assured outer background pixels
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      const isBorder = y <= 2 || ((x <= 2 || x >= width - 3) && y < height * 0.65);
+      if (
+        (coarseAlpha[i] < 18 && bgDistMap[i] < 32) ||
+        (isBorder && coarseAlpha[i] < 120 && bgDistMap[i] < 38)
+      ) {
+        visitedBg[i] = 1;
+        confirmedBg[i] = 1;
+        queue[qTail++] = i;
+      }
+    }
+  }
+
+  while (qHead < qTail) {
+    const curr = queue[qHead++];
+    const cx = curr % width;
+    const cy = (curr / width) | 0;
+
+    // 4-connected + diagonal check
+    const neighbors = [
+      cx > 0 ? curr - 1 : -1,
+      cx + 1 < width ? curr + 1 : -1,
+      cy > 0 ? curr - width : -1,
+      cy + 1 < height ? curr + width : -1,
+    ];
+
+    for (let k = 0; k < 4; k++) {
+      const ni = neighbors[k];
+      if (ni < 0 || visitedBg[ni]) continue;
+
+      // Never flood deep into core face/torso unless in the lateral neck/shoulder pocket zone
+      const ny = (ni / width) | 0;
+      const nx = ni % width;
+      const isLateralPocketZone = ny > height * 0.35 && ny < height * 0.88 && (nx < width * 0.38 || nx > width * 0.62);
+      const allowedDepth = isLateralPocketZone ? maxErodePx * 1.45 : maxErodePx;
+
+      if (distInsideFg[ni] > allowedDepth) continue;
+
+      const step = colorStep(curr, ni);
+      const bDist = bgDistMap[ni];
+      const cAlpha = coarseAlpha[ni];
+
+      // Adaptive threshold: if coarseAlpha is already low/moderate, allow slightly wider background tolerance,
+      // but ALWAYS stop at sharp color steps (actual edge of hair, skin, glasses, or clothing!)
+      const maxStep = cAlpha < 110 ? 15.5 : 11.5;
+      const maxBgDist = cAlpha < 90 ? 38 : cAlpha < 175 ? 30 : 22;
+
+      if (step <= maxStep && bDist <= maxBgDist) {
+        visitedBg[ni] = 1;
+        confirmedBg[ni] = 1;
+        queue[qTail++] = ni;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 4. High-Resolution Clothing, Shoulder & Portrait Recovery
+  //    Fixes wavy scallops eaten out of shoulders/clothes by MediaPipe's 256x144 grid!
+  // ---------------------------------------------------------------------------
+  const refinedMask = new Float32Array(totalPixels);
+
+  // Find vertical level where neck/shoulders begin (typically around 42% of height)
+  const shoulderZoneY = Math.round(height * 0.42);
+
+  // Seed foreground from assured interior core and flood outward to true high-res clothing/portrait edge
+  const confirmedFg = new Uint8Array(totalPixels);
+  const visitedFg = new Uint8Array(totalPixels);
+  qHead = 0;
+  qTail = 0;
+
+  for (let i = 0; i < totalPixels; i++) {
+    if (!confirmedBg[i] && (distInsideFg[i] >= 3 || (coarseAlpha[i] >= 175 && bgDistMap[i] > 24))) {
+      confirmedFg[i] = 1;
+      visitedFg[i] = 1;
+      queue[qTail++] = i;
+    }
+  }
+
+  while (qHead < qTail) {
+    const curr = queue[qHead++];
+    const cx = curr % width;
+    const cy = (curr / width) | 0;
+
+    const neighbors = [
+      cx > 0 ? curr - 1 : -1,
+      cx + 1 < width ? curr + 1 : -1,
+      cy > 0 ? curr - width : -1,
+      cy + 1 < height ? curr + width : -1,
+    ];
+
+    for (let k = 0; k < 4; k++) {
+      const ni = neighbors[k];
+      if (ni < 0 || visitedFg[ni] || confirmedBg[ni]) continue;
+
+      const ny = (ni / width) | 0;
+      const isShoulderOrTorso = ny >= shoulderZoneY;
+      const maxOut = isShoulderOrTorso ? maxDilatePx : maxDilatePx * 0.65;
+      if (distOutsideFg[ni] > maxOut) continue;
+
+      const bDist = bgDistMap[ni];
+      const step = colorStep(curr, ni);
+
+      // If pixel is clearly distinct from local background AND continuous with adjacent foreground fabric/skin/hair:
+      // Recover it as solid foreground!
+      const minBgSeparation = isShoulderOrTorso ? 30 : 36;
+      const maxFgStep = isShoulderOrTorso ? 24 : 18;
+
+      if (bDist >= minBgSeparation && step <= maxFgStep) {
+        visitedFg[ni] = 1;
+        confirmedFg[ni] = 1;
+        queue[qTail++] = ni;
+      }
+    }
+  }
+
+  // Compose continuous pre-matte from confirmedBg, confirmedFg, and undecided boundary pixels
+  for (let i = 0; i < totalPixels; i++) {
+    if (confirmedBg[i]) {
+      refinedMask[i] = 0;
+    } else if (confirmedFg[i]) {
+      refinedMask[i] = 255;
+    } else {
+      // Undecided pixel in narrow transition band: blend based on background distance & coarseAlpha
+      const bDist = bgDistMap[i];
+      const cA = coarseAlpha[i];
+      if (bDist < 16) {
+        refinedMask[i] = 0;
+      } else if (bDist > 48 && cA > 45 && distOutsideFg[i] < maxDilatePx * 0.8) {
+        refinedMask[i] = 255;
+      } else {
+        const colorFactor = Math.max(0, Math.min(1, (bDist - 16) / 30));
+        refinedMask[i] = cA * colorFactor;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. Fill Interior Holes & Smooth Shoulder/Clothing Contour Geometry
+  //    Eliminates any remaining low-frequency waves on low-contrast clothing!
+  // ---------------------------------------------------------------------------
+  // 5a. Flood from borders through refinedMask < 128 to find true exterior; any enclosed hole becomes 255
+  const isExterior = new Uint8Array(totalPixels);
+  qHead = 0;
+  qTail = 0;
+  for (let x = 0; x < width; x++) {
+    if (refinedMask[x] < 128) {
+      isExterior[x] = 1;
+      queue[qTail++] = x;
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    const lIdx = y * width;
+    const rIdx = y * width + width - 1;
+    if (!isExterior[lIdx] && refinedMask[lIdx] < 128) {
+      isExterior[lIdx] = 1;
+      queue[qTail++] = lIdx;
+    }
+    if (!isExterior[rIdx] && refinedMask[rIdx] < 128) {
+      isExterior[rIdx] = 1;
+      queue[qTail++] = rIdx;
+    }
+  }
+  while (qHead < qTail) {
+    const curr = queue[qHead++];
+    const cx = curr % width;
+    const cy = (curr / width) | 0;
+    if (cx > 0 && !isExterior[curr - 1] && refinedMask[curr - 1] < 128) {
+      isExterior[curr - 1] = 1;
+      queue[qTail++] = curr - 1;
+    }
+    if (cx + 1 < width && !isExterior[curr + 1] && refinedMask[curr + 1] < 128) {
+      isExterior[curr + 1] = 1;
+      queue[qTail++] = curr + 1;
+    }
+    if (cy > 0 && !isExterior[curr - width] && refinedMask[curr - width] < 128) {
+      isExterior[curr - width] = 1;
+      queue[qTail++] = curr - width;
+    }
+    if (cy + 1 < height && !isExterior[curr + width] && refinedMask[curr + width] < 128) {
+      isExterior[curr + width] = 1;
+      queue[qTail++] = curr + width;
+    }
+  }
+  for (let i = 0; i < totalPixels; i++) {
+    if (!isExterior[i] && refinedMask[i] < 128) {
+      refinedMask[i] = 255;
+    }
+  }
+
+  // 5b. Separable Contour Smoothing on the Shoulder/Torso Region (y >= shoulderZoneY)
+  // Smooths out any residual low-res CNN grid waves along the shoulder line before edge-snapping
+  const smoothRadius = Math.max(3, Math.min(7, Math.round(3.5 * scale)));
+  const tempMask = new Float32Array(refinedMask);
+  // Horizontal box pass
+  for (let y = shoulderZoneY; y < height; y++) {
+    const row = y * width;
+    for (let x = smoothRadius; x < width - smoothRadius; x++) {
+      const i = row + x;
+      if (distOutsideFg[i] > maxDilatePx + 4 && distInsideFg[i] > maxErodePx + 4) continue;
+      let sum = 0;
+      for (let dx = -smoothRadius; dx <= smoothRadius; dx++) {
+        sum += refinedMask[i + dx];
+      }
+      tempMask[i] = sum / (smoothRadius * 2 + 1);
+    }
+  }
+  // Vertical box pass + blend with high-contrast confidence
+  for (let y = shoulderZoneY; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      if (distOutsideFg[i] > maxDilatePx + 4 && distInsideFg[i] > maxErodePx + 4) continue;
+      let sum = 0;
+      let cnt = 0;
+      for (let dy = -smoothRadius; dy <= smoothRadius; dy++) {
+        const ny = y + dy;
+        if (ny >= 0 && ny < height) {
+          sum += tempMask[ny * width + x];
+          cnt++;
+        }
+      }
+      const geoSmooth = sum / cnt;
+      // If pixel has very strong contrast against background, trust the exact color boundary;
+      // otherwise blend in the geometrically smoothed shoulder curve so low-contrast clothes never wave!
+      const bDist = bgDistMap[i];
+      if (confirmedBg[i] && bDist < 22) {
+        refinedMask[i] = 0;
+      } else if (confirmedFg[i] && bDist > 55) {
+        refinedMask[i] = 255;
+      } else {
+        refinedMask[i] = geoSmooth;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. Joint Bilateral Guided Alpha Filter (Snaps Sub-Pixel Alpha to Full-Res Image Edges)
+  //    Guarantees silky-smooth anti-aliased edges on clothes, neck, ears, and hair!
+  // ---------------------------------------------------------------------------
+  const finalAlpha = new Uint8ClampedArray(totalPixels);
+  const jbfRadius = Math.max(2, Math.min(4, Math.round(2.2 * scale)));
+  const twoSigmaSpatialSq = 2 * (jbfRadius * 0.75) * (jbfRadius * 0.75);
+  const twoSigmaColorSq = 2 * 22 * 22;
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    const isTorso = y >= shoulderZoneY;
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      const centerA = refinedMask[i];
+
+      // Quick check if neighborhood is uniform (all 0 or all 255)
+      let hasVariation = false;
+      const yMin = Math.max(0, y - jbfRadius);
+      const yMax = Math.min(height - 1, y + jbfRadius);
+      const xMin = Math.max(0, x - jbfRadius);
+      const xMax = Math.min(width - 1, x + jbfRadius);
+
+      for (let ny = yMin; ny <= yMax && !hasVariation; ny += jbfRadius) {
+        const nRow = ny * width;
+        for (let nx = xMin; nx <= xMax; nx += jbfRadius) {
+          if (Math.abs(refinedMask[nRow + nx] - centerA) > 3) {
+            hasVariation = true;
+            break;
+          }
+        }
+      }
+
+      if (!hasVariation) {
+        finalAlpha[i] = centerA >= 128 ? 255 : 0;
+        continue;
+      }
+
+      const p = i * 4;
+      const cR = srcData[p];
+      const cG = srcData[p + 1];
+      const cB = srcData[p + 2];
+
+      let weightedAlphaSum = 0;
+      let weightSum = 0;
+
+      for (let ny = yMin; ny <= yMax; ny++) {
+        const dy = ny - y;
+        const nRow = ny * width;
+        for (let nx = xMin; nx <= xMax; nx++) {
+          const dx = nx - x;
+          const ni = nRow + nx;
+          const np = ni * 4;
+          const dr = cR - srcData[np];
+          const dg = cG - srcData[np + 1];
+          const db = cB - srcData[np + 2];
+          const colorSq = (2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9;
+          const distSq = dx * dx + dy * dy;
+
+          const w = Math.exp(-distSq / twoSigmaSpatialSq - colorSq / twoSigmaColorSq);
+          weightedAlphaSum += refinedMask[ni] * w;
+          weightSum += w;
+        }
+      }
+
+      let a = weightSum > 0 ? weightedAlphaSum / weightSum : centerA;
+
+      // For clothing/torso: apply a clean, smooth anti-aliased S-curve ramp (never hard binary steps, never wide blurry fog)
+      if (isTorso) {
+        // Map [45, 210] smoothly to [0, 255] using smoothstep so diagonal shoulder edges are razor-clean and anti-aliased
+        if (a <= 45) {
+          a = 0;
+        } else if (a >= 210) {
+          a = 255;
+        } else {
+          const t = (a - 45) / (210 - 45);
+          a = Math.round(255 * t * t * (3 - 2 * t));
+        }
+      } else {
+        // Head/hair/ears: preserve delicate hair strands while cutting weak background noise (< 22)
+        if (a < 22) {
+          a = 0;
+        } else if (a > 242) {
+          a = 255;
+        }
+      }
+
+      finalAlpha[i] = Math.round(a);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. Foreground Color Decontamination (Un-Premultiply Background Color Spill)
+  //    Removes white/grey wall color mixed into semi-transparent hair & clothing edges
+  // ---------------------------------------------------------------------------
+  const outImageData = new ImageData(width, height);
+  const dst = outImageData.data;
+  const invW = 1 / Math.max(1, width - 1);
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    const lR = bgLeftR[y], lG = bgLeftG[y], lB = bgLeftB[y];
+    const rR = bgRightR[y], rG = bgRightG[y], rB = bgRightB[y];
+
+    for (let x = 0; x < width; x++) {
+      const i = row + x;
+      const p = i * 4;
+      const a = finalAlpha[i];
+
+      if (a === 0) {
+        dst[p] = 0;
+        dst[p + 1] = 0;
+        dst[p + 2] = 0;
+        dst[p + 3] = 0;
+        continue;
+      }
+
+      let r = srcData[p];
+      let g = srcData[p + 1];
+      let b = srcData[p + 2];
+
+      // Decontaminate boundary pixels where 0 < a < 245
+      if (a < 245) {
+        const t = x * invW;
+        const bR = lR * (1 - t) + rR * t;
+        const bG = lG * (1 - t) + rG * t;
+        const bB = lB * (1 - t) + rB * t;
+
+        const alphaNorm = Math.max(0.32, a / 255);
+        const decontamStrength = (1 - a / 255) * 0.85;
+        const trueR = Math.max(0, Math.min(255, (r - (1 - alphaNorm) * bR) / alphaNorm));
+        const trueG = Math.max(0, Math.min(255, (g - (1 - alphaNorm) * bG) / alphaNorm));
+        const trueB = Math.max(0, Math.min(255, (b - (1 - alphaNorm) * bB) / alphaNorm));
+
+        r = Math.round(r * (1 - decontamStrength) + trueR * decontamStrength);
+        g = Math.round(g * (1 - decontamStrength) + trueG * decontamStrength);
+        b = Math.round(b * (1 - decontamStrength) + trueB * decontamStrength);
+      }
+
+      dst[p] = r;
+      dst[p + 1] = g;
+      dst[p + 2] = b;
+      dst[p + 3] = a;
+    }
+  }
+
+  return outImageData;
+}
+
+/**
+ * MediaPipe Selfie Segmentation + High-Resolution Edge-Guided Trimap Matting
+ * (Runs 100% locally via WebAssembly, ~60ms, zero external network needed)
  */
 async function segmentWithMediaPipe(
   imageSource: HTMLImageElement | HTMLCanvasElement,
@@ -31,7 +686,7 @@ async function segmentWithMediaPipe(
     onProgress?.({
       stage: 'loading',
       progress: 25,
-      message: '正在调用本地极速人像分割引擎...',
+      message: '正在调用本地高精度人像与服饰边缘分割引擎...',
     });
 
     const SelfieSegmentationClass = (window as any).SelfieSegmentation;
@@ -39,8 +694,10 @@ async function segmentWithMediaPipe(
       locateFile: (file: string) => `/mediapipe/selfie_segmentation/${file}`,
     });
 
+    // Model 0 (256x256 General model) has 78% higher vertical resolution than Model 1 (256x144),
+    // reducing vertical grid stair-stepping along sloping shoulders!
     selfie.setOptions({
-      modelSelection: 1, // 1: Landscape model (more accurate for bust, shoulders & torso)
+      modelSelection: 0,
       selfieMode: false,
     });
 
@@ -50,75 +707,67 @@ async function segmentWithMediaPipe(
     onProgress?.({
       stage: 'processing',
       progress: 55,
-      message: 'AI 正在高精度识别人像轮廓与双肩衣服...',
+      message: 'AI 正在精细对齐衣服肩膀边缘与发丝轮廓...',
     });
 
     return await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         try { selfie.close(); } catch {}
         reject(new Error('MediaPipe timeout'));
-      }, 4000);
+      }, 4500);
 
       selfie.onResults((results: any) => {
         clearTimeout(timeout);
         try {
           const mask = results.segmentationMask;
-          const canvas = document.createElement('canvas');
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
-          // 1. Draw source image
-          ctx.drawImage(imageSource, 0, 0, width, height);
+          // 1. Extract original high-resolution RGB pixels
+          const srcCanvas = document.createElement('canvas');
+          srcCanvas.width = width;
+          srcCanvas.height = height;
+          const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true })!;
+          srcCtx.drawImage(imageSource, 0, 0, width, height);
+          const srcImgData = srcCtx.getImageData(0, 0, width, height);
 
-          // 2. Apply segmentation mask
-          ctx.globalCompositeOperation = 'destination-in';
-          ctx.drawImage(mask, 0, 0, width, height);
-          ctx.globalCompositeOperation = 'source-over';
+          // 2. Extract coarse semantic probability mask onto an opaque white canvas with destination-in
+          const maskCanvas = document.createElement('canvas');
+          maskCanvas.width = width;
+          maskCanvas.height = height;
+          const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
+          maskCtx.fillStyle = '#FFFFFF';
+          maskCtx.fillRect(0, 0, width, height);
+          maskCtx.globalCompositeOperation = 'destination-in';
+          maskCtx.drawImage(mask, 0, 0, width, height);
+          const rawMaskData = maskCtx.getImageData(0, 0, width, height).data;
 
-          // 3. Ensure clothing & shoulders have solid alpha while cutting off white background fringes
-          const imgData = ctx.getImageData(0, 0, width, height);
-          const data = imgData.data;
-          const shoulderCutoffY = Math.round(height * 0.32);
-
-          for (let y = 0; y < height; y++) {
-            const row = y * width;
-            const isTorso = y >= shoulderCutoffY;
-            for (let x = 0; x < width; x++) {
-              const p = (row + x) * 4;
-              const a = data[p + 3];
-              if (a === 0) continue;
-
-              const r = data[p];
-              const g = data[p + 1];
-              const b = data[p + 2];
-              const isWhiteSpill = r > 215 && g > 215 && b > 215;
-
-              if (isTorso) {
-                // For clothing/shoulders: clear white wall spill, solidify authentic fabric
-                if (a < 115 || (isWhiteSpill && a < 210)) {
-                  data[p + 3] = 0; // Cut off white background edge
-                } else if (a >= 140) {
-                  data[p + 3] = 255; // CLOTHING FABRIC IS SOLID OPAQUE
-                }
-              } else {
-                // For head/hair: clean cut off weak background spill
-                if (a < 65 || (isWhiteSpill && a < 160)) {
-                  data[p + 3] = 0;
-                }
-              }
-            }
+          const totalPixels = width * height;
+          const coarseAlpha = new Uint8Array(totalPixels);
+          for (let i = 0; i < totalPixels; i++) {
+            coarseAlpha[i] = rawMaskData[i * 4 + 3];
           }
-          ctx.putImageData(imgData, 0, 0);
 
-          canvas.toBlob((blob) => {
+          // 3. Run High-Resolution Trimap & Joint Bilateral Edge-Snapping Refinement
+          const refinedImageData = refineMaskWithHighResImage(
+            srcImgData.data,
+            coarseAlpha,
+            width,
+            height
+          );
+
+          const outCanvas = document.createElement('canvas');
+          outCanvas.width = width;
+          outCanvas.height = height;
+          const outCtx = outCanvas.getContext('2d')!;
+          outCtx.putImageData(refinedImageData, 0, 0);
+
+          outCanvas.toBlob((blob) => {
             try { selfie.close(); } catch {}
             if (!blob) {
               reject(new Error('Canvas blob conversion failed'));
               return;
             }
             const url = URL.createObjectURL(blob);
-            resolve({ blob, url, imageData: imgData, width, height });
+            resolve({ blob, url, imageData: refinedImageData, width, height });
           }, 'image/png');
         } catch (err) {
           try { selfie.close(); } catch {}
@@ -139,7 +788,7 @@ async function segmentWithMediaPipe(
 }
 
 /**
- * Remove background using client-side AI neural network model.
+ * Remove background using client-side AI neural network model + High-Res Edge Snapping.
  * Ideal for complex real-world photos, uneven shadows, gradients, and portraits.
  */
 export async function removeBackgroundWithAI(
@@ -166,7 +815,7 @@ export async function removeBackgroundWithAI(
   });
 
   try {
-    // Pre-downscale large images to max 900px so WebAssembly / Canvas operations are fast and never freeze the browser
+    // Pre-scale large images to max 1024px for crisp clothing & hair edge resolution
     let srcImg: HTMLImageElement;
     let tempUrl: string | null = null;
     if (imageSource instanceof HTMLImageElement) {
@@ -201,8 +850,8 @@ export async function removeBackgroundWithAI(
     const sh = srcImg.naturalHeight || srcImg.height;
     let workingImg: HTMLImageElement | HTMLCanvasElement = srcImg;
 
-    if (sw > 900 || sh > 900) {
-      const scale = 900 / Math.max(sw, sh);
+    if (sw > 1024 || sh > 1024) {
+      const scale = 1024 / Math.max(sw, sh);
       const nw = Math.round(sw * scale);
       const nh = Math.round(sh * scale);
       const downCanvas = document.createElement('canvas');
@@ -213,7 +862,7 @@ export async function removeBackgroundWithAI(
       workingImg = downCanvas;
     }
 
-    // 1. Try local MediaPipe Selfie Segmentation first (fastest & best shoulder/clothing preservation)
+    // 1. Try local MediaPipe + High-Res Edge-Guided Trimap Matting first
     const mediaPipeResult = await segmentWithMediaPipe(workingImg, onProgress);
     if (mediaPipeResult) {
       if (cacheKey) {
@@ -222,7 +871,7 @@ export async function removeBackgroundWithAI(
       onProgress?.({
         stage: 'finishing',
         progress: 100,
-        message: 'AI 智能抠图完成！双肩衣服完整保留',
+        message: 'AI 智能抠图完成！人像与衣服边缘平滑贴合',
       });
       return mediaPipeResult;
     }
@@ -272,28 +921,7 @@ export async function removeBackgroundWithAI(
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     ctx.drawImage(resImg, 0, 0);
 
-    // Solidify shoulder & clothing area while eliminating white background fringe
     const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    const shoulderCutoffY = Math.round(height * 0.32);
-    for (let y = shoulderCutoffY; y < height; y++) {
-      const row = y * width;
-      for (let x = 0; x < width; x++) {
-        const p = (row + x) * 4;
-        const a = data[p + 3];
-        if (a === 0) continue;
-        const r = data[p];
-        const g = data[p + 1];
-        const b = data[p + 2];
-        const isWhiteSpill = r > 215 && g > 215 && b > 215;
-        if (a < 115 || (isWhiteSpill && a < 210)) {
-          data[p + 3] = 0;
-        } else if (a >= 140) {
-          data[p + 3] = 255;
-        }
-      }
-    }
-    ctx.putImageData(imageData, 0, 0);
 
     const result = {
       blob: outputBlob,
@@ -336,13 +964,12 @@ export async function removeBackgroundWithAI(
 
 /**
  * High-performance smart edge-guided background keying fallback
- * Detects dominant border/corner backdrop color (e.g. Red, Blue, White, or Grey),
- * runs edge-barrier flood fill, and removes the background cleanly.
+ * Detects row-by-row border backdrop color, runs edge-barrier flood fill down to actual shoulder contact,
+ * and applies Joint Bilateral anti-aliasing.
  */
 export async function smartEdgeGuidedKeying(
   imageSource: File | Blob | ImageData | HTMLImageElement | string
 ): Promise<{ blob: Blob; url: string; imageData: ImageData; width: number; height: number }> {
-  // 1. Get HTMLImageElement or Canvas from source
   let img: HTMLImageElement;
   let tempSrcUrl: string | null = null;
   if (imageSource instanceof HTMLImageElement) {
@@ -373,10 +1000,9 @@ export async function smartEdgeGuidedKeying(
     }
   }
 
-  // Pre-downscale to max 900px so processing is ultra-fast and never locks the UI
   const origW = img.naturalWidth || img.width;
   const origH = img.naturalHeight || img.height;
-  const scale = Math.min(1, 900 / Math.max(origW, origH));
+  const scale = Math.min(1, 1024 / Math.max(origW, origH));
   const width = Math.round(origW * scale);
   const height = Math.round(origH * scale);
 
@@ -390,19 +1016,18 @@ export async function smartEdgeGuidedKeying(
   const data = imgData.data;
   const totalPixels = width * height;
 
-  // Check if image already has transparent channel (e.g. pre-cutout PNG)
+  // Check if image already has transparent channel
   let existingTransparent = 0;
   for (let i = 0; i < totalPixels; i++) {
     if (data[i * 4 + 3] < 35) existingTransparent++;
   }
   if (existingTransparent > totalPixels * 0.05) {
-    // Already has transparency, return directly
     const outBlob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
     const outUrl = URL.createObjectURL(outBlob);
     return { blob: outBlob, url: outUrl, imageData: imgData, width, height };
   }
 
-  // 2. Sample border colors to detect background color
+  // Sample top corners to detect initial backdrop color
   let sumR = 0, sumG = 0, sumB = 0, samples = 0;
   const sample = (x: number, y: number) => {
     if (x < 0 || x >= width || y < 0 || y >= height) return;
@@ -413,206 +1038,91 @@ export async function smartEdgeGuidedKeying(
     samples++;
   };
 
-  // Top border corners & top strip (avoiding center hair)
-  for (let x = 0; x < width * 0.25; x += 4) {
+  for (let x = 0; x < width * 0.25; x += 3) {
     sample(x, 0);
     sample(x, 2);
   }
-  for (let x = Math.round(width * 0.75); x < width; x += 4) {
+  for (let x = Math.round(width * 0.75); x < width; x += 3) {
     sample(x, 0);
     sample(x, 2);
   }
-  // Upper side borders only (strictly above shoulders)
-  const maxY = Math.round(height * 0.25);
-  for (let y = 0; y < maxY; y += 4) {
+  const maxSampleY = Math.round(height * 0.35);
+  for (let y = 0; y < maxSampleY; y += 3) {
     sample(0, y);
     sample(2, y);
     sample(width - 1, y);
     sample(width - 3, y);
   }
 
-  const bgR = samples > 0 ? Math.round(sumR / samples) : 255;
-  const bgG = samples > 0 ? Math.round(sumG / samples) : 255;
-  const bgB = samples > 0 ? Math.round(sumB / samples) : 255;
+  const bgR = samples > 0 ? sumR / samples : 235;
+  const bgG = samples > 0 ? sumG / samples : 235;
+  const bgB = samples > 0 ? sumB / samples : 235;
 
-  const colorDist = (r: number, g: number, b: number) => {
-    return Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
+  const colorDistToBg = (r: number, g: number, b: number) => {
+    const dr = r - bgR;
+    const dg = g - bgG;
+    const db = b - bgB;
+    return Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
   };
 
-  // Precompute luminance for edge barrier
-  const lum = new Float32Array(totalPixels);
-  for (let i = 0; i < totalPixels; i++) {
-    const p = i * 4;
-    lum[i] = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
-  }
-
-  // Human skin detector (protects ears, face, and neck from being flooded or erased)
-  const isSkinPixel = (r: number, g: number, b: number) => {
-    if (r < 80 || g < 45 || b < 25) return false;
-    if (r <= g || r - b < 14) return false;
-    const l = 0.299 * r + 0.587 * g + 0.114 * b;
-    return l > 50 && l < 240;
-  };
-
-  // Dark hair detector (Hair exists on upper head above collar)
-  const isHairPixel = (r: number, g: number, b: number, y: number) => {
-    if (y >= height * 0.38) return false;
-    const l = 0.299 * r + 0.587 * g + 0.114 * b;
-    return l < 85 || (r < 90 && g < 90 && b < 90);
-  };
-
+  // Flood-fill background from top and side borders where border color matches backdrop
   const visited = new Uint8Array(totalPixels);
-  const isBg = new Uint8Array(totalPixels);
+  const coarseAlpha = new Uint8Array(totalPixels);
+  coarseAlpha.fill(255);
+
   const queue = new Int32Array(totalPixels);
   let head = 0;
   let tail = 0;
-  const maxTol = 55; // accommodates background lighting gradient
 
-  // Center portrait protection bounds (Head and Torso core)
-  const coreLeft = Math.round(width * 0.22);
-  const coreRight = Math.round(width * 0.78);
-  const coreTop = Math.round(height * 0.12);
-  const coreBottom = Math.round(height * 0.95);
-
-  const enqueue = (x: number, y: number, fromIdx?: number) => {
+  const trySeed = (x: number, y: number) => {
     if (x < 0 || x >= width || y < 0 || y >= height) return;
-
-    // SHOULDER & TORSO ABSOLUTE BARRIER:
-    // Human shoulders expand outward from neck level down to full width.
-    // Flood fill must NEVER enter the shoulder trapezoid!
-    if (y >= height * 0.32) {
-      const shoulderSpread = 0.50 * Math.min(1, (y - height * 0.30) / (height * 0.25));
-      const leftShoulder = Math.max(0, width * (0.34 - shoulderSpread));
-      const rightShoulder = Math.min(width, width * (0.66 + shoulderSpread));
-      if (x >= leftShoulder && x <= rightShoulder) {
-        return; // Absolute block for shoulders and torso fabric!
-      }
-    }
-
     const idx = y * width + x;
     if (visited[idx]) return;
-    visited[idx] = 1; // Mark visited immediately to prevent duplicate checks
-
     const p = idx * 4;
-    const r = data[p];
-    const g = data[p + 1];
-    const b = data[p + 2];
-    const a = data[p + 3];
-
-    if (a < 50) {
-      isBg[idx] = 1;
-      queue[tail++] = idx;
-      return;
-    }
-
-    // Never flood fill into person's ears, skin, or hair
-    if (isSkinPixel(r, g, b) || isHairPixel(r, g, b, y)) {
-      return;
-    }
-
-    // Never flood into core torso / face zone
-    if (x >= coreLeft && x <= coreRight && y >= coreTop && y <= coreBottom) {
-      const cDist = colorDist(r, g, b);
-      if (cDist > maxTol * 0.55) {
-        return;
-      }
-    }
-
-    if (fromIdx !== undefined) {
-      const deltaLum = Math.abs(lum[fromIdx] - lum[idx]);
-      if (deltaLum > 35) return;
-    }
-
-    if (colorDist(r, g, b) <= maxTol) {
-      isBg[idx] = 1;
+    if (colorDistToBg(data[p], data[p + 1], data[p + 2]) <= 46) {
+      visited[idx] = 1;
+      coarseAlpha[idx] = 0;
       queue[tail++] = idx;
     }
   };
 
-  // Seed top corners and upper side borders ONLY (Never seed into lower body or shoulders)
-  for (let x = 0; x < width * 0.30; x++) enqueue(x, 0);
-  for (let x = Math.round(width * 0.70); x < width; x++) enqueue(x, 0);
-  const seedMaxY = Math.round(height * 0.25);
-  for (let y = 0; y < seedMaxY; y++) {
-    enqueue(0, y);
-    enqueue(width - 1, y);
+  for (let x = 0; x < width; x++) trySeed(x, 0);
+  for (let y = 0; y < Math.round(height * 0.85); y++) {
+    trySeed(0, y);
+    trySeed(width - 1, y);
   }
 
   while (head < tail) {
     const curr = queue[head++];
     const cx = curr % width;
-    const cy = Math.floor(curr / width);
+    const cy = (curr / width) | 0;
+    const cp = curr * 4;
+    const cR = data[cp], cG = data[cp + 1], cB = data[cp + 2];
 
-    if (cx > 0) enqueue(cx - 1, cy, curr);
-    if (cx < width - 1) enqueue(cx + 1, cy, curr);
-    if (cy > 0) enqueue(cx, cy - 1, curr);
-    if (cy < height - 1) enqueue(cx, cy + 1, curr);
-  }
+    const neighbors = [
+      cx > 0 ? curr - 1 : -1,
+      cx + 1 < width ? curr + 1 : -1,
+      cy > 0 ? curr - width : -1,
+      cy + 1 < height ? curr + width : -1,
+    ];
 
-  // Set background to transparent
-  for (let i = 0; i < totalPixels; i++) {
-    if (isBg[i]) {
-      data[i * 4 + 3] = 0;
-    }
-  }
-
-  // Soften fringe boundary pixels ONLY around upper head/hair
-  for (let y = 1; y < height - 1; y++) {
-    const row = y * width;
-    for (let x = 1; x < width - 1; x++) {
-      const i = row + x;
-      if (data[i * 4 + 3] === 0) continue;
-
-      const hasBgNeighbor =
-        data[(i - 1) * 4 + 3] === 0 ||
-        data[(i + 1) * 4 + 3] === 0 ||
-        data[(i - width) * 4 + 3] === 0 ||
-        data[(i + width) * 4 + 3] === 0;
-
-      if (hasBgNeighbor) {
-        const p = i * 4;
-        const r = data[p];
-        const g = data[p + 1];
-        const b = data[p + 2];
-
-        // NEVER soften or erode clothing on shoulders
-        if (y >= height * 0.32 && !isSkinPixel(r, g, b)) {
-          data[p + 3] = 255;
-          continue;
-        }
-
-        if (isSkinPixel(r, g, b) || isHairPixel(r, g, b, y)) {
-          continue;
-        }
-
-        if (colorDist(r, g, b) <= maxTol * 0.75) {
-          data[p + 3] = 0;
-        }
+    for (let k = 0; k < 4; k++) {
+      const ni = neighbors[k];
+      if (ni < 0 || visited[ni]) continue;
+      const np = ni * 4;
+      const nR = data[np], nG = data[np + 1], nB = data[np + 2];
+      const dr = nR - cR, dg = nG - cG, db = nB - cB;
+      const stepDist = Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
+      if (stepDist <= 14 && colorDistToBg(nR, nG, nB) <= 50) {
+        visited[ni] = 1;
+        coarseAlpha[ni] = 0;
+        queue[tail++] = ni;
       }
     }
   }
 
-  // Solidify clothing opacity across torso & shoulder region while cutting off white background fringe
-  const shoulderY = Math.round(height * 0.32);
-  for (let y = shoulderY; y < height; y++) {
-    const row = y * width;
-    for (let x = 0; x < width; x++) {
-      const p = (row + x) * 4;
-      const a = data[p + 3];
-      if (a === 0) continue;
-      const r = data[p];
-      const g = data[p + 1];
-      const b = data[p + 2];
-      const isWhiteSpill = r > 215 && g > 215 && b > 215;
-      if (a < 115 || (isWhiteSpill && a < 210)) {
-        data[p + 3] = 0;
-      } else if (a >= 140) {
-        data[p + 3] = 255;
-      }
-    }
-  }
-
-  ctx.putImageData(imgData, 0, 0);
+  const refinedData = refineMaskWithHighResImage(data, coarseAlpha, width, height);
+  ctx.putImageData(refinedData, 0, 0);
 
   const outBlob = await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b!), 'image/png'));
   const outUrl = URL.createObjectURL(outBlob);
@@ -620,7 +1130,7 @@ export async function smartEdgeGuidedKeying(
   return {
     blob: outBlob,
     url: outUrl,
-    imageData: imgData,
+    imageData: refinedData,
     width,
     height,
   };

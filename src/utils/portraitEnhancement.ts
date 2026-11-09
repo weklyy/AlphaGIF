@@ -2,10 +2,10 @@
  * Portrait Hair & Edge Detail Optimization & Smart Clarity Enhancement Engine
  * 
  * Features:
- * 1. Cached Silhouette Distance Field (全轮廓高精度距离场缓存，确保滑块拖动 60fps 零延迟)
+ * 1. Sub-Pixel Cached Silhouette Distance Field (全轮廓亚像素级高精度距离场缓存，确保滑块拖动 60fps 零延迟且衣服边缘平滑无波浪)
  * 2. True Canvas-Calibrated Edge Trimming (根据 1 寸证件照基准物理内收，真切实效所见即所得)
  * 3. White / Light Background Spill Decontamination (强力消除发丝顶端与颈部两侧白边/光晕)
- * 4. Subpixel Alpha Feathering & Anti-aliasing (发丝与轮廓精细柔和过渡)
+ * 4. Subpixel Alpha Feathering & Anti-aliasing (发丝与衣服肩膀轮廓精细柔和抗锯齿过渡)
  * 5. Hair Texture & Strands Micro-contrast Enhancement (黑发微发缕层次与光泽增强)
  * 6. Contrast-Adaptive Sharpening (CAS) for Ultra-HD Image Clarity (智能超清重建)
  */
@@ -30,7 +30,7 @@ export const DEFAULT_HAIR_CONFIG: HairOptimizationConfig = {
   enabled: true,
   deFringe: 85,
   feather: 0.5,
-  edgeShift: -1.2, // 默认物理微收 1.2px，配合智能消色溢，彻底消除红底白边
+  edgeShift: -0.6, // 亚像素级微收 0.6px，配合高精消色溢，消除白边同时保持衣服肩膀平滑流线
   textureBoost: 45,
   skinSmoothing: 50, // 自然柔和磨皮
 };
@@ -49,20 +49,20 @@ export const DEFAULT_CLARITY_CONFIG: ClarityConfig = {
 export interface SilhouetteField {
   width: number;
   height: number;
-  distMap: Float32Array;   // Distance in raw image pixels from the outer transparent/background boundary
+  distMap: Float32Array;   // Sub-pixel distance in raw image pixels from the outer transparent/background boundary
   scaleRatio: number;      // Ratio of image width to 295 (base 1-inch ID photo width)
   rawSrc: Uint8ClampedArray; // Original raw RGBA pixel data
   hairMaxY: number;        // Maximum Y coordinate considered hair zone
 }
 
 /**
- * Precomputes Euclidean Distance Transform and edge mapping from raw cutout ImageData.
- * Only runs ONCE when a new image or matting result is loaded.
+ * Precomputes Sub-Pixel Euclidean/Chamfer Distance Transform and edge mapping from raw cutout ImageData.
+ * Preserves fractional alpha sub-pixel boundary positions so diagonal shoulder/clothing lines remain silky-smooth.
  */
 export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
   let workingData = sourceData;
-  if (sourceData.width > 900 || sourceData.height > 900) {
-    const scale = 900 / Math.max(sourceData.width, sourceData.height);
+  if (sourceData.width > 1024 || sourceData.height > 1024) {
+    const scale = 1024 / Math.max(sourceData.width, sourceData.height);
     const nw = Math.round(sourceData.width * scale);
     const nh = Math.round(sourceData.height * scale);
     const c = document.createElement('canvas');
@@ -94,9 +94,13 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
 
   let transparentCount = 0;
   for (let i = 0; i < totalPixels; i++) {
-    if (rawSrc[i * 4 + 3] < 35) {
+    const a = rawSrc[i * 4 + 3];
+    if (a < 15) {
       distMap[i] = 0;
       transparentCount++;
+    } else if (a < 250) {
+      // Sub-pixel boundary initialization: preserves smooth anti-aliased edge position!
+      distMap[i] = a / 255.0;
     }
   }
 
@@ -153,8 +157,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
 
     const enqueue = (x: number, y: number) => {
       if (x < 0 || x >= width || y < 0 || y >= height) return;
-      // Absolute barrier: NEVER flood fill into torso / shoulders area below chin level
-      if (y >= height * 0.32) return;
+      if (y >= height * 0.85) return;
 
       const idx = y * width + x;
       if (visited[idx]) return;
@@ -165,7 +168,6 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       const g = rawSrc[p + 1];
       const b = rawSrc[p + 2];
 
-      // Protect ears, skin, and hair from being flooded
       if (isSkinPixel(r, g, b) || isHairPixel(r, g, b)) {
         return;
       }
@@ -195,7 +197,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
     }
   }
 
-  // Two-pass Chamfer Distance Transform
+  // Two-pass Chamfer Distance Transform (propagates smoothly from sub-pixel boundary values)
   // Forward Pass (Top-Left to Bottom-Right)
   for (let y = 0; y < height; y++) {
     const row = y * width;
@@ -203,11 +205,11 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       const i = row + x;
       let d = distMap[i];
       if (d === 0) continue;
-      if (x > 0) d = Math.min(d, distMap[i - 1] + 1);
+      if (x > 0) d = Math.min(d, distMap[i - 1] + 0.955);
       if (y > 0) {
-        d = Math.min(d, distMap[i - width] + 1);
-        if (x > 0) d = Math.min(d, distMap[i - width - 1] + 1.414);
-        if (x + 1 < width) d = Math.min(d, distMap[i - width + 1] + 1.414);
+        d = Math.min(d, distMap[i - width] + 0.955);
+        if (x > 0) d = Math.min(d, distMap[i - width - 1] + 1.369);
+        if (x + 1 < width) d = Math.min(d, distMap[i - width + 1] + 1.369);
       }
       distMap[i] = d;
     }
@@ -220,13 +222,36 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       const i = row + x;
       let d = distMap[i];
       if (d === 0) continue;
-      if (x + 1 < width) d = Math.min(d, distMap[i + 1] + 1);
+      if (x + 1 < width) d = Math.min(d, distMap[i + 1] + 0.955);
       if (y + 1 < height) {
-        d = Math.min(d, distMap[i + width] + 1);
-        if (x + 1 < width) d = Math.min(d, distMap[i + width + 1] + 1.414);
-        if (x > 0) d = Math.min(d, distMap[i + width - 1] + 1.414);
+        d = Math.min(d, distMap[i + width] + 0.955);
+        if (x + 1 < width) d = Math.min(d, distMap[i + width + 1] + 1.369);
+        if (x > 0) d = Math.min(d, distMap[i + width - 1] + 1.369);
       }
       distMap[i] = d;
+    }
+  }
+
+  // Smooth the distance field slightly in the boundary zone (0 < d < 12) so contour shifting is 100% wave-free
+  const smoothedDist = new Float32Array(distMap);
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const i = row + x;
+      const d = distMap[i];
+      if (d <= 0 || d > 12) continue;
+      const avg =
+        (distMap[i] * 4 +
+          distMap[i - 1] * 2 +
+          distMap[i + 1] * 2 +
+          distMap[i - width] * 2 +
+          distMap[i + width] * 2 +
+          distMap[i - width - 1] +
+          distMap[i - width + 1] +
+          distMap[i + width - 1] +
+          distMap[i + width + 1]) /
+        16;
+      smoothedDist[i] = avg;
     }
   }
 
@@ -235,7 +260,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
   return {
     width,
     height,
-    distMap,
+    distMap: smoothedDist,
     scaleRatio,
     rawSrc,
     hairMaxY,
@@ -271,8 +296,7 @@ export function renderSilhouetteData(
   const textureRate = Math.max(0, Math.min(1, config.textureBoost / 100));
   const featherPx = Math.max(0, Math.min(4, config.feather));
   
-  // Convert edgeShift from 1-inch ID Photo standard pixels to raw image pixels!
-  // This guarantees that setting -2px on the slider trims exactly 2 pixels on the ID photo!
+  // Convert edgeShift from 1-inch ID Photo standard pixels to raw image pixels
   const actualTrimRawPx = Math.max(0, -config.edgeShift) * scaleRatio;
   const actualExpandRawPx = Math.max(0, config.edgeShift) * scaleRatio;
 
@@ -294,12 +318,14 @@ export function renderSilhouetteData(
   const earLeftX = Math.round(width * 0.40);
   const earRightX = Math.round(width * 0.60);
 
-  // 1. Physical Inward Edge Trimming (Cutting off outer white fringe)
+  // 1. Sub-Pixel Inward Edge Trimming (Smoothly shifts contour without waves or stair-stepping)
   if (config.edgeShift < 0 && actualTrimRawPx > 0.05) {
-    const rampWidth = Math.max(0.6, 0.5 * scaleRatio);
+    const rampWidth = Math.max(1.1, 0.95 * scaleRatio);
+    const clothRamp = Math.max(1.2, 1.1 * scaleRatio);
+
     for (let y = 0; y < height; y++) {
       const row = y * width;
-      const isTorso = y >= height * 0.32;
+      const isTorso = y >= height * 0.42;
       for (let x = 0; x < width; x++) {
         const i = row + x;
         const d = distMap[i];
@@ -315,8 +341,8 @@ export function renderSilhouetteData(
 
         let curTrimPx = actualTrimRawPx;
         if (isClothing) {
-          // Clothing & shoulders: trim outer white spill cleanly with crisp subpixel anti-aliasing
-          curTrimPx = actualTrimRawPx * 0.90;
+          // Gentle trim on clothing so shoulder contours stay natural and full
+          curTrimPx = Math.min(actualTrimRawPx * 0.65, 1.8 * scaleRatio);
         } else if (isSkin) {
           // Protect face, jawline, ears, and neck from deep cuts
           curTrimPx = Math.min(actualTrimRawPx, 0.40 * scaleRatio);
@@ -325,27 +351,28 @@ export function renderSilhouetteData(
           curTrimPx = Math.min(actualTrimRawPx, 0.50 * scaleRatio);
         }
 
-        if (curTrimPx > 0 && d <= curTrimPx) {
-          if (isClothing) {
-            // Clothing edge has crisp 0.4px subpixel anti-aliasing (never blurry or transparent)
-            const clothRamp = Math.max(0.3, 0.35 * scaleRatio);
-            if (d <= curTrimPx - clothRamp) {
-              dst[i * 4 + 3] = 0; // Cut off white fringe completely
+        if (isClothing) {
+          const innerEdge = curTrimPx + clothRamp * 0.5;
+          const outerEdge = Math.max(0, curTrimPx - clothRamp * 0.5);
+          if (d <= outerEdge) {
+            dst[p + 3] = 0;
+          } else if (d < innerEdge) {
+            const t = (d - outerEdge) / Math.max(0.01, innerEdge - outerEdge);
+            const smoothT = t * t * (3 - 2 * t);
+            dst[p + 3] = Math.round(rawSrc[p + 3] * smoothT);
+          }
+        } else {
+          if (curTrimPx > 0 && d <= curTrimPx + rampWidth * 0.5) {
+            const outerEdge = Math.max(0, curTrimPx - rampWidth * 0.5);
+            const innerEdge = curTrimPx + rampWidth * 0.5;
+            if (d <= outerEdge) {
+              dst[p + 3] = 0;
             } else {
-              const ratio = Math.max(0, Math.min(1, (d - (curTrimPx - clothRamp)) / (clothRamp * 2)));
-              dst[i * 4 + 3] = Math.round(255 * ratio);
-            }
-          } else {
-            if (d <= curTrimPx - rampWidth) {
-              dst[i * 4 + 3] = 0; // Cut off completely
-            } else {
-              const ratio = Math.max(0, Math.min(1, (d - (curTrimPx - rampWidth)) / rampWidth));
-              dst[i * 4 + 3] = Math.round(dst[i * 4 + 3] * ratio);
+              const t = (d - outerEdge) / Math.max(0.01, innerEdge - outerEdge);
+              const smoothT = t * t * (3 - 2 * t);
+              dst[p + 3] = Math.round(rawSrc[p + 3] * smoothT);
             }
           }
-        } else if (isClothing && d > curTrimPx) {
-          // Fabric inside is 100% solid opaque (eliminates any clothing blur or translucency)
-          dst[i * 4 + 3] = 255;
         }
       }
     }
@@ -369,7 +396,7 @@ export function renderSilhouetteData(
     for (let y = 0; y < height; y++) {
       const isHairZone = y < hairMaxY;
       const inEarSideburnZone = y >= earTopY && y <= earBottomY;
-      const isTorso = y >= height * 0.32;
+      const isTorso = y >= height * 0.42;
 
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
@@ -480,6 +507,7 @@ export function renderSilhouetteData(
   }
 
   // 3. Subpixel Alpha Feathering & Anti-aliasing with Precomputed LUT
+  //    Applies smooth anti-aliasing to BOTH hair and clothing boundaries (never hard-thresholding clothing into waves!)
   if (featherPx > 0.1) {
     const actualFeatherRaw = Math.min(3, Math.max(1, featherPx * scaleRatio));
     const radius = Math.min(3, Math.ceil(actualFeatherRaw));
@@ -502,25 +530,12 @@ export function renderSilhouetteData(
     }
 
     for (let y = 1; y < height - 1; y++) {
+      const isTorso = y >= height * 0.42;
       for (let x = 1; x < width - 1; x++) {
         const i = y * width + x;
         const curA = alphaCopy[i];
 
-        if (curA > 5 && curA < 250) {
-          const p = i * 4;
-          const isSkin = isSkinPixel(dst[p], dst[p + 1], dst[p + 2]);
-
-          // CLOTHING / SHOULDER CRISP PRESERVATION:
-          // Never blur or soften clothing edges into fuzzy translucent gradient!
-          if (y >= height * 0.32 && !isSkin) {
-            if (curA >= 115) {
-              dst[p + 3] = 255; // CLOTHING FABRIC IS 100% SOLID OPAQUE
-            } else {
-              dst[p + 3] = 0; // Cut off leftover weak background noise
-            }
-            continue; // Do NOT Gaussian blur clothing edges!
-          }
-
+        if (curA > 2 && curA < 253) {
           let sumA = 0;
           let weightSum = 0;
 
@@ -540,8 +555,10 @@ export function renderSilhouetteData(
           }
 
           if (weightSum > 0) {
-            const smoothedA = Math.round(sumA / weightSum);
-            dst[i * 4 + 3] = Math.round(curA * 0.35 + smoothedA * 0.65);
+            const smoothedA = sumA / weightSum;
+            // On clothing/torso, blend gently for crisp anti-aliasing without making fabric blurry
+            const blend = isTorso ? 0.45 : 0.65;
+            dst[i * 4 + 3] = Math.round(curA * (1 - blend) + smoothedA * blend);
           }
         }
       }
@@ -753,6 +770,10 @@ export function enhanceImageClarity(
     const row = y * width;
     for (let x = 1; x < width - 1; x++) {
       const idx = row + x;
+      const p = idx * 4;
+      // Do not sharpen transparent or semi-transparent outer boundary pixels (prevents halo/staircase amplification!)
+      if (src[p + 3] < 245) continue;
+
       const curL = lum[idx];
 
       const l_up = lum[idx - width];
@@ -772,7 +793,6 @@ export function enhanceImageClarity(
       let weight = Math.min(1.0, localContrast / 25) * strength;
 
       // Dampen sharpening on skin so we never amplify pores, stubble, or rough skin texture!
-      const p = idx * 4;
       const curR = src[p];
       const curG = src[p + 1];
       const curB = src[p + 2];

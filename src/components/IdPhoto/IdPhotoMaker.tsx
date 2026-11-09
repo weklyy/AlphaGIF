@@ -447,7 +447,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       enabled: true,
       deFringe: 90,
       feather: 0.5,
-      edgeShift: -1.2, // 默认物理微收 1.2px，配合消色溢彻底消除红底白边
+      edgeShift: -0.6, // 亚像素微收 0.6px，配合高精消色溢彻底消除白边且保持衣服流线平滑
       textureBoost: 45,
       skinSmoothing: 50, // 自然影楼级磨皮，抚平脸部粗糙与暗沉
     };
@@ -1684,14 +1684,14 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                           ...hairConfig,
                           enabled: true,
                           deFringe: 100,
-                          edgeShift: -1.8,
-                          feather: 0.5,
+                          edgeShift: -1.0,
+                          feather: 0.6,
                           textureBoost: 45,
                           skinSmoothing: 50,
                         };
                         setHairConfig(newCfg);
                         applyHairOptimization(newCfg);
-                        onNotification?.('✨ 已执行红底白边净化：微收1.8px + 消色溢100%，红底白边已彻底消除');
+                        onNotification?.('✨ 已执行红底白边净化：微收1.0px + 消色溢100%，红底白边已消除且衣服边缘平滑');
                       }}
                       className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[11px] font-bold shadow-2xs transition-all flex items-center gap-1 cursor-pointer"
                     >
@@ -1940,18 +1940,18 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                           ...hairConfig,
                           enabled: true,
                           deFringe: 95,
-                          feather: 0.5,
-                          edgeShift: -1.2,
+                          feather: 0.6,
+                          edgeShift: -0.6,
                           textureBoost: 45,
                           skinSmoothing: 50,
                         };
                         setHairConfig(newCfg);
                         applyHairOptimization(newCfg);
-                        onNotification?.('已启用官方证件标准微收1.2px，白边已消除');
+                        onNotification?.('已启用官方证件标准微收0.6px，白边已消除且衣服平滑自然');
                       }}
                       className="px-2.5 py-1 bg-stone-900 hover:bg-black text-white text-[11px] font-semibold rounded-lg cursor-pointer transition-all"
                     >
-                      推荐微收 (1.2px)
+                      推荐微收 (0.6px)
                     </button>
                   </div>
 

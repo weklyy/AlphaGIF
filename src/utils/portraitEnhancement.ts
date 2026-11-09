@@ -3,17 +3,16 @@
  * 
  * Features:
  * 1. Sub-Pixel Cached Silhouette Distance Field (全轮廓亚像素级高精度距离场缓存，确保滑块拖动 60fps 零延迟且衣服边缘平滑无波浪)
- * 2. White / Silver / Grey Hair Intelligent Protection (智能识别长者白发/银发/灰白发，杜绝误判为白边导致的白发破损、变黑或透底)
- * 3. True Canvas-Calibrated Edge Trimming (根据 1 寸证件照基准物理内收，真切实效所见即所得)
- * 4. White / Light Background Spill Decontamination (自适应内层发色采样消除杂色光晕)
+ * 2. Universal Multi-Color De-Fringe (智能消除蓝底青边、红底红边与白底白边光晕，自适应采样真实内层发色/肤色/衣色)
+ * 3. Smart Interior Crown Hair Detection (精准区分长者真实白发与深色头发外圈的浅色/蓝色背景光晕)
+ * 4. True Canvas-Calibrated Edge Trimming (根据 1 寸证件照基准物理内收，真切实效所见即所得)
  * 5. Subpixel Alpha Feathering & Anti-aliasing (发丝与衣服肩膀轮廓精细柔和抗锯齿过渡)
- * 6. Hair Texture & Strands Micro-contrast Enhancement (黑发与银白发微发缕层次与光泽增强)
- * 7. Contrast-Adaptive Sharpening (CAS) for Ultra-HD Image Clarity (智能超清重建)
+ * 6. Contrast-Adaptive Sharpening (CAS) for Ultra-HD Image Clarity (智能超清重建)
  */
 
 export interface HairOptimizationConfig {
   enabled: boolean;
-  deFringe: number;    // 0 to 100 (%): 去除发丝与颈部白边/浅色光晕杂色
+  deFringe: number;    // 0 to 100 (%): 去除发丝与颈部白边/蓝边/浅色光晕杂色
   feather: number;     // 0 to 4 (px): 边缘柔和羽化与抗锯齿 (以证件照标准画布像素为基准)
   edgeShift: number;   // -10.0 to 2.0 (px): 边缘向内物理微收裁剪 (负值收边，以证件照标准画布像素为基准，真切所见即所得)
   textureBoost: number;// 0 to 100 (%): 发丝纹理与微发丝细节增强
@@ -29,9 +28,9 @@ export interface ClarityConfig {
 
 export const DEFAULT_HAIR_CONFIG: HairOptimizationConfig = {
   enabled: true,
-  deFringe: 85,
+  deFringe: 90,
   feather: 0.5,
-  edgeShift: -0.6, // 亚像素级微收 0.6px，配合白发保护与高精消色溢，消除杂边同时保护白发与衣服流线
+  edgeShift: -0.8, // 默认微收 0.8px，配合全色系消色溢，彻底消除蓝边/白边同时保持衣服与白发自然
   textureBoost: 45,
   skinSmoothing: 50, // 自然柔和磨皮
 };
@@ -54,11 +53,11 @@ export interface SilhouetteField {
   scaleRatio: number;      // Ratio of image width to 295 (base 1-inch ID photo width)
   rawSrc: Uint8ClampedArray; // Original raw RGBA pixel data
   hairMaxY: number;        // Maximum Y coordinate considered hair zone
+  hasWhiteCrownHair: boolean; // True only when the subject's interior crown hair is genuinely silver/grey/white
 }
 
 /**
  * Precomputes Sub-Pixel Euclidean/Chamfer Distance Transform and edge mapping from raw cutout ImageData.
- * Preserves fractional alpha sub-pixel boundary positions so diagonal shoulder/clothing lines remain silky-smooth.
  */
 export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
   let workingData = sourceData;
@@ -83,11 +82,9 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
   const totalPixels = width * height;
   const src = workingData.data;
 
-  // Make a private copy of original pixels
   const rawSrc = new Uint8ClampedArray(src.length);
   rawSrc.set(src);
 
-  // 1-inch standard ID photo width is 295px (at 300 DPI: 25mm / 25.4 * 300 = 295px)
   const scaleRatio = Math.max(1, width / 295);
 
   const distMap = new Float32Array(totalPixels);
@@ -100,13 +97,11 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       distMap[i] = 0;
       transparentCount++;
     } else if (a < 250) {
-      // Sub-pixel boundary initialization: preserves smooth anti-aliased edge position!
       distMap[i] = a / 255.0;
     }
   }
 
   // If the image is opaque or has no transparent channel:
-  // Detect border backdrop color and flood-fill from borders to establish background
   if (transparentCount < totalPixels * 0.05) {
     let sumR = 0, sumG = 0, sumB = 0, samples = 0;
     const sample = (x: number, y: number) => {
@@ -157,7 +152,6 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       if (x < 0 || x >= width || y < 0 || y >= height) return;
       if (y >= height * 0.85) return;
 
-      // Protect central cranial & hair arch
       const dxNorm = (x - archCenterX) / archRx;
       const dyNorm = (y - archCenterY) / archRy;
       if (dxNorm * dxNorm + dyNorm * dyNorm <= 1.0) return;
@@ -196,7 +190,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
     }
   }
 
-  // Two-pass Chamfer Distance Transform (propagates smoothly from sub-pixel boundary values)
+  // Two-pass Chamfer Distance Transform
   for (let y = 0; y < height; y++) {
     const row = y * width;
     for (let x = 0; x < width; x++) {
@@ -252,6 +246,46 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
     }
   }
 
+  // Detect if the subject genuinely has white/silver/grey interior crown hair
+  let headTopY = Math.round(height * 0.08);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    let found = false;
+    for (let x = 0; x < width; x += 2) {
+      if (rawSrc[(row + x) * 4 + 3] >= 180) {
+        headTopY = y;
+        found = true;
+        break;
+      }
+    }
+    if (found) break;
+  }
+
+  let crownLumSum = 0;
+  let crownChromaSum = 0;
+  let crownSamples = 0;
+  const cY0 = Math.min(height - 1, headTopY + Math.round(height * 0.03));
+  const cY1 = Math.min(height - 1, headTopY + Math.round(height * 0.15));
+  for (let y = cY0; y <= cY1; y += 2) {
+    const row = y * width;
+    for (let x = Math.round(width * 0.30); x <= Math.round(width * 0.70); x += 2) {
+      const i = row + x;
+      // Only sample deep interior crown hair (smoothedDist > 6 * scaleRatio)
+      if (smoothedDist[i] > 5 * scaleRatio && rawSrc[i * 4 + 3] > 230) {
+        const p = i * 4;
+        const r = rawSrc[p], g = rawSrc[p + 1], b = rawSrc[p + 2];
+        // Exclude forehead skin
+        if (r > 85 && g > 45 && b > 25 && r > g + 8 && r - b >= 18) continue;
+        crownLumSum += 0.299 * r + 0.587 * g + 0.114 * b;
+        crownChromaSum += Math.max(r, g, b) - Math.min(r, g, b);
+        crownSamples++;
+      }
+    }
+  }
+  const avgCrownLum = crownSamples > 8 ? crownLumSum / crownSamples : 40;
+  const avgCrownChroma = crownSamples > 8 ? crownChromaSum / crownSamples : 15;
+  const hasWhiteCrownHair = avgCrownLum >= 98 && avgCrownChroma < 38;
+
   const hairMaxY = Math.round(height * 0.44);
 
   return {
@@ -261,6 +295,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
     scaleRatio,
     rawSrc,
     hairMaxY,
+    hasWhiteCrownHair,
   };
 }
 
@@ -272,7 +307,7 @@ export function renderSilhouetteData(
   field: SilhouetteField,
   config: HairOptimizationConfig = DEFAULT_HAIR_CONFIG
 ): ImageData {
-  const { width, height, distMap, scaleRatio, rawSrc, hairMaxY } = field;
+  const { width, height, distMap, scaleRatio, rawSrc, hairMaxY, hasWhiteCrownHair } = field;
   const totalPixels = width * height;
 
   const outCanvas = document.createElement('canvas');
@@ -282,7 +317,6 @@ export function renderSilhouetteData(
   const outData = outCtx.createImageData(width, height);
   const dst = outData.data;
 
-  // Initialize dst with rawSrc
   dst.set(rawSrc);
 
   if (!config.enabled) {
@@ -308,25 +342,20 @@ export function renderSilhouetteData(
     return l < 85 || (r < 90 && g < 90 && b < 90);
   };
 
-  // Recognizes silver / grey / white hair in the upper head & temple zone (y < hairMaxY)
-  const isWhiteOrGreyHairPixel = (r: number, g: number, b: number, y: number) => {
-    if (y >= hairMaxY) return false;
+  // True only if the subject genuinely has white crown hair AND this pixel is an achromatic light hair pixel
+  const isTrueWhiteHairPixel = (r: number, g: number, b: number, y: number) => {
+    if (!hasWhiteCrownHair || y >= hairMaxY) return false;
     if (isSkinPixel(r, g, b)) return false;
     const l = 0.299 * r + 0.587 * g + 0.114 * b;
     const maxC = Math.max(r, g, b);
     const minC = Math.min(r, g, b);
-    return l >= 85 && maxC - minC < 38;
+    return l >= 85 && maxC - minC < 35;
   };
 
-  const earTopY = Math.round(height * 0.28);
-  const earBottomY = Math.round(height * 0.65);
-  const earLeftX = Math.round(width * 0.40);
-  const earRightX = Math.round(width * 0.60);
-
-  // 1. Sub-Pixel Inward Edge Trimming (Protects White/Grey Hair, Ears, and Smooth Clothing)
+  // 1. Sub-Pixel Inward Edge Trimming (Responsive to User Slider & Smooth on Clothing)
   if (config.edgeShift < 0 && actualTrimRawPx > 0.05) {
     const rampWidth = Math.max(1.1, 0.95 * scaleRatio);
-    const clothRamp = Math.max(1.2, 1.1 * scaleRatio);
+    const clothRamp = Math.max(1.2, 1.15 * scaleRatio);
 
     for (let y = 0; y < height; y++) {
       const row = y * width;
@@ -341,20 +370,18 @@ export function renderSilhouetteData(
         const g = rawSrc[p + 1];
         const b = rawSrc[p + 2];
         const isSkin = isSkinPixel(r, g, b);
-        const isDarkHair = isDarkHairPixel(r, g, b);
-        const isWhiteHair = isWhiteOrGreyHairPixel(r, g, b, y);
+        const isWhiteHair = isTrueWhiteHairPixel(r, g, b, y);
         const isClothing = isTorso && !isSkin;
 
         let curTrimPx = actualTrimRawPx;
         if (isClothing) {
-          curTrimPx = Math.min(actualTrimRawPx * 0.65, 1.8 * scaleRatio);
-        } else if (isWhiteHair) {
-          // CRITICAL: Protect white/silver/grey hair on crown & temples from erosion!
-          curTrimPx = Math.min(actualTrimRawPx * 0.35, 0.35 * scaleRatio);
+          curTrimPx = actualTrimRawPx * 0.85;
+        } else if (isWhiteHair && config.edgeShift >= -1.0) {
+          // Protect authentic white hair at default micro-trim settings, while allowing manual slider trim if user drags < -1.0px
+          curTrimPx = Math.min(actualTrimRawPx * 0.4, 0.35 * scaleRatio);
         } else if (isSkin) {
-          curTrimPx = Math.min(actualTrimRawPx, 0.40 * scaleRatio);
-        } else if (y >= height * 0.24 && isDarkHair) {
-          curTrimPx = Math.min(actualTrimRawPx, 0.50 * scaleRatio);
+          // Allow skin/ear/neck trim to remove blue/white fringes when user increases trim, with gentle scaling
+          curTrimPx = actualTrimRawPx * 0.72;
         }
 
         if (isClothing) {
@@ -366,14 +393,6 @@ export function renderSilhouetteData(
             const t = (d - outerEdge) / Math.max(0.01, innerEdge - outerEdge);
             const smoothT = t * t * (3 - 2 * t);
             dst[p + 3] = Math.round(rawSrc[p + 3] * smoothT);
-          }
-        } else if (isWhiteHair) {
-          // Solidify inner white hair (d > curTrimPx + 1.0) to full 255 so red/blue bg never bleeds through!
-          if (d <= curTrimPx) {
-            const t = d / Math.max(0.05, curTrimPx);
-            dst[p + 3] = Math.round(rawSrc[p + 3] * t * t);
-          } else if (d > curTrimPx + 1.1 * scaleRatio) {
-            dst[p + 3] = Math.max(rawSrc[p + 3], 255);
           }
         } else {
           if (curTrimPx > 0 && d <= curTrimPx + rampWidth * 0.5) {
@@ -400,16 +419,15 @@ export function renderSilhouetteData(
     }
   }
 
-  // 2. White Halo / De-fringe Spill Decontamination (Adaptive to Authentic Inner Hair Color!)
-  //    Never turns white/silver hair black or translucent!
+  // 2. Universal Multi-Color Halo / De-Fringe Spill Decontamination
+  //    Eliminates Blue/Cyan Halos, Red Halos, AND White/Light Halos across hair, ears, neck, and clothing!
   if (deFringeRate > 0) {
-    const searchDepth = Math.round(Math.min(9, Math.max(4, 4.0 * scaleRatio)));
+    const searchDepth = Math.round(Math.min(11, Math.max(5, 5.0 * scaleRatio)));
     const deFringeZoneDepth = actualTrimRawPx + searchDepth;
-    const searchRadius = Math.round(Math.min(8, Math.max(4, 3.5 * scaleRatio)));
+    const searchRadius = Math.round(Math.min(9, Math.max(4, 4.2 * scaleRatio)));
 
     for (let y = 0; y < height; y++) {
       const isHairZone = y < hairMaxY;
-      const inEarSideburnZone = y >= earTopY && y <= earBottomY;
       const isTorso = y >= height * 0.44;
 
       for (let x = 0; x < width; x++) {
@@ -425,29 +443,27 @@ export function renderSilhouetteData(
         const curB = dst[i * 4 + 2];
         const curLum = 0.299 * curR + 0.587 * curG + 0.114 * curB;
 
-        const isEarSideburnX = x < earLeftX || x > earRightX;
         const isSkin = isSkinPixel(curR, curG, curB);
-        const isDarkHair = isDarkHairPixel(curR, curG, curB);
         const isClothing = isTorso && !isSkin;
 
-        if (inEarSideburnZone && isEarSideburnX && (isSkin || isDarkHair) && d > actualTrimRawPx + 2.5 * scaleRatio) {
+        // Detect Blue/Cyan Spill, Red Spill, or White/Light Spill
+        const hasBlueCyanTint = curB > curR + 8 || (curG > curR + 8 && curB > curR + 4);
+        const isPale = curR > 130 && curG > 130 && curB > 130;
+        const isWhitishOnHair = isHairZone && !isSkin && (curLum > 75 || isPale);
+        const isWhitishOnSkin = (!isHairZone || isSkin) && (curLum > 185 || (curR > 165 && curG > 165 && curB > 165 && Math.abs(curR - curB) < 35));
+        const isWhitishOnClothing = isClothing && (curLum > 110 || isPale);
+
+        if (!hasBlueCyanTint && !isWhitishOnHair && !isWhitishOnSkin && !isWhitishOnClothing && !isPale) {
           continue;
         }
 
-        const isPale = curR > 135 && curG > 135 && curB > 135;
-        const isWhitishOnHair = isHairZone && !isSkin && (curLum > 85 || isPale);
-        const isWhitishOnSkin = (!isHairZone || isSkin) && (curLum > 190 || (curR > 170 && curG > 170 && curB > 170 && Math.abs(curR - curB) < 35));
-        const isWhitishOnClothing = isClothing && (curLum > 125 || isPale);
-
-        if (!isWhitishOnHair && !isWhitishOnSkin && !isWhitishOnClothing && !isPale) continue;
-
-        // Search inward along distMap for authentic inner color (whether black hair, silver/white hair, skin, or clothing!)
+        // Search inward along distMap for authentic inner color (free of blue/cyan/white border spill)
         let innerR = curR;
         let innerG = curG;
         let innerB = curB;
         let foundInner = false;
         let minSearchDist = 99999;
-        const minTargetDist = actualTrimRawPx + Math.max(2.5, 2.5 * scaleRatio);
+        const minTargetDist = actualTrimRawPx + Math.max(3.0, 3.2 * scaleRatio);
 
         for (let dy = -searchRadius; dy <= searchRadius; dy += 2) {
           const ny = y + dy;
@@ -459,7 +475,7 @@ export function renderSilhouetteData(
             const ni = ny * width + nx;
             const nd = distMap[ni];
 
-            if (nd >= minTargetDist && dst[ni * 4 + 3] > 215) {
+            if (nd >= minTargetDist && dst[ni * 4 + 3] > 220) {
               const distSq = dx * dx + dy * dy;
               if (distSq < minSearchDist) {
                 const r0 = rawSrc[ni * 4];
@@ -467,14 +483,18 @@ export function renderSilhouetteData(
                 const b0 = rawSrc[ni * 4 + 2];
                 const l0 = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
 
+                // Reject candidate inner pixel if it still has strong blue/cyan backdrop spill
+                if (b0 > r0 + 18 && g0 > r0 + 12) continue;
+
                 if (isHairZone && !isSkin) {
-                  // Accept actual inner hair color whether it is dark hair OR silver/grey/white hair!
-                  innerR = r0;
-                  innerG = g0;
-                  innerB = b0;
-                  minSearchDist = distSq;
-                  foundInner = true;
-                  if (distSq <= 8) break;
+                  if (hasWhiteCrownHair || l0 < 115) {
+                    innerR = r0;
+                    innerG = g0;
+                    innerB = b0;
+                    minSearchDist = distSq;
+                    foundInner = true;
+                    if (distSq <= 8) break;
+                  }
                 } else if (isClothing) {
                   if (l0 < 190 || Math.abs(r0 - g0) > 10) {
                     innerR = r0;
@@ -485,7 +505,7 @@ export function renderSilhouetteData(
                     if (distSq <= 8) break;
                   }
                 } else {
-                  if (r0 > b0 + 15 && l0 < 225) {
+                  if (r0 >= b0 && l0 < 225) {
                     innerR = r0;
                     innerG = g0;
                     innerB = b0;
@@ -500,38 +520,50 @@ export function renderSilhouetteData(
           if (foundInner && minSearchDist <= 8) break;
         }
 
-        if (!foundInner) continue;
-
-        const innerLum = 0.299 * innerR + 0.587 * innerG + 0.114 * innerB;
-
-        // If inner hair is white/silver/grey (innerLum >= 100), DO NOT darken it and DO NOT lower its alpha!
-        if (isHairZone && !isSkin && innerLum >= 100) {
-          // Gently blend toward authentic inner silver/white hair color and keep solid alpha
-          const distFromCut = Math.max(0, d - actualTrimRawPx);
-          const proximity = Math.max(0, Math.min(1, 1 - distFromCut / searchDepth));
-          const blendRatio = deFringeRate * proximity * 0.5;
-          dst[i * 4] = Math.round(curR * (1 - blendRatio) + innerR * blendRatio);
-          dst[i * 4 + 1] = Math.round(curG * (1 - blendRatio) + innerG * blendRatio);
-          dst[i * 4 + 2] = Math.round(curB * (1 - blendRatio) + innerB * blendRatio);
-          if (d > actualTrimRawPx + 1.0 * scaleRatio && a > 110) {
-            dst[i * 4 + 3] = Math.min(255, Math.round(a + (255 - a) * 0.55));
+        if (!foundInner) {
+          // Fallback if no inner pixel found within searchRadius: neutralize blue/cyan excess directly
+          if (hasBlueCyanTint) {
+            dst[i * 4 + 1] = Math.min(curG, curR);
+            dst[i * 4 + 2] = Math.min(curB, curR);
+            if (d - actualTrimRawPx <= 2.2 * scaleRatio) {
+              dst[i * 4 + 3] = Math.round(a * (1 - 0.65 * deFringeRate));
+            }
           }
           continue;
         }
 
-        // Only de-fringe when outer pixel is significantly brighter than authentic inner hair/clothing/skin
-        if (curLum > innerLum + 12) {
-          const distFromCut = Math.max(0, d - actualTrimRawPx);
-          const proximity = Math.max(0, Math.min(1, 1 - distFromCut / searchDepth));
-          const blendRatio = deFringeRate * proximity;
+        const innerLum = 0.299 * innerR + 0.587 * innerG + 0.114 * innerB;
+        const distFromCut = Math.max(0, d - actualTrimRawPx);
+        const proximity = Math.max(0, Math.min(1, 1 - distFromCut / searchDepth));
+
+        // Protect authentic white crown hair
+        if (hasWhiteCrownHair && isHairZone && !isSkin && !hasBlueCyanTint && innerLum >= 100) {
+          const blendRatio = deFringeRate * proximity * 0.5;
+          dst[i * 4] = Math.round(curR * (1 - blendRatio) + innerR * blendRatio);
+          dst[i * 4 + 1] = Math.round(curG * (1 - blendRatio) + innerG * blendRatio);
+          dst[i * 4 + 2] = Math.round(curB * (1 - blendRatio) + innerB * blendRatio);
+          continue;
+        }
+
+        // De-fringe if outer pixel has Blue/Cyan spill OR is brighter than authentic inner pixel
+        const blueSpillAmount = (curB - curR) - (innerB - innerR);
+        const cyanSpillAmount = (curG - curR) - (innerG - innerR);
+        const hasChromaSpill = blueSpillAmount > 10 || cyanSpillAmount > 10 || hasBlueCyanTint;
+
+        if (hasChromaSpill || curLum > innerLum + 10) {
+          const boostProximity = hasChromaSpill ? Math.min(1, proximity * 1.25) : proximity;
+          const blendRatio = Math.min(1, deFringeRate * boostProximity);
 
           dst[i * 4] = Math.round(curR * (1 - blendRatio) + innerR * blendRatio);
           dst[i * 4 + 1] = Math.round(curG * (1 - blendRatio) + innerG * blendRatio);
           dst[i * 4 + 2] = Math.round(curB * (1 - blendRatio) + innerB * blendRatio);
 
-          // Soften alpha only on dark hair with pale halo tips
-          if (isPale && isDarkHair && innerLum < 85 && distFromCut <= 1.2 * scaleRatio) {
-            dst[i * 4 + 3] = Math.round(a * (1 - 0.35 * deFringeRate));
+          // Attenuate alpha on outer halo tips (especially blue/cyan halo or pale halo on dark hair)
+          if (hasChromaSpill && distFromCut <= 2.5 * scaleRatio) {
+            const spillSeverity = Math.min(1, Math.max(blueSpillAmount, cyanSpillAmount, 12) / 38);
+            dst[i * 4 + 3] = Math.round(a * (1 - 0.72 * deFringeRate * spillSeverity));
+          } else if (isPale && innerLum < 85 && distFromCut <= 1.4 * scaleRatio) {
+            dst[i * 4 + 3] = Math.round(a * (1 - 0.45 * deFringeRate));
           }
         }
       }
@@ -594,7 +626,7 @@ export function renderSilhouetteData(
     }
   }
 
-  // 4. Hair Strands Texture & Contrast Enhancement (Supports both Dark Hair and Silver/White Hair!)
+  // 4. Hair Strands Texture & Contrast Enhancement
   if (textureRate > 0) {
     const hairBoostFactor = textureRate * 0.55;
     const step = Math.max(1, Math.round(scaleRatio));
@@ -754,9 +786,6 @@ export function createOptimizedPortraitCanvas(
 
 /**
  * Intelligent Smart Clarity Enhancement Engine (智能人像超清增强)
- * Applied to the composite canvas (portrait on background)
- * Uses Contrast-Adaptive High-Frequency Sharpening, edge preservation,
- * and facial feature micro-contrast enhancement without amplifying flat background noise.
  */
 export function enhanceImageClarity(
   ctx: CanvasRenderingContext2D,

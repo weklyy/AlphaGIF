@@ -1,9 +1,17 @@
 /**
  * AI Neural Network Background Removal Engine
  * 100% Client-side in-browser WebAssembly & High-Resolution Edge-Guided Trimap Matting
- * Combines MediaPipe Semantic Segmentation with:
- * - Cranial & White/Silver Hair Dome Protection (白发/灰白发与白墙智能区分保护，防止白发破损或透底)
- * - High-Resolution Joint Bilateral & Color-Affinity Clothing Matting (衣服肩膀平滑贴合无波浪)
+ *
+ * Key Capabilities:
+ * 1. Blue / Cyan / Red / White Backdrop Chroma & Color-Affinity Keying:
+ *    - Automatically detects chromatic studio backdrops (blue/cyan/red) vs white/grey walls.
+ *    - Performs linear chroma unmixing and color-spill decontamination on hair, ears, skin, and clothing edges
+ *      so blue/cyan/red studio backgrounds are 100% removed with zero colored halo.
+ * 2. Smart Inner-Crown Hair Analysis (Distinguishes True White Hair from Backdrop Halos):
+ *    - Inspects interior crown hair luminance & saturation to determine if the subject genuinely has white/silver/grey hair.
+ *    - Protects white hair on white walls while aggressively stripping blue/white halos around dark hair.
+ * 3. Smooth Wave-Free Clothing & Shoulders:
+ *    - High-resolution Joint Bilateral Filtering + morphological contour smoothing keeps shoulders crisp and smooth.
  */
 
 import { removeBackground as imglyRemoveBackground, Config } from '@imgly/background-removal';
@@ -18,19 +26,7 @@ export interface AiRemovalProgress {
 const aiResultCache = new Map<string, { blob: Blob; url: string; imageData: ImageData }>();
 
 /**
- * High-Resolution Trimap & Joint Bilateral Edge-Snapping Matting Refinement
- *
- * Key Capabilities:
- * 1. White / Silver / Grey Hair Protection against White Walls:
- *    - Recognizes the cranial/head zone (y < 0.46 * height) where white/grey hair often shares similar luminance
- *      with a white backdrop wall.
- *    - Protects the semantic cranial & hair dome from background color flood-fill so white hair on the crown
- *      and temples (头顶与两鬓白发) is never eroded or made translucent.
- *    - Boosts hair dome opacity and uses local micro-texture & inner hair color sampling so white hair looks
- *      full, solid, and natural on red, blue, or transparent backgrounds.
- * 2. Smooth Wave-Free Clothing & Shoulders:
- *    - Floods confirmed background only into neck/collar pockets below the ears/jawline.
- *    - Recovers full-resolution clothing edges and smooths shoulder contours via Joint Bilateral Filtering.
+ * High-Resolution Trimap, Chroma-Unmixing & Joint Bilateral Edge-Snapping Matting
  */
 function refineMaskWithHighResImage(
   srcData: Uint8ClampedArray,
@@ -56,7 +52,7 @@ function refineMaskWithHighResImage(
     const row = y * width;
     for (let x = 0; x < width; x += 4) {
       const i = row + x;
-      if (coarseAlpha[i] < 16 || (y < height * 0.06 && (x < width * 0.20 || x > width * 0.80))) {
+      if (coarseAlpha[i] < 18 || (y < height * 0.06 && (x < width * 0.20 || x > width * 0.80))) {
         const p = i * 4;
         gSumR += srcData[p];
         gSumG += srcData[p + 1];
@@ -68,6 +64,16 @@ function refineMaskWithHighResImage(
   const globalBgR = gCount > 0 ? gSumR / gCount : 230;
   const globalBgG = gCount > 0 ? gSumG / gCount : 230;
   const globalBgB = gCount > 0 ? gSumB / gCount : 230;
+
+  // Detect if backdrop is chromatic (e.g. Blue, Cyan-Blue, Red) vs Achromatic (White, Grey)
+  const globalBgMax = Math.max(globalBgR, globalBgG, globalBgB);
+  const globalBgMin = Math.min(globalBgR, globalBgG, globalBgB);
+  const globalBgChroma = globalBgMax - globalBgMin;
+  const isBlueOrCyanBg =
+    globalBgChroma > 22 && (globalBgB > globalBgR + 20 || (globalBgG > globalBgR + 18 && globalBgB > globalBgR + 15));
+  const isRedBg =
+    globalBgChroma > 25 && globalBgR > globalBgG + 25 && globalBgR > globalBgB + 25;
+  const isChromaticBg = isBlueOrCyanBg || isRedBg || globalBgChroma > 32;
 
   const rawLeftR = new Float32Array(height);
   const rawLeftG = new Float32Array(height);
@@ -87,7 +93,7 @@ function refineMaskWithHighResImage(
 
     for (let x = 0; x < midX; x += 2) {
       const i = row + x;
-      if (coarseAlpha[i] < 18) {
+      if (coarseAlpha[i] < 20) {
         const p = i * 4;
         lR += srcData[p];
         lG += srcData[p + 1];
@@ -97,7 +103,7 @@ function refineMaskWithHighResImage(
     }
     for (let x = midX; x < width; x += 2) {
       const i = row + x;
-      if (coarseAlpha[i] < 18) {
+      if (coarseAlpha[i] < 20) {
         const p = i * 4;
         rR += srcData[p];
         rG += srcData[p + 1];
@@ -195,15 +201,14 @@ function refineMaskWithHighResImage(
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Detect Cranial / Hair Zone & White/Grey Hair Characteristics
-  //    Find top of head (minY of coarseAlpha >= 80) and neck/shoulder transition level
+  // 2. Analyze Interior Crown Hair to Distinguish White-Haired Subjects vs Dark-Haired Subjects
   // ---------------------------------------------------------------------------
   let headTopY = Math.round(height * 0.08);
   for (let y = 0; y < height; y++) {
     const row = y * width;
     let found = false;
     for (let x = 0; x < width; x += 2) {
-      if (coarseAlpha[row + x] >= 80) {
+      if (coarseAlpha[row + x] >= 120) {
         headTopY = y;
         found = true;
         break;
@@ -212,25 +217,64 @@ function refineMaskWithHighResImage(
     if (found) break;
   }
 
-  // Cranial & Hair Dome zone extends from headTopY down to ear/temple base (~headTopY + 38% of height, or ~48% of image height)
-  const cranialProtectMaxY = Math.min(
-    Math.round(height * 0.52),
-    Math.max(Math.round(height * 0.44), headTopY + Math.round(height * 0.36))
-  );
-  const shoulderZoneY = Math.round(height * 0.45);
+  const isSkinColor = (r: number, g: number, b: number) => {
+    if (r < 85 || g < 45 || b < 25) return false;
+    return r > g + 8 && g >= b - 5 && r - b >= 18;
+  };
 
-  // Compute local 3x3 texture energy (micro-contrast) to distinguish textured white/silver hair from flat wall
-  const textureMap = new Float32Array(totalPixels);
-  for (let y = 1; y < Math.min(height - 1, cranialProtectMaxY + 10); y++) {
+  // Sample interior crown hair (between headTopY + 3% and headTopY + 15% of height, where coarseAlpha >= 200)
+  let hairLumSum = 0;
+  let hairChromaSum = 0;
+  let hairSampleCount = 0;
+  const crownStartY = Math.min(height - 1, headTopY + Math.round(height * 0.025));
+  const crownEndY = Math.min(height - 1, headTopY + Math.round(height * 0.16));
+  for (let y = crownStartY; y <= crownEndY; y += 2) {
     const row = y * width;
-    for (let x = 1; x < width - 1; x++) {
+    for (let x = Math.round(width * 0.28); x <= Math.round(width * 0.72); x += 2) {
       const i = row + x;
-      const cL = lumMap[i];
-      const d1 = Math.abs(cL - lumMap[i - 1]);
-      const d2 = Math.abs(cL - lumMap[i + 1]);
-      const d3 = Math.abs(cL - lumMap[i - width]);
-      const d4 = Math.abs(cL - lumMap[i + width]);
-      textureMap[i] = (d1 + d2 + d3 + d4) * 0.25;
+      if (coarseAlpha[i] >= 205) {
+        const p = i * 4;
+        const r = srcData[p], g = srcData[p + 1], b = srcData[p + 2];
+        // Skip forehead skin pixels and skip backdrop-colored pixels
+        if (isSkinColor(r, g, b)) continue;
+        if (isBlueOrCyanBg && (b > r + 20 || g > r + 20)) continue;
+        if (isRedBg && r > g + 30 && r > b + 30) continue;
+
+        hairLumSum += lumMap[i];
+        hairChromaSum += Math.max(r, g, b) - Math.min(r, g, b);
+        hairSampleCount++;
+      }
+    }
+  }
+
+  const avgCrownHairLum = hairSampleCount > 10 ? hairLumSum / hairSampleCount : 45;
+  const avgCrownHairChroma = hairSampleCount > 10 ? hairChromaSum / hairSampleCount : 15;
+
+  // Subject has white/silver/grey hair ONLY if interior crown hair has high luminance (>= 98) and low chroma (< 35),
+  // AND white hair protection against white walls is only needed when the wall is achromatic (!isChromaticBg)!
+  const hasWhiteOrGreyHairOnLightWall =
+    !isChromaticBg && avgCrownHairLum >= 98 && avgCrownHairChroma < 38;
+
+  const cranialProtectMaxY = Math.min(
+    Math.round(height * 0.50),
+    Math.max(Math.round(height * 0.42), headTopY + Math.round(height * 0.35))
+  );
+  const shoulderZoneY = Math.round(height * 0.44);
+
+  // Local 3x3 texture energy
+  const textureMap = new Float32Array(totalPixels);
+  if (hasWhiteOrGreyHairOnLightWall) {
+    for (let y = 1; y < Math.min(height - 1, cranialProtectMaxY + 10); y++) {
+      const row = y * width;
+      for (let x = 1; x < width - 1; x++) {
+        const i = row + x;
+        const cL = lumMap[i];
+        const d1 = Math.abs(cL - lumMap[i - 1]);
+        const d2 = Math.abs(cL - lumMap[i + 1]);
+        const d3 = Math.abs(cL - lumMap[i - width]);
+        const d4 = Math.abs(cL - lumMap[i + width]);
+        textureMap[i] = (d1 + d2 + d3 + d4) * 0.25;
+      }
     }
   }
 
@@ -241,9 +285,8 @@ function refineMaskWithHighResImage(
   const distInsideFg = new Float32Array(totalPixels);
 
   for (let i = 0; i < totalPixels; i++) {
-    // Use lower threshold (65) for cranial hair dome so fine/white hair on crown & temples is inside the initial boundary
     const y = (i / width) | 0;
-    const fgThresh = y < cranialProtectMaxY ? 60 : 95;
+    const fgThresh = hasWhiteOrGreyHairOnLightWall && y < cranialProtectMaxY ? 60 : 95;
     if (coarseAlpha[i] >= fgThresh) {
       distOutsideFg[i] = 0;
       distInsideFg[i] = 9999;
@@ -310,12 +353,11 @@ function refineMaskWithHighResImage(
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Edge-Guarded Background Flood-Fill into the Trimap Band
-  //    CRITICAL WHITE HAIR PROTECTION:
-  //    In the Cranial/Hair Zone (y < cranialProtectMaxY), NEVER flood into coarseAlpha >= 50!
-  //    Background flood-fill only cleans out neck/collar/shoulder background pockets below the head!
+  // 4. Edge-Guarded Background Flood-Fill + Chromatic Backdrop Keying
+  //    - For Blue/Cyan/Red backdrops (or dark-haired subjects): floods cleanly right up to the hair, ear, neck, and suit edge!
+  //    - For White-Haired subjects on a White wall: protects the cranial white hair dome!
   // ---------------------------------------------------------------------------
-  const maxErodePx = Math.max(12, Math.round(width * 0.042));
+  const maxErodePx = Math.max(14, Math.round(width * 0.046));
   const maxDilatePx = Math.max(14, Math.round(width * 0.048));
 
   const confirmedBg = new Uint8Array(totalPixels);
@@ -333,14 +375,28 @@ function refineMaskWithHighResImage(
     return Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
   };
 
+  // Helper: checks if a pixel strongly exhibits the chromatic signature of a blue/cyan or red studio backdrop
+  const hasBackdropChroma = (idx: number): boolean => {
+    const p = idx * 4;
+    const r = srcData[p], g = srcData[p + 1], b = srcData[p + 2];
+    if (isBlueOrCyanBg) {
+      return (b > r + 22 && b > 75) || (g > r + 20 && b > r + 15 && b > 70);
+    }
+    if (isRedBg) {
+      return r > g + 35 && r > b + 35 && !isSkinColor(r, g, b);
+    }
+    return false;
+  };
+
   for (let y = 0; y < height; y++) {
     const row = y * width;
     for (let x = 0; x < width; x++) {
       const i = row + x;
-      const isBorder = y <= 2 || ((x <= 2 || x >= width - 3) && y < height * 0.65);
+      const isBorder = y <= 2 || ((x <= 2 || x >= width - 3) && y < height * 0.70);
       if (
-        (coarseAlpha[i] < 16 && bgDistMap[i] < 32) ||
-        (isBorder && coarseAlpha[i] < 45 && bgDistMap[i] < 36)
+        (coarseAlpha[i] < 20 && bgDistMap[i] < 36) ||
+        (isBorder && coarseAlpha[i] < 120 && bgDistMap[i] < 44) ||
+        (isChromaticBg && coarseAlpha[i] < 95 && bgDistMap[i] < 34 && hasBackdropChroma(i))
       ) {
         visitedBg[i] = 1;
         confirmedBg[i] = 1;
@@ -369,26 +425,29 @@ function refineMaskWithHighResImage(
       const nx = ni % width;
       const cAlpha = coarseAlpha[ni];
 
-      // WHITE / SILVER HAIR DOME PROTECTION:
-      // Above cranialProtectMaxY (crown, forehead, temples/sideburns), white hair has almost the same color
-      // as a white wall! Never let background color flood-fill enter the semantic head/hair mask!
-      if (ny < cranialProtectMaxY) {
+      // Only block cranial flood-fill if the subject genuinely has white/grey hair on a white/grey wall!
+      if (hasWhiteOrGreyHairOnLightWall && ny < cranialProtectMaxY) {
         if (cAlpha >= 48) continue;
-        // Also stop if pixel has hair micro-texture and non-negligible mask probability
         if (cAlpha >= 24 && textureMap[ni] > 2.2) continue;
       }
 
       const isLateralPocketZone =
         ny >= cranialProtectMaxY && ny < height * 0.88 && (nx < width * 0.38 || nx > width * 0.62);
-      const allowedDepth = isLateralPocketZone ? maxErodePx * 1.45 : ny < cranialProtectMaxY ? 1.5 : maxErodePx;
+      const allowedDepth = isLateralPocketZone
+        ? maxErodePx * 1.45
+        : hasWhiteOrGreyHairOnLightWall && ny < cranialProtectMaxY
+        ? 1.5
+        : maxErodePx;
 
       if (distInsideFg[ni] > allowedDepth) continue;
 
       const step = colorStep(curr, ni);
       const bDist = bgDistMap[ni];
+      const isChromaMatch = isChromaticBg && hasBackdropChroma(ni);
 
-      const maxStep = cAlpha < 110 ? 15.5 : 11.5;
-      const maxBgDist = cAlpha < 90 ? 38 : cAlpha < 175 ? 30 : 22;
+      // For blue/cyan/red studio backdrops, allow slightly wider tolerance to eat up the entire blue/cyan halo right up to the hair/suit edge!
+      const maxStep = isChromaMatch ? 22.0 : cAlpha < 110 ? 16.0 : 12.0;
+      const maxBgDist = isChromaMatch ? 46 : cAlpha < 90 ? 38 : cAlpha < 185 ? 32 : 24;
 
       if (step <= maxStep && bDist <= maxBgDist) {
         visitedBg[ni] = 1;
@@ -399,7 +458,7 @@ function refineMaskWithHighResImage(
   }
 
   // ---------------------------------------------------------------------------
-  // 5. High-Resolution Foreground Recovery (White Hair Dome + Clothing/Shoulders)
+  // 5. High-Resolution Foreground Recovery (Hair + Face + Smooth Clothing/Shoulders)
   // ---------------------------------------------------------------------------
   const refinedMask = new Float32Array(totalPixels);
   const confirmedFg = new Uint8Array(totalPixels);
@@ -411,12 +470,20 @@ function refineMaskWithHighResImage(
     if (confirmedBg[i]) continue;
     const y = (i / width) | 0;
     const cA = coarseAlpha[i];
+    const bDist = bgDistMap[i];
 
-    // In the cranial/hair zone, trust semantic mask (cA >= 105) regardless of bgDistMap so white hair is 100% solid!
-    const isSolidHeadOrHair = y < cranialProtectMaxY && cA >= 105;
-    const isSolidCore = distInsideFg[i] >= 3 || (cA >= 170 && bgDistMap[i] > 22);
+    // If pixel has strong studio blue/red backdrop chroma and is near the outer edge, never seed it as solid foreground!
+    if (isChromaticBg && distInsideFg[i] < 8 * scale && hasBackdropChroma(i) && bDist < 48) {
+      continue;
+    }
 
-    if (isSolidHeadOrHair || isSolidCore) {
+    const isSolidWhiteHair = hasWhiteOrGreyHairOnLightWall && y < cranialProtectMaxY && cA >= 105;
+    const isSolidCore =
+      (distInsideFg[i] >= 5 * scale && bDist > 22) ||
+      (distInsideFg[i] >= 8 * scale) ||
+      (cA >= 185 && bDist > (isChromaticBg ? 38 : 24));
+
+    if (isSolidWhiteHair || isSolidCore) {
       confirmedFg[i] = 1;
       visitedFg[i] = 1;
       queue[qTail++] = i;
@@ -445,12 +512,14 @@ function refineMaskWithHighResImage(
       const maxOut = isShoulderOrTorso ? maxDilatePx : isCranial ? 6 * scale : maxDilatePx * 0.65;
       if (distOutsideFg[ni] > maxOut) continue;
 
+      // Never recover a pixel as foreground if it carries the blue/cyan/red studio backdrop color!
+      if (isChromaticBg && hasBackdropChroma(ni) && bgDistMap[ni] < 52) continue;
+
       const bDist = bgDistMap[ni];
       const step = colorStep(curr, ni);
       const cA = coarseAlpha[ni];
 
-      // For cranial hair zone: recover white/silver hair strands where coarseAlpha >= 52 or textured hair
-      if (isCranial) {
+      if (hasWhiteOrGreyHairOnLightWall && isCranial) {
         if ((cA >= 62 && step <= 22) || (cA >= 35 && (bDist >= 16 || textureMap[ni] >= 2.5) && step <= 18)) {
           visitedFg[ni] = 1;
           confirmedFg[ni] = 1;
@@ -459,9 +528,8 @@ function refineMaskWithHighResImage(
         continue;
       }
 
-      // For shoulders & clothing: recover any clothing clipped by coarse mask waves
-      const minBgSeparation = isShoulderOrTorso ? 30 : 36;
-      const maxFgStep = isShoulderOrTorso ? 24 : 18;
+      const minBgSeparation = isShoulderOrTorso ? (isChromaticBg ? 42 : 30) : (isChromaticBg ? 45 : 36);
+      const maxFgStep = isShoulderOrTorso ? 22 : 17;
 
       if (bDist >= minBgSeparation && step <= maxFgStep) {
         visitedFg[ni] = 1;
@@ -482,27 +550,25 @@ function refineMaskWithHighResImage(
       const cA = coarseAlpha[i];
       const bDist = bgDistMap[i];
 
-      if (y < cranialProtectMaxY) {
-        // CRITICAL FOR WHITE HAIR:
-        // Never penalize cranial hair alpha by bgDistMap when cA >= 25!
-        // Boost [25, 105] smoothly to [0, 255] so white hair on crown & temples is full and non-broken!
+      if (hasWhiteOrGreyHairOnLightWall && y < cranialProtectMaxY) {
         if (cA <= 22) {
           refinedMask[i] = 0;
         } else if (cA >= 105) {
           refinedMask[i] = 255;
         } else {
           const t = (cA - 22) / (105 - 22);
-          // Concave boost curve so wispy white hair retains strong visibility
           refinedMask[i] = Math.round(255 * Math.pow(t, 0.72));
         }
       } else {
-        // Lower body / neck transition
-        if (bDist < 16) {
+        // For blue/cyan/red backdrops or dark-haired subjects: strictly key out pixels that match the backdrop!
+        const lowThresh = isChromaticBg ? 26 : 18;
+        const span = isChromaticBg ? 38 : 30;
+        if (bDist <= lowThresh) {
           refinedMask[i] = 0;
-        } else if (bDist > 48 && cA > 45 && distOutsideFg[i] < maxDilatePx * 0.8) {
+        } else if (bDist > lowThresh + span && cA > 65 && distOutsideFg[i] < maxDilatePx * 0.7) {
           refinedMask[i] = 255;
         } else {
-          const colorFactor = Math.max(0, Math.min(1, (bDist - 16) / 30));
+          const colorFactor = Math.max(0, Math.min(1, (bDist - lowThresh) / span));
           refinedMask[i] = cA * colorFactor;
         }
       }
@@ -510,7 +576,59 @@ function refineMaskWithHighResImage(
   }
 
   // ---------------------------------------------------------------------------
-  // 6. Fill Interior Holes & Smooth Shoulder/Clothing Contour Geometry
+  // 6. Chroma Spill Alpha Attenuation on Outer Boundary (Eliminates Blue/Cyan/Red Edge Fringe!)
+  // ---------------------------------------------------------------------------
+  if (isBlueOrCyanBg || isRedBg) {
+    const invW = 1 / Math.max(1, width - 1);
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      const lR = bgLeftR[y], lG = bgLeftG[y], lB = bgLeftB[y];
+      const rR = bgRightR[y], rG = bgRightG[y], rB = bgRightB[y];
+
+      for (let x = 0; x < width; x++) {
+        const i = row + x;
+        const curM = refinedMask[i];
+        if (curM === 0 || distInsideFg[i] > 9 * scale) continue;
+
+        const p = i * 4;
+        const r = srcData[p], g = srcData[p + 1], b = srcData[p + 2];
+        const t = x * invW;
+        const bR = lR * (1 - t) + rR * t;
+        const bG = lG * (1 - t) + rG * t;
+        const bB = lB * (1 - t) + rB * t;
+
+        if (isBlueOrCyanBg) {
+          // Excess blue/cyan relative to red channel:
+          // Human skin has R > B; dark hair and dark suits have B ≈ R.
+          // Any significant positive (B - R) or (0.6*B + 0.4*G - R) on the boundary comes from the blue/cyan backdrop!
+          const bgBlueExcess = Math.max(25, (bB * 0.65 + bG * 0.35) - bR);
+          const pixBlueExcess = (b * 0.65 + g * 0.35) - r;
+          if (pixBlueExcess > 8) {
+            const bgFraction = Math.max(0, Math.min(1, (pixBlueExcess - 6) / Math.max(15, bgBlueExcess * 0.82)));
+            if (bgFraction > 0.58) {
+              refinedMask[i] = 0;
+            } else {
+              refinedMask[i] = curM * (1 - bgFraction * 0.92);
+            }
+          }
+        } else if (isRedBg && !isSkinColor(r, g, b)) {
+          const bgRedExcess = Math.max(25, bR - (bG * 0.5 + bB * 0.5));
+          const pixRedExcess = r - (g * 0.5 + b * 0.5);
+          if (pixRedExcess > 14) {
+            const bgFraction = Math.max(0, Math.min(1, (pixRedExcess - 10) / Math.max(15, bgRedExcess * 0.85)));
+            if (bgFraction > 0.60) {
+              refinedMask[i] = 0;
+            } else {
+              refinedMask[i] = curM * (1 - bgFraction * 0.90);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. Fill Interior Holes & Smooth Shoulder/Clothing Contour Geometry
   // ---------------------------------------------------------------------------
   const isExterior = new Uint8Array(totalPixels);
   qHead = 0;
@@ -591,9 +709,9 @@ function refineMaskWithHighResImage(
       }
       const geoSmooth = sum / cnt;
       const bDist = bgDistMap[i];
-      if (confirmedBg[i] && bDist < 22) {
+      if (confirmedBg[i] && bDist < 26) {
         refinedMask[i] = 0;
-      } else if (confirmedFg[i] && bDist > 55) {
+      } else if (confirmedFg[i] && bDist > 55 && !(isChromaticBg && hasBackdropChroma(i))) {
         refinedMask[i] = 255;
       } else {
         refinedMask[i] = geoSmooth;
@@ -602,7 +720,7 @@ function refineMaskWithHighResImage(
   }
 
   // ---------------------------------------------------------------------------
-  // 7. Joint Bilateral Guided Alpha Filter (Snaps Sub-Pixel Alpha to Full-Res Image Edges)
+  // 8. Joint Bilateral Guided Alpha Filter (Snaps Sub-Pixel Alpha to Full-Res Image Edges)
   // ---------------------------------------------------------------------------
   const finalAlpha = new Uint8ClampedArray(totalPixels);
   const jbfRadius = Math.max(2, Math.min(4, Math.round(2.2 * scale)));
@@ -667,19 +785,20 @@ function refineMaskWithHighResImage(
       let a = weightSum > 0 ? weightedAlphaSum / weightSum : centerA;
 
       if (isTorso) {
-        if (a <= 45) {
+        if (a <= 55) {
           a = 0;
         } else if (a >= 210) {
           a = 255;
         } else {
-          const t = (a - 45) / (210 - 45);
+          const t = (a - 55) / (210 - 55);
           a = Math.round(255 * t * t * (3 - 2 * t));
         }
       } else {
-        // Head/hair/ears: solidify inner hair (a > 185 -> 255) so white hair never looks translucent against red/blue bg!
-        if (a < 20) {
+        const lowCut = isChromaticBg ? 38 : 22;
+        const highSolid = hasWhiteOrGreyHairOnLightWall ? 185 : 225;
+        if (a < lowCut) {
           a = 0;
-        } else if (a > 185) {
+        } else if (a > highSolid) {
           a = 255;
         }
       }
@@ -689,7 +808,8 @@ function refineMaskWithHighResImage(
   }
 
   // ---------------------------------------------------------------------------
-  // 8. Foreground Color Decontamination (Respects White/Silver Hair vs Dark Hair/Clothes)
+  // 9. Foreground Color Decontamination & Blue/Red Chroma Despill
+  //    Completely removes blue/cyan/red/white background color cast from boundary pixels!
   // ---------------------------------------------------------------------------
   const outImageData = new ImageData(width, height);
   const dst = outImageData.data;
@@ -704,7 +824,7 @@ function refineMaskWithHighResImage(
     for (let x = 0; x < width; x++) {
       const i = row + x;
       const p = i * 4;
-      const a = finalAlpha[i];
+      let a = finalAlpha[i];
 
       if (a === 0) {
         dst[p] = 0;
@@ -718,8 +838,41 @@ function refineMaskWithHighResImage(
       let g = srcData[p + 1];
       let b = srcData[p + 2];
 
-      // Decontaminate boundary pixels where 0 < a < 245, ONLY when pixel is darker than background
-      // (Never darken authentic white/silver hair on the head!)
+      // 9a. Chroma Despill for Blue/Cyan or Red Backdrops on outer boundary (distInsideFg < 10*scale or a < 250)
+      if ((isBlueOrCyanBg || isRedBg) && (a < 250 || distInsideFg[i] < 8 * scale)) {
+        if (isBlueOrCyanBg) {
+          // Sample inner non-blue pixel (shifted 6px toward portrait center)
+          const stepInX = x < midX ? Math.min(width - 1, x + Math.round(6 * scale)) : Math.max(0, x - Math.round(6 * scale));
+          const stepInY = y < height * 0.35 ? Math.min(height - 1, y + Math.round(6 * scale)) : y;
+          const inIdx = stepInY * width + stepInX;
+          const inP = inIdx * 4;
+          const inR = srcData[inP], inG = srcData[inP + 1], inB = srcData[inP + 2];
+
+          const blueExcess = b - Math.max(r, inB);
+          const cyanExcess = g - Math.max(r, inG);
+
+          if (blueExcess > 6 || cyanExcess > 6) {
+            // Suppress blue & cyan spill down to inner foreground's natural channel balance
+            if (finalAlpha[inIdx] > 210 && inB <= inR + 12) {
+              const spillRatio = Math.min(1, Math.max(blueExcess, cyanExcess) / 45);
+              r = Math.round(r * (1 - spillRatio * 0.7) + inR * (spillRatio * 0.7));
+              g = Math.round(Math.min(g, r * 0.5 + inG * 0.5));
+              b = Math.round(Math.min(b, r * 0.5 + inB * 0.5));
+            } else {
+              // Clamp blue and green to red channel (neutralizes cyan/blue fringe to natural dark grey/skin tone)
+              b = Math.min(b, Math.round(r * 1.02));
+              g = Math.min(g, Math.round(r * 1.02));
+            }
+          }
+        } else if (isRedBg && !isSkinColor(r, g, b)) {
+          const redExcess = r - Math.max(g, b);
+          if (redExcess > 12) {
+            r = Math.min(r, Math.round((g + b) * 0.52));
+          }
+        }
+      }
+
+      // 9b. Un-Premultiply Background Color Spill on semi-transparent boundary pixels (0 < a < 245)
       if (a < 245) {
         const t = x * invW;
         const bR = lR * (1 - t) + rR * t;
@@ -728,20 +881,12 @@ function refineMaskWithHighResImage(
         const bgLum = 0.299 * bR + 0.587 * bG + 0.114 * bB;
         const pixLum = lumMap[i];
 
-        // In cranial hair zone, check if inner neighbor (towards head center) is white/silver hair
-        let isWhiteHairEdge = false;
-        if (isCranial && pixLum > 115) {
-          const inX = x < midX ? Math.min(width - 1, x + 5) : Math.max(0, x - 5);
-          const inY = Math.min(height - 1, y + 5);
-          const inIdx = inY * width + inX;
-          if (finalAlpha[inIdx] > 200 && lumMap[inIdx] > 105) {
-            isWhiteHairEdge = true;
-          }
-        }
+        const isProtectedWhiteHair =
+          hasWhiteOrGreyHairOnLightWall && isCranial && pixLum > 110;
 
-        if (!isWhiteHairEdge && pixLum < bgLum - 20) {
+        if (!isProtectedWhiteHair && (isChromaticBg || pixLum < bgLum - 18)) {
           const alphaNorm = Math.max(0.35, a / 255);
-          const decontamStrength = (1 - a / 255) * 0.80;
+          const decontamStrength = (1 - a / 255) * 0.82;
           const trueR = Math.max(0, Math.min(255, (r - (1 - alphaNorm) * bR) / alphaNorm));
           const trueG = Math.max(0, Math.min(255, (g - (1 - alphaNorm) * bG) / alphaNorm));
           const trueB = Math.max(0, Math.min(255, (b - (1 - alphaNorm) * bB) / alphaNorm));
@@ -778,7 +923,7 @@ async function segmentWithMediaPipe(
     onProgress?.({
       stage: 'loading',
       progress: 25,
-      message: '正在调用本地高精度人像与白发/发丝保护分割引擎...',
+      message: '正在调用本地高精度人像与多底色净边分割引擎...',
     });
 
     const SelfieSegmentationClass = (window as any).SelfieSegmentation;
@@ -786,7 +931,6 @@ async function segmentWithMediaPipe(
       locateFile: (file: string) => `/mediapipe/selfie_segmentation/${file}`,
     });
 
-    // Model 0 (256x256 General model) has 78% higher vertical resolution than Model 1 (256x144)
     selfie.setOptions({
       modelSelection: 0,
       selfieMode: false,
@@ -798,7 +942,7 @@ async function segmentWithMediaPipe(
     onProgress?.({
       stage: 'processing',
       progress: 55,
-      message: 'AI 正在精细保护白发/发丝轮廓并对齐双肩衣服...',
+      message: 'AI 正在智能消除背景色溢并对齐发丝与双肩衣服...',
     });
 
     return await new Promise((resolve, reject) => {
@@ -820,7 +964,7 @@ async function segmentWithMediaPipe(
           srcCtx.drawImage(imageSource, 0, 0, width, height);
           const srcImgData = srcCtx.getImageData(0, 0, width, height);
 
-          // 2. Extract coarse semantic probability mask onto an opaque white canvas with destination-in
+          // 2. Extract coarse semantic probability mask
           const maskCanvas = document.createElement('canvas');
           maskCanvas.width = width;
           maskCanvas.height = height;
@@ -837,7 +981,7 @@ async function segmentWithMediaPipe(
             coarseAlpha[i] = rawMaskData[i * 4 + 3];
           }
 
-          // 3. Run High-Resolution Trimap & Joint Bilateral Edge-Snapping Refinement
+          // 3. Run High-Resolution Trimap, Chroma-Unmixing & Joint Bilateral Edge-Snapping Refinement
           const refinedImageData = refineMaskWithHighResImage(
             srcImgData.data,
             coarseAlpha,
@@ -880,14 +1024,12 @@ async function segmentWithMediaPipe(
 
 /**
  * Remove background using client-side AI neural network model + High-Res Edge Snapping.
- * Ideal for complex real-world photos, uneven shadows, gradients, and portraits.
  */
 export async function removeBackgroundWithAI(
   imageSource: File | Blob | ImageData | HTMLImageElement | string,
   cacheKey?: string,
   onProgress?: (info: AiRemovalProgress) => void
 ): Promise<{ blob: Blob; url: string; imageData: ImageData; width: number; height: number }> {
-  // Check cache first
   if (cacheKey && aiResultCache.has(cacheKey)) {
     const cached = aiResultCache.get(cacheKey)!;
     return {
@@ -961,7 +1103,7 @@ export async function removeBackgroundWithAI(
       onProgress?.({
         stage: 'finishing',
         progress: 100,
-        message: 'AI 智能抠图完成！白发/发丝与衣服边缘均已完整保护',
+        message: 'AI 智能抠图完成！蓝/红/白底色溢已净除，人像与衣服平滑自然',
       });
       return mediaPipeResult;
     }
@@ -1159,7 +1301,6 @@ export async function smartEdgeGuidedKeying(
   let head = 0;
   let tail = 0;
 
-  // Protect central cranial arch (x in [0.22w, 0.78w], y in [0.10h, 0.55h]) from fallback flood
   const archCenterX = width * 0.5;
   const archCenterY = height * 0.36;
   const archRx = width * 0.27;
@@ -1203,7 +1344,6 @@ export async function smartEdgeGuidedKeying(
       const nx = ni % width;
       const ny = (ni / width) | 0;
 
-      // Never flood inside the central cranial ellipse
       const dxNorm = (nx - archCenterX) / archRx;
       const dyNorm = (ny - archCenterY) / archRy;
       if (dxNorm * dxNorm + dyNorm * dyNorm <= 1.0) continue;

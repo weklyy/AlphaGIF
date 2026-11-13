@@ -1067,6 +1067,277 @@ export function applyEyedropperTransparent(
   return result;
 }
 
+/**
+ * Recolor Cut-out Text / Calligraphy / Subject Pixels
+ * Supports:
+ * - Full image subject recolor (all non-transparent pixels, or auto-detected foreground if image is still opaque)
+ * - Rectangular region recolor (rect)
+ * - Brush/Lasso masked recolor (mask)
+ * - Contiguous connected component recolor on click (clickPoint)
+ * - Solid crisp fill (preserving smooth anti-aliased alpha) vs Tint (preserving ink shading / luminance hierarchy)
+ * - Smart white-paper edge halo conversion to smooth alpha for calligraphy cutouts
+ */
+export function applySubjectRecolor(
+  sourceData: ImageData,
+  targetHex: string,
+  opts?: {
+    mask?: Uint8Array;
+    rect?: { x: number; y: number; width: number; height: number };
+    clickPoint?: { x: number; y: number; tolerance?: number };
+    style?: 'solid' | 'tint';
+    cleanEdges?: boolean;
+  }
+): ImageData {
+  const width = sourceData.width;
+  const height = sourceData.height;
+  const totalPixels = width * height;
+  const result = new ImageData(new Uint8ClampedArray(sourceData.data), width, height);
+  const data = result.data;
+  const src = sourceData.data;
+
+  const [tr, tg, tb] = hexToRgb(targetHex);
+  const style = opts?.style ?? 'solid';
+  const cleanEdges = opts?.cleanEdges ?? true;
+
+  // 1. Check whether the image already has transparent background pixels
+  let transparentCount = 0;
+  let opaqueLumSum = 0;
+  let opaqueCount = 0;
+  for (let i = 0; i < totalPixels; i += 4) {
+    const p = i * 4;
+    const a = src[p + 3];
+    if (a < 30) {
+      transparentCount++;
+    } else if (a > 180) {
+      const lum = 0.299 * src[p] + 0.587 * src[p + 1] + 0.114 * src[p + 2];
+      opaqueLumSum += lum;
+      opaqueCount++;
+    }
+  }
+  const hasTransparency = transparentCount > Math.max(8, totalPixels * 0.002);
+  const avgOpaqueLum = opaqueCount > 0 ? opaqueLumSum / opaqueCount : 0;
+
+  // If image has NO transparency yet, detect background color from border pixels
+  let bgR = 255;
+  let bgG = 255;
+  let bgB = 255;
+  if (!hasTransparency) {
+    let rSum = 0;
+    let gSum = 0;
+    let bSum = 0;
+    let bCnt = 0;
+    const stepX = Math.max(1, Math.floor(width / 20));
+    const stepY = Math.max(1, Math.floor(height / 20));
+    for (let x = 0; x < width; x += stepX) {
+      const pTop = x * 4;
+      const pBot = ((height - 1) * width + x) * 4;
+      rSum += src[pTop] + src[pBot];
+      gSum += src[pTop + 1] + src[pBot + 1];
+      bSum += src[pTop + 2] + src[pBot + 2];
+      bCnt += 2;
+    }
+    for (let y = 0; y < height; y += stepY) {
+      const pLeft = (y * width) * 4;
+      const pRight = (y * width + (width - 1)) * 4;
+      rSum += src[pLeft] + src[pRight];
+      gSum += src[pLeft + 1] + src[pRight + 1];
+      bSum += src[pLeft + 2] + src[pRight + 2];
+      bCnt += 2;
+    }
+    if (bCnt > 0) {
+      bgR = Math.round(rSum / bCnt);
+      bgG = Math.round(gSum / bCnt);
+      bgB = Math.round(bSum / bCnt);
+    }
+  }
+
+  // 2. Build active region selection mask (0..255 weight per pixel)
+  let regionMask: Uint8Array | null = null;
+
+  if (opts?.mask) {
+    regionMask = opts.mask;
+  } else if (opts?.rect) {
+    regionMask = new Uint8Array(totalPixels);
+    const rx = Math.max(0, Math.min(width, Math.round(opts.rect.x)));
+    const ry = Math.max(0, Math.min(height, Math.round(opts.rect.y)));
+    const rw = Math.max(0, Math.min(width - rx, Math.round(opts.rect.width)));
+    const rh = Math.max(0, Math.min(height - ry, Math.round(opts.rect.height)));
+    for (let y = ry; y < ry + rh; y++) {
+      const row = y * width;
+      for (let x = rx; x < rx + rw; x++) {
+        regionMask[row + x] = 255;
+      }
+    }
+  } else if (opts?.clickPoint) {
+    // Flood-fill connected non-transparent character stroke (or similar color region)
+    regionMask = new Uint8Array(totalPixels);
+    const sx = Math.max(0, Math.min(width - 1, Math.round(opts.clickPoint.x)));
+    const sy = Math.max(0, Math.min(height - 1, Math.round(opts.clickPoint.y)));
+    const startIdx = sy * width + sx;
+    const sp = startIdx * 4;
+    const startA = src[sp + 3];
+
+    // If user clicked slightly off a thin stroke, search a small 4px radius for nearest opaque pixel
+    let seedIdx = startIdx;
+    if (startA < 15) {
+      let found = false;
+      for (let r = 1; r <= 5 && !found; r++) {
+        for (let dy = -r; dy <= r && !found; dy++) {
+          for (let dx = -r; dx <= r && !found; dx++) {
+            const nx = sx + dx;
+            const ny = sy + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+              const nIdx = ny * width + nx;
+              if (src[nIdx * 4 + 3] >= 25) {
+                seedIdx = nIdx;
+                found = true;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const seedP = seedIdx * 4;
+    if (src[seedP + 3] >= 10) {
+      const seedR = src[seedP];
+      const seedG = src[seedP + 1];
+      const seedB = src[seedP + 2];
+      const tol = opts.clickPoint.tolerance ?? 65;
+      const maxColorDist = (tol / 100) * 441.67;
+
+      const visited = new Uint8Array(totalPixels);
+      const queue: number[] = [seedIdx];
+      visited[seedIdx] = 1;
+      regionMask[seedIdx] = 255;
+
+      let head = 0;
+      while (head < queue.length) {
+        const curr = queue[head++];
+        const cx = curr % width;
+        const cy = Math.floor(curr / width);
+
+        // 8-connected neighbors so diagonal calligraphy brush strokes stay connected
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = cy + dy;
+          if (ny < 0 || ny >= height) continue;
+          const nRow = ny * width;
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = cx + dx;
+            if (nx < 0 || nx >= width) continue;
+            const nIdx = nRow + nx;
+            if (visited[nIdx]) continue;
+            visited[nIdx] = 1;
+
+            const np = nIdx * 4;
+            const na = src[np + 3];
+            if (hasTransparency) {
+              if (na >= 8) {
+                regionMask[nIdx] = 255;
+                queue.push(nIdx);
+              }
+            } else {
+              const dist = Math.hypot(src[np] - seedR, src[np + 1] - seedG, src[np + 2] - seedB);
+              if (dist <= maxColorDist) {
+                regionMask[nIdx] = 255;
+                queue.push(nIdx);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Apply color transformation across selected pixels
+  for (let i = 0; i < totalPixels; i++) {
+    const maskWeight = regionMask ? regionMask[i] / 255 : 1.0;
+    if (maskWeight <= 0) continue;
+
+    const p = i * 4;
+    const origR = src[p];
+    const origG = src[p + 1];
+    const origB = src[p + 2];
+    const origA = src[p + 3];
+
+    if (hasTransparency) {
+      // Skip transparent background pixels
+      if (origA <= 4) continue;
+
+      let outAlpha = origA;
+
+      // Smart white-paper edge halo cleanup for dark calligraphy/text cutouts:
+      // When dark text was cut out from white paper, 1-2px border pixels touching transparent background
+      // often have high luminance (light gray paper remnant) with high alpha.
+      // Converting their brightness into smooth alpha eliminates white/gray jagged fringes when recoloring!
+      if (cleanEdges && avgOpaqueLum < 145) {
+        const lum = 0.299 * origR + 0.587 * origG + 0.114 * origB;
+        const maxCh = Math.max(origR, origG, origB);
+        const minCh = Math.min(origR, origG, origB);
+        const isLowSatLight = lum > 135 && (maxCh - minCh) < 45;
+
+        if (isLowSatLight) {
+          const x = i % width;
+          const y = Math.floor(i / width);
+          const nearTransparent =
+            (x > 0 && src[(i - 1) * 4 + 3] < 35) ||
+            (x < width - 1 && src[(i + 1) * 4 + 3] < 35) ||
+            (y > 0 && src[(i - width) * 4 + 3] < 35) ||
+            (y < height - 1 && src[(i + width) * 4 + 3] < 35) ||
+            (x > 1 && src[(i - 2) * 4 + 3] < 20) ||
+            (x < width - 2 && src[(i + 2) * 4 + 3] < 20) ||
+            (y > 1 && src[(i - width * 2) * 4 + 3] < 20) ||
+            (y < height - 2 && src[(i + width * 2) * 4 + 3] < 20);
+
+          if (nearTransparent) {
+            const inkFactor = Math.max(0.05, Math.min(1.0, (250 - lum) / 115));
+            outAlpha = Math.round(origA * inkFactor);
+          }
+        }
+      }
+
+      let newR = tr;
+      let newG = tg;
+      let newB = tb;
+
+      if (style === 'tint') {
+        // Preserve subtle ink concentration / tonal shading while applying target hue
+        const lum = (0.299 * origR + 0.587 * origG + 0.114 * origB) / 255;
+        // Map original luminance contrast around 0.72..1.18 multiplier so dark ink still takes the full target color
+        const shadeFactor = 0.75 + lum * 0.4;
+        newR = Math.max(0, Math.min(255, Math.round(tr * shadeFactor)));
+        newG = Math.max(0, Math.min(255, Math.round(tg * shadeFactor)));
+        newB = Math.max(0, Math.min(255, Math.round(tb * shadeFactor)));
+      }
+
+      if (maskWeight >= 0.99) {
+        data[p] = newR;
+        data[p + 1] = newG;
+        data[p + 2] = newB;
+        data[p + 3] = outAlpha;
+      } else {
+        data[p] = Math.round(origR * (1 - maskWeight) + newR * maskWeight);
+        data[p + 1] = Math.round(origG * (1 - maskWeight) + newG * maskWeight);
+        data[p + 2] = Math.round(origB * (1 - maskWeight) + newB * maskWeight);
+        data[p + 3] = Math.round(origA * (1 - maskWeight) + outAlpha * maskWeight);
+      }
+    } else {
+      // Image is still opaque (background not removed yet):
+      // Recolor foreground pixels based on color distance from detected background
+      const distFromBg = Math.hypot(origR - bgR, origG - bgG, origB - bgB);
+      if (distFromBg < 28) continue;
+
+      const fgStrength = Math.max(0, Math.min(1, (distFromBg - 28) / 95)) * maskWeight;
+      data[p] = Math.round(origR * (1 - fgStrength) + tr * fgStrength);
+      data[p + 1] = Math.round(origG * (1 - fgStrength) + tg * fgStrength);
+      data[p + 2] = Math.round(origB * (1 - fgStrength) + tb * fgStrength);
+    }
+  }
+
+  return result;
+}
+
 // -----------------------------------------------------------------
 // AI Subject Detection & Auto-Centering
 // -----------------------------------------------------------------

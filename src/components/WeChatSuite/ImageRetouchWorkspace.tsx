@@ -47,6 +47,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Type,
+  Palette,
 } from 'lucide-react';
 import { RetouchTool, RetouchOptions, FrameInfo } from '../../types';
 import {
@@ -79,6 +80,7 @@ import {
   applyRemoveAllTransparency,
   applyCloneStampDab,
   applyCloneStampSegment,
+  applySubjectRecolor,
 } from '../../utils/imageInpainting';
 import {
   applyWhiteOutline,
@@ -91,6 +93,18 @@ import {
 } from '../../utils/gifProcessor';
 import { removeSquareFrameBorder } from '../../utils/frameBorderRemover';
 import { removeBackgroundWithAI } from '../../utils/aiBackgroundRemoval';
+
+const RECOLOR_PRESETS = [
+  { hex: '#d91616', name: '中国红' },
+  { hex: '#d4af37', name: '书法金' },
+  { hex: '#ef4444', name: '朱砂红' },
+  { hex: '#f59e0b', name: '琥珀金' },
+  { hex: '#2563eb', name: '宝石蓝' },
+  { hex: '#059669', name: '翡翠绿' },
+  { hex: '#7c3aed', name: '紫罗兰' },
+  { hex: '#ffffff', name: '纯白' },
+  { hex: '#111827', name: '纯黑' },
+];
 
 interface ImageRetouchWorkspaceProps {
   initialFile?: File | null;
@@ -141,6 +155,10 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     cloneStampFeather: 30,
     cloneStampOpacity: 100,
     cloneStampAligned: true,
+    recolorColor: '#d91616',
+    recolorScope: 'all',
+    recolorStyle: 'solid',
+    recolorCleanEdges: true,
     textString: '收到',
     textFontSize: 22,
     textColor: '#ffffff',
@@ -521,6 +539,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         setOptions((prev) => ({ ...prev, tool: 'eraser' }));
       } else if (e.key === 'h' || e.key === 'H') {
         setOptions((prev) => ({ ...prev, tool: 'pan' }));
+      } else if (!e.ctrlKey && !e.metaKey && (e.key === 'c' || e.key === 'C')) {
+        setOptions((prev) => ({ ...prev, tool: 'recolor' }));
       }
     };
 
@@ -661,16 +681,20 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       oCtx.save();
       const isTrans = options.tool === 'rect-transparent';
       const isMosaic = options.tool === 'mosaic';
+      const isRecolor = options.tool === 'recolor';
+      const recolorHex = options.recolorColor || '#d91616';
       // Translucent fill
       oCtx.fillStyle = isTrans
         ? 'rgba(6, 182, 212, 0.25)'
         : isMosaic
         ? 'rgba(99, 102, 241, 0.25)'
+        : isRecolor
+        ? `${recolorHex}40`
         : 'rgba(239, 68, 68, 0.25)';
       oCtx.fillRect(marqueeRect.x, marqueeRect.y, marqueeRect.width, marqueeRect.height);
 
       // Marching ants / dashed border
-      oCtx.strokeStyle = isTrans ? '#06b6d4' : isMosaic ? '#6366f1' : '#ef4444';
+      oCtx.strokeStyle = isTrans ? '#06b6d4' : isMosaic ? '#6366f1' : isRecolor ? recolorHex : '#ef4444';
       oCtx.lineWidth = 2 / zoom;
       oCtx.setLineDash([4 / zoom, 4 / zoom]);
       oCtx.strokeRect(marqueeRect.x, marqueeRect.y, marqueeRect.width, marqueeRect.height);
@@ -796,7 +820,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     }
   };
 
-  // Execute inpaint or transparent erasure on current mask
+  // Execute inpaint, transparent erasure, or brush recolor on current mask
   const executeInpaint = () => {
     if (!mainCanvasRef.current || !maskCanvasRef.current || historyIndex < 0) return;
     const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
@@ -824,6 +848,12 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       } else if (options.tool === 'brush-restore') {
         if (!originalImageDataRef.current) return sourceData;
         return applyRestoreOriginal(sourceData, originalImageDataRef.current, maskArray);
+      } else if (options.tool === 'recolor') {
+        return applySubjectRecolor(sourceData, options.recolorColor || '#d91616', {
+          mask: maskArray,
+          style: options.recolorStyle ?? 'solid',
+          cleanEdges: options.recolorCleanEdges ?? true,
+        });
       } else if (options.tool === 'mosaic' || (options.tool === 'brush-remove' && options.mosaicStyle === 'blur')) {
         if (options.mosaicStyle === 'blur') {
           return applyBlur(sourceData, maskArray, options.blurRadius);
@@ -846,13 +876,58 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       setGifFrames(updatedFrames);
       pushHistory(repairedData);
       clearOverlay();
-      showToast?.(`已将消除操作同步应用至全部 ${gifFrames.length} 帧！`);
+      showToast?.(
+        options.tool === 'recolor'
+          ? `🎨 已将涂抹改色同步应用至全部 ${gifFrames.length} 帧！`
+          : `已将消除操作同步应用至全部 ${gifFrames.length} 帧！`
+      );
       return;
     }
 
     pushHistory(repairedData);
     clearOverlay();
-    showToast?.('消除完成！已智能融合周围纹理');
+    showToast?.(
+      options.tool === 'recolor'
+        ? `🎨 已将涂抹区域文字/主体改色为 ${options.recolorColor || '#d91616'}！`
+        : '消除完成！已智能融合周围纹理'
+    );
+  };
+
+  // One-click recolor all extracted text / non-transparent subject across the full image
+  const handleApplyFullRecolor = (overrideHex?: string, overrideStyle?: 'solid' | 'tint') => {
+    if (!mainCanvasRef.current || historyIndex < 0) return;
+    const targetHex = overrideHex || options.recolorColor || '#d91616';
+    const targetStyle = overrideStyle || options.recolorStyle || 'solid';
+    const cleanEdges = options.recolorCleanEdges ?? true;
+
+    const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
+    const currentData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+
+    const processFrameRecolor = (src: ImageData): ImageData =>
+      applySubjectRecolor(src, targetHex, {
+        style: targetStyle,
+        cleanEdges,
+      });
+
+    const recoloredData = processFrameRecolor(currentData);
+
+    if (isGif && applyToAllFrames && gifFrames.length > 1) {
+      const updatedFrames = gifFrames.map((f, idx) => {
+        if (idx === currentFrameIdx) return { ...f, imageData: recoloredData };
+        return { ...f, imageData: processFrameRecolor(f.imageData) };
+      });
+      setGifFrames(updatedFrames);
+      pushHistory(recoloredData);
+      clearOverlay();
+      const presetName = RECOLOR_PRESETS.find((p) => p.hex.toLowerCase() === targetHex.toLowerCase())?.name;
+      showToast?.(`🎨 已将全部 ${gifFrames.length} 帧的文字/主体更换为${presetName ? `「${presetName}」` : ''} (${targetHex})！`);
+      return;
+    }
+
+    pushHistory(recoloredData);
+    clearOverlay();
+    const presetName = RECOLOR_PRESETS.find((p) => p.hex.toLowerCase() === targetHex.toLowerCase())?.name;
+    showToast?.(`🎨 已将文字/主体颜色更改为${presetName ? `「${presetName}」` : ''} (${targetHex})！`);
   };
 
   // Helper to burn styled text onto an ImageData frame
@@ -1002,6 +1077,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         ? '#06b6d4'
         : tool === 'brush-restore'
         ? '#10b981'
+        : tool === 'recolor'
+        ? options.recolorColor || '#d91616'
         : tool === 'mosaic' || tool === 'blur'
         ? '#8b5cf6'
         : '#ff4757';
@@ -1050,6 +1127,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         ? '#06b6d4'
         : tool === 'brush-restore'
         ? '#10b981'
+        : tool === 'recolor'
+        ? options.recolorColor || '#d91616'
         : tool === 'mosaic' || tool === 'blur'
         ? '#8b5cf6'
         : '#ff4757';
@@ -1084,6 +1163,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
     oCtx.lineCap = 'round';
     oCtx.lineJoin = 'round';
     oCtx.beginPath();
+    mCtx.moveTo(from.x, from.y);
     oCtx.moveTo(from.x, from.y);
     oCtx.lineTo(to.x, to.y);
     oCtx.stroke();
@@ -1257,6 +1337,39 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       clearOverlay();
       showToast?.(`已吸取颜色 rgb(${targetRgb.join(',')}) 并清除为透明！可继续点击其他区域同时消除。`);
       return;
+    }
+
+    // Recolor Tool Canvas Interaction (点击单字连通改色 / 框选改色 / 涂抹改色)
+    if (options.tool === 'recolor') {
+      const scope = options.recolorScope || 'all';
+      if (scope === 'click') {
+        if (!mainCanvasRef.current || historyIndex < 0) return;
+        const ctx = mainCanvasRef.current.getContext('2d', { willReadFrequently: true })!;
+        const currentData = ctx.getImageData(0, 0, imageSize.width, imageSize.height);
+        const targetHex = options.recolorColor || '#d91616';
+        const resultData = applySubjectRecolor(currentData, targetHex, {
+          clickPoint: { x: coords.x, y: coords.y, tolerance: 65 },
+          style: options.recolorStyle ?? 'solid',
+          cleanEdges: options.recolorCleanEdges ?? true,
+        });
+        pushHistory(resultData);
+        clearOverlay();
+        showToast?.(`🎨 已将点击处的笔画/区域更改为 ${targetHex}！`);
+        return;
+      } else if (scope === 'brush') {
+        isDrawingRef.current = true;
+        setIsDrawing(true);
+        lastCoordRef.current = coords;
+        drawStartDot(coords, 'recolor', options.brushSize);
+        setHasActiveMask(true);
+        return;
+      } else {
+        // In 'all' or 'rect' scope, dragging on canvas allows rectangular local recolor!
+        setIsSelectingRect(true);
+        rectStartPosRef.current = coords;
+        setMarqueeRect({ x: coords.x, y: coords.y, width: 0, height: 0 });
+        return;
+      }
     }
 
     // Text tool click reposition
@@ -1435,7 +1548,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       renderOverlay();
     } else if (
       isDrawingRef.current &&
-      ['brush-remove', 'brush-transparent', 'brush-restore', 'mosaic', 'blur', 'eraser'].includes(options.tool)
+      ['brush-remove', 'brush-transparent', 'brush-restore', 'recolor', 'mosaic', 'blur', 'eraser'].includes(options.tool)
     ) {
       // Direct incremental line on 2D context - ultra-responsive 120 FPS
       const bSize = options.tool === 'eraser' ? options.eraserSize : options.brushSize;
@@ -1460,6 +1573,12 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         const processRectOnFrame = (src: ImageData): ImageData => {
           if (options.tool === 'rect-transparent') {
             return applyRectTransparent(src, marqueeRect);
+          } else if (options.tool === 'recolor') {
+            return applySubjectRecolor(src, options.recolorColor || '#d91616', {
+              rect: marqueeRect,
+              style: options.recolorStyle ?? 'solid',
+              cleanEdges: options.recolorCleanEdges ?? true,
+            });
           } else if (options.tool === 'mosaic') {
             const mask = new Uint8Array(imageSize.width * imageSize.height);
             const rx = Math.round(marqueeRect.x);
@@ -1494,6 +1613,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
           showToast?.(
             options.tool === 'rect-transparent'
               ? `已将框选区域同步清除为透明底至全部 ${gifFrames.length} 帧！`
+              : options.tool === 'recolor'
+              ? `🎨 已将框选区域文字/主体同步改色至全部 ${gifFrames.length} 帧！`
               : `已将框选去除水印/错误文字同步应用至全部 ${gifFrames.length} 帧！`
           );
           return;
@@ -1504,6 +1625,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
         showToast?.(
           options.tool === 'rect-transparent'
             ? '已将所选矩形框区域清除为 100% 透明底！'
+            : options.tool === 'recolor'
+            ? `🎨 已将所选框内文字/主体改色为 ${options.recolorColor || '#d91616'}！`
             : '已圈选并智能去除水印/文字！'
         );
       } else {
@@ -1538,6 +1661,11 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
       }
       if (options.tool === 'brush-restore') {
         // Restore original image content immediately upon releasing mouse stroke
+        executeInpaint();
+        return;
+      }
+      if (options.tool === 'recolor') {
+        // Execute brush recolor immediately upon releasing mouse stroke
         executeInpaint();
         return;
       }
@@ -2310,7 +2438,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                   type="button"
                   onClick={() => {
                     setRetouchMode('transparent');
-                    if (!['brush-transparent', 'rect-transparent', 'color-transparent', 'brush-restore'].includes(options.tool)) {
+                    if (!['brush-transparent', 'rect-transparent', 'color-transparent', 'brush-restore', 'recolor'].includes(options.tool)) {
                       setOptions((prev) => ({ ...prev, tool: 'brush-transparent' }));
                     }
                   }}
@@ -2337,6 +2465,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                     { id: 'rect-remove', label: '矩形', icon: Square, key: 'R', color: 'text-indigo-600' },
                     { id: 'lasso-remove', label: '套索', icon: Lasso, key: 'L', color: 'text-purple-600' },
                     { id: 'mosaic', label: '打码', icon: Grid, key: 'M', color: 'text-amber-600' },
+                    { id: 'recolor', label: '文字/主体改色', icon: Palette, key: 'C', color: 'text-rose-600' },
                     { id: 'text', label: '文字改字', icon: Type, key: 'T', color: 'text-blue-600' },
                     { id: 'eraser', label: '修选区', icon: RotateCcw, key: 'E', color: 'text-stone-600' },
                     { id: 'pan', label: '抓手', icon: Hand, key: 'H', color: 'text-emerald-600' },
@@ -2368,6 +2497,7 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                     { id: 'rect-transparent', label: '框选透底', icon: Square, key: 'Q', color: 'text-cyan-700' },
                     { id: 'color-transparent', label: '吸管抠色', icon: Pipette, key: 'I', color: 'text-cyan-700' },
                     { id: 'brush-restore', label: '消除透底', icon: RotateCcw, key: 'U', color: 'text-emerald-700' },
+                    { id: 'recolor', label: '文字/主体改色', icon: Palette, key: 'C', color: 'text-rose-600' },
                   ].map((t) => {
                     const Icon = t.icon;
                     const active = options.tool === t.id;
@@ -2378,12 +2508,16 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                         onClick={() => setOptions((prev) => ({ ...prev, tool: t.id as RetouchTool }))}
                         className={`h-7 flex items-center gap-1 px-2 rounded-md text-xs font-bold transition-all cursor-pointer shrink-0 ${
                           active
-                            ? 'bg-white text-cyan-950 shadow-2xs ring-1 ring-cyan-600/30'
+                            ? t.id === 'recolor'
+                              ? 'bg-rose-600 text-white shadow-2xs ring-1 ring-rose-600'
+                              : 'bg-white text-cyan-950 shadow-2xs ring-1 ring-cyan-600/30'
+                            : t.id === 'recolor'
+                            ? 'text-rose-700 hover:text-rose-900 bg-rose-50/80 hover:bg-rose-100/80 border border-rose-200/80'
                             : 'text-cyan-800 hover:text-cyan-950 hover:bg-white/60'
                         }`}
                         title={`${t.label} (快捷键: ${t.key})`}
                       >
-                        <Icon className={`w-3.5 h-3.5 ${active ? t.color : 'text-cyan-600'}`} />
+                        <Icon className={`w-3.5 h-3.5 ${active ? (t.id === 'recolor' ? 'text-white' : t.color) : t.id === 'recolor' ? 'text-rose-600' : 'text-cyan-600'}`} />
                         <span>{t.label}</span>
                       </button>
                     );
@@ -2711,6 +2845,153 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                         </div>
                       </div>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setOptions((prev) => ({ ...prev, tool: 'recolor' }))}
+                      className="h-5.5 px-2 ml-0.5 rounded bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] flex items-center gap-1 shadow-2xs transition-colors cursor-pointer shrink-0"
+                      title="抠出文字/主体后，一键改变文字或主体的颜色"
+                    >
+                      <Palette className="w-3 h-3" />
+                      <span>改文字/主体色</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* 文字/主体改色参数栏 (一键全图换色 + 点选单字 + 框选/涂抹局部换色) */}
+                {options.tool === 'recolor' && (
+                  <div className="flex items-center gap-1.5 bg-rose-50/90 h-7 px-2 rounded-md border border-rose-200 shrink-0">
+                    <span className="text-rose-900 text-[11px] font-bold whitespace-nowrap flex items-center gap-1">
+                      <Palette className="w-3.5 h-3.5 text-rose-600" />
+                      <span>目标色:</span>
+                    </span>
+
+                    {/* 预设快捷色板 */}
+                    <div className="flex items-center gap-1">
+                      {RECOLOR_PRESETS.map((preset) => {
+                        const isSelected = (options.recolorColor || '#d91616').toLowerCase() === preset.hex.toLowerCase();
+                        return (
+                          <button
+                            key={preset.hex}
+                            type="button"
+                            onClick={() => {
+                              setOptions((prev) => ({ ...prev, recolorColor: preset.hex }));
+                              if ((options.recolorScope || 'all') === 'all') {
+                                handleApplyFullRecolor(preset.hex);
+                              }
+                            }}
+                            className={`w-4 h-4 rounded-full border transition-transform cursor-pointer shrink-0 ${
+                              isSelected
+                                ? 'scale-120 ring-2 ring-rose-500 border-white shadow-xs'
+                                : 'border-stone-300 hover:scale-110'
+                            }`}
+                            style={{ backgroundColor: preset.hex }}
+                            title={`${preset.name} (${preset.hex}) — 点击${(options.recolorScope || 'all') === 'all' ? '立即全图换色' : '选定改色颜色'}`}
+                          />
+                        );
+                      })}
+
+                      {/* 自定义取色器 */}
+                      <label
+                        className="w-4.5 h-4.5 rounded-full border-2 border-dashed border-rose-400 flex items-center justify-center cursor-pointer relative overflow-hidden shrink-0 ml-0.5 shadow-2xs"
+                        style={{ backgroundColor: options.recolorColor || '#d91616' }}
+                        title="点击自定义任意颜色"
+                      >
+                        <input
+                          type="color"
+                          value={options.recolorColor || '#d91616'}
+                          onChange={(e) => {
+                            const newHex = e.target.value;
+                            setOptions((prev) => ({ ...prev, recolorColor: newHex }));
+                          }}
+                          className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
+                        />
+                      </label>
+                    </div>
+
+                    {/* 一键全图换色按钮 */}
+                    <button
+                      type="button"
+                      onClick={() => handleApplyFullRecolor()}
+                      className="h-5.5 px-2 bg-rose-600 hover:bg-rose-700 text-white font-bold text-[11px] rounded flex items-center gap-1 shadow-2xs transition-colors cursor-pointer shrink-0"
+                      title="将图中所有抠出的文字/主体一键更换为当前选中颜色"
+                    >
+                      <Check className="w-3 h-3" />
+                      <span>全图换色</span>
+                    </button>
+
+                    <div className="h-4 w-px bg-rose-200 mx-0.5 shrink-0" />
+
+                    {/* 改色范围模式切换：全图/框选 vs 点选单字 vs 涂抹 */}
+                    <div className="flex items-center gap-0.5 bg-white/80 p-0.5 rounded border border-rose-200 text-[10px]">
+                      {[
+                        { id: 'all', label: '全图/框选', tip: '点击上方色卡一键全图换色，或在画布拖拽框选局部文字换色' },
+                        { id: 'click', label: '点选笔画', tip: '在画布上点击某个字或连通笔画，单独改变该笔画颜色' },
+                        { id: 'brush', label: '涂抹改色', tip: '用画笔在文字上涂抹，局部改变涂抹区域颜色' },
+                      ].map((sc) => (
+                        <button
+                          key={sc.id}
+                          type="button"
+                          onClick={() => setOptions((prev) => ({ ...prev, recolorScope: sc.id as any }))}
+                          className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer font-medium ${
+                            (options.recolorScope || 'all') === sc.id
+                              ? 'bg-rose-600 text-white font-bold'
+                              : 'text-rose-900 hover:bg-rose-100'
+                          }`}
+                          title={sc.tip}
+                        >
+                          {sc.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* 涂抹改色时显示画笔粗细 */}
+                    {options.recolorScope === 'brush' && (
+                      <div className="flex items-center gap-1 pl-1 border-l border-rose-200">
+                        <span className="text-[10px] text-rose-800">笔刷:</span>
+                        <input
+                          type="range"
+                          min="4"
+                          max="100"
+                          value={options.brushSize}
+                          onChange={(e) =>
+                            setOptions((prev) => ({ ...prev, brushSize: parseInt(e.target.value) || 24 }))
+                          }
+                          className="w-14 accent-rose-600 cursor-pointer h-1.5"
+                        />
+                        <span className="font-mono text-[10px] text-rose-900 font-bold">{options.brushSize}px</span>
+                      </div>
+                    )}
+
+                    {/* 质感与去白边 */}
+                    <div className="flex items-center gap-1 pl-1 border-l border-rose-200">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const nextStyle = (options.recolorStyle || 'solid') === 'solid' ? 'tint' : 'solid';
+                          setOptions((prev) => ({ ...prev, recolorStyle: nextStyle }));
+                          if ((options.recolorScope || 'all') === 'all') {
+                            handleApplyFullRecolor(undefined, nextStyle);
+                          }
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-white hover:bg-rose-100 border border-rose-200 text-rose-900 text-[10px] font-bold cursor-pointer"
+                        title="切换「纯色实心（推荐文字/书法）」与「保留墨韵深浅层次」"
+                      >
+                        {(options.recolorStyle || 'solid') === 'solid' ? '纯色实心' : '保留墨韵'}
+                      </button>
+
+                      <label
+                        className="flex items-center gap-0.5 text-[10px] text-rose-900 cursor-pointer whitespace-nowrap"
+                        title="自动将书法/文字边缘残留的浅灰白纸杂色转化为平滑半透明抗锯齿边缘"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={options.recolorCleanEdges ?? true}
+                          onChange={(e) => setOptions((prev) => ({ ...prev, recolorCleanEdges: e.target.checked }))}
+                          className="rounded text-rose-600 scale-85"
+                        />
+                        <span>净白边</span>
+                      </label>
+                    </div>
                   </div>
                 )}
 
@@ -3201,7 +3482,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
               cursor:
                 isPanning || spacePressed || options.tool === 'pan'
                   ? 'grab'
-                  : ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic', 'clone-stamp'].includes(options.tool)
+                  : ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic', 'clone-stamp'].includes(options.tool) ||
+                    (options.tool === 'recolor' && options.recolorScope === 'brush')
                   ? 'none'
                   : 'crosshair',
             }}
@@ -3213,7 +3495,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                 isMouseOverCanvas &&
                 !isPanning &&
                 !spacePressed &&
-                ['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic', 'clone-stamp'].includes(options.tool)
+                (['brush-remove', 'brush-transparent', 'brush-restore', 'eraser', 'mosaic', 'clone-stamp'].includes(options.tool) ||
+                  (options.tool === 'recolor' && options.recolorScope === 'brush'))
                   ? 'block'
                   : 'hidden'
               }`}
@@ -3263,6 +3546,8 @@ export const ImageRetouchWorkspace: React.FC<ImageRetouchWorkspaceProps> = ({
                     ? `透底 ${options.brushSize}px`
                     : options.tool === 'brush-restore'
                     ? `消除透底 ${options.brushSize}px`
+                    : options.tool === 'recolor'
+                    ? `改色 ${options.brushSize}px`
                     : `画笔 ${options.brushSize}px`}
                 </span>
               )}

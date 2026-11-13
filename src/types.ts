@@ -273,6 +273,7 @@ export type RetouchTool =
   | 'brush-restore'     // 消除透底 / 涂抹恢复原图 (将透明底恢复为不透明原图)
   | 'rect-transparent'  // 矩形框选清除透底 (直接消抹为透明)
   | 'color-transparent' // 吸管点除去背景 (直接消抹为透明)
+  | 'recolor'           // 主体/文字改色 (对已抠出文字/主体一键全图换色或涂抹/框选局部改色)
   | 'text'              // 表情包配字/重新打字 (自定义文字、字号、颜色、粗黑描边)
   | 'mosaic'            // 像素马赛克打码
   | 'blur'              // 柔和毛玻璃模糊打码
@@ -295,6 +296,11 @@ export interface RetouchOptions {
   cloneStampFeather?: number;   // 仿制图章羽化柔边 0% ~ 100%
   cloneStampOpacity?: number;   // 仿制图章不透明度 10% ~ 100%
   cloneStampAligned?: boolean;  // 仿制图章连续对齐模式 (true=相对位移对齐)
+  // Recolor Tool (文字/主体改色) options
+  recolorColor?: string;        // 目标改色颜色 (默认 '#d91616' 中国红)
+  recolorScope?: 'all' | 'rect' | 'brush' | 'click'; // 改色范围: all=全图一键换色, rect=框选改色, brush=涂抹改色, click=点击单字/连通区改色
+  recolorStyle?: 'solid' | 'tint'; // 改色模式: solid=纯色实心(保留抗锯齿边缘透明度), tint=保留墨韵明暗层次
+  recolorCleanEdges?: boolean;  // 自动净化文字边缘残留白底杂色 (默认 true)
   // Text Tool options
   textString?: string;          // 当前输入的文字内容
   textFontId?: string;          // 开源商用字体 ID (e.g. 'zcool-kuaile')

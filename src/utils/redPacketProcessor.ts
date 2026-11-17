@@ -149,12 +149,23 @@ export const WECHAT_EDITABLE_ZONES = {
  * 微信红包气泡挂件 (480 × 384 px) 标准几何坐标与真机 1:1 映射常量
  * 真机映射系数 K = 230 / 384 ≈ 0.6 (以移动端 375pt 屏幕宽度、红包卡片净宽 230pt 为基准)
  */
+export const COVER_PENDANT_COORDS = {
+  canvas: { width: 1053, height: 1746 },
+  cardBody: { x: 96, y: 342, w: 861, h: 1308, borderRadius: 36 }, // 主体不可编辑区 (1308×861)
+  topZone: { x: 0, y: 0, w: 1053, h: 342 }, // 顶部探头可编辑区 (高 342px)
+  bottomZone: { x: 0, y: 1650, w: 1053, h: 96 }, // 底部脊端可编辑区 (高 96px)
+  leftSideZone: { x: 0, y: 342, w: 96, h: 1308 }, // 左侧可编辑侧翼
+  rightSideZone: { x: 957, y: 342, w: 96, h: 1308 }, // 右侧可编辑侧翼
+} as const;
+
 export const BUBBLE_PENDANT_COORDS = {
   canvas: { width: 480, height: 384 },
   topZone: { x: 0, y: 0, w: 480, h: 96 }, // 顶部挂件区 (核心有效区)
-  cardBody: { x: 48, y: 96, w: 384, h: 216 }, // 红包卡片主体
+  cardBody: { x: 48, y: 96, w: 384, h: 216, borderRadius: 16 }, // 红包卡片主体 (不可编辑区)
   textForbiddenZone: { x: 68, y: 120, w: 272, h: 100 }, // 文字及交互禁入区 (禁止挂件主体遮挡)
   bottomZone: { x: 0, y: 312, w: 480, h: 72 }, // 底部装饰区
+  leftSideZone: { x: 0, y: 96, w: 48, h: 216 }, // 左侧外延可编辑边
+  rightSideZone: { x: 432, y: 96, w: 48, h: 216 }, // 右侧外延可编辑边
   mobileMapping: {
     screenWidthPt: 375,
     cardWidthPt: 230,
@@ -169,6 +180,21 @@ export const BUBBLE_PENDANT_COORDS = {
   recommendedMinWidthPx: 190,
   recommendedMaxWidthPx: 230,
 } as const;
+
+export interface PendantDiagnostics {
+  cardIntruded: boolean;
+  intrudedPixelsCount?: number;
+  clippedEdges: {
+    top: boolean;
+    bottom: boolean;
+    left: boolean;
+    right: boolean;
+  };
+  topActualMinY?: number;
+  topActualMaxY?: number;
+  bottomActualMinY?: number;
+  bottomActualMaxY?: number;
+}
 
 export interface MaterialResult {
   blob: Blob;
@@ -188,6 +214,7 @@ export interface MaterialResult {
   topOpaqueHeight?: number;
   bottomOpaqueWidth?: number;
   bottomOpaqueHeight?: number;
+  diagnostics?: PendantDiagnostics;
 }
 
 export interface VideoAnalysisResult {
@@ -1026,14 +1053,42 @@ export async function splitSingleImageIntoTopAndBottom(
   };
 }
 
+export interface FullCoverPendantConfig {
+  enabled?: boolean; // 是否从中间截开为顶部+底部
+  splitRatio?: number;
+  scale?: number;
+  offsetX?: number;
+  offsetY?: number;
+  flipX?: boolean;
+}
+
+/**
+ * Check if any alpha > threshold pixels fall inside a rectangular forbidden card region
+ */
+function inspectCardIntrusion(
+  ctx: CanvasRenderingContext2D,
+  card: { x: number; y: number; w: number; h: number },
+  alphaThreshold = 20
+): { intruded: boolean; count: number } {
+  const data = ctx.getImageData(card.x, card.y, card.w, card.h).data;
+  let count = 0;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > alphaThreshold) {
+      count++;
+    }
+  }
+  return { intruded: count > 0, count };
+}
+
 /**
  * Generate 封面挂件 (1053 x 1746) supporting separate Top + Bottom uploads or Full artwork
- * Automatically merges top and bottom into ONE compliant transparent PNG for WeChat!
+ * Automatically merges top, bottom, and side wings into ONE compliant transparent PNG for WeChat!
  */
 export async function createCompositeCoverPendant(options: {
   topPart?: PendantPartConfig | null;
   bottomPart?: PendantPartConfig | null;
   fullSource?: (HTMLImageElement | HTMLCanvasElement) | null;
+  fullConfig?: FullCoverPendantConfig;
   addGlow?: boolean;
   glowColor?: string;
 }): Promise<MaterialResult> {
@@ -1041,89 +1096,193 @@ export async function createCompositeCoverPendant(options: {
     topPart,
     bottomPart,
     fullSource,
-    addGlow = true,
+    fullConfig,
+    addGlow = false,
     glowColor = '#fef08a',
   } = options;
 
   const targetW = WECHAT_RED_PACKET_SPECS.pendant.width; // 1053
   const targetH = WECHAT_RED_PACKET_SPECS.pendant.height; // 1746
+  const card = COVER_PENDANT_COORDS.cardBody; // { x: 96, y: 342, w: 861, h: 1308 }
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
   canvas.height = targetH;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.clearRect(0, 0, targetW, targetH);
 
-  // 1. Full artwork mode
+  const clippedEdges = { top: false, bottom: false, left: false, right: false };
+
+  let effectiveTopPart = topPart || null;
+  let effectiveBottomPart = bottomPart || null;
+
+  // 1. Full artwork mode (with aspect-ratio preservation & optional mid-split)
   if (fullSource) {
     const trans = await ensureTransparentSubject(fullSource);
-    ctx.drawImage(trans, 0, 0, targetW, targetH);
-  }
+    if (fullConfig?.enabled) {
+      const { topImg, bottomImg } = await splitSingleImageIntoTopAndBottom(trans, fullConfig.splitRatio ?? 0.5);
+      effectiveTopPart = {
+        source: topImg,
+        scale: fullConfig.scale ?? 1.0,
+        offsetX: fullConfig.offsetX ?? 0,
+        offsetY: fullConfig.offsetY ?? 0,
+        flipX: fullConfig.flipX ?? false,
+        baseHeight: 342,
+      };
+      effectiveBottomPart = {
+        source: bottomImg,
+        scale: Math.min(1.0, fullConfig.scale ?? 1.0),
+        offsetX: fullConfig.offsetX ?? 0,
+        offsetY: 0,
+        flipX: fullConfig.flipX ?? false,
+        baseHeight: 96,
+      };
+    } else {
+      const baseScale = Math.min(targetW / trans.width, targetH / trans.height);
+      const effectiveScale = Math.min(Math.max(fullConfig?.scale ?? 1.0, 0.2), 5.0);
+      const drawW = Math.round(trans.width * baseScale * effectiveScale);
+      const drawH = Math.round(trans.height * baseScale * effectiveScale);
+      const drawX = Math.round((targetW - drawW) / 2 + (fullConfig?.offsetX || 0));
+      const drawY = Math.round((targetH - drawH) / 2 + (fullConfig?.offsetY || 0));
 
-  // 2. Top Part (顶部 342px 可编辑区域, Y: 0 ~ 342)
-  // 用户直观心智：小熊/主体最底部默认贴紧不可编辑区上沿 Y = 342
-  let topDrawY = 0;
-  let topDrawH = 0;
-  if (topPart && topPart.source) {
-    const trans = await ensureTransparentSubject(topPart.source);
-    const trimmed = await trimImageTransparentBorders(trans, {
-      alphaThreshold: 24,
-      bottomCropPercent: topPart.bottomCropPercent || 0,
-      padding: 0,
-    });
-    const bbox = trimmed.bbox;
-    const drawSource = trimmed.canvas;
-
-    if (bbox.hasContent) {
-      const baseH = 280;
-      const effectiveScale = Math.min(Math.max(topPart.scale ?? 1.0, 0.2), 5.0);
-      topDrawH = Math.round(baseH * effectiveScale);
-      const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
-      const topDrawX = Math.round((targetW - topDrawW) / 2 + (topPart.offsetX || 0));
-      // 底部重合基准：Y = 342
-      topDrawY = Math.round(342 - topDrawH + (topPart.offsetY || 0));
-
-      ctx.save();
-      if (addGlow) {
-        ctx.shadowColor = glowColor;
-        ctx.shadowBlur = 16;
-      }
-      ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
-      ctx.restore();
-    }
-  }
-
-  // 3. Bottom Part (底部 96px 可编辑区域, Y: 1650 ~ 1746)
-  // 用户直观心智：垂饰/底托最顶端默认贴紧不可编辑区下沿 Y = 1650
-  let bottomDrawY = 1650;
-  let bottomDrawH = 0;
-  if (bottomPart && bottomPart.source) {
-    const trans = await ensureTransparentSubject(bottomPart.source);
-    const bbox = getAlphaBoundingBox(trans);
-    if (bbox.hasContent) {
-      const baseH = 80;
-      const effectiveScale = Math.min(Math.max(bottomPart.scale ?? 1.0, 0.2), 5.0);
-      bottomDrawH = Math.round(baseH * effectiveScale);
-      const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
-      const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (bottomPart.offsetX || 0));
-      // 顶部重合基准：Y = 1650
-      bottomDrawY = Math.round(1650 + (bottomPart.offsetY || 0));
+      if (drawX < 0) clippedEdges.left = true;
+      if (drawY < 0) clippedEdges.top = true;
+      if (drawX + drawW > targetW) clippedEdges.right = true;
+      if (drawY + drawH > targetH) clippedEdges.bottom = true;
 
       ctx.save();
       if (addGlow) {
         ctx.shadowColor = glowColor;
         ctx.shadowBlur = 14;
       }
-      ctx.drawImage(trans, bbox.minX, bbox.minY, bbox.width, bbox.height, bottomDrawX, bottomDrawY, bottomDrawW, bottomDrawH);
+      if (fullConfig?.flipX) {
+        ctx.translate(drawX + drawW / 2, drawY + drawH / 2);
+        ctx.scale(-1, 1);
+        ctx.drawImage(trans, -drawW / 2, -drawH / 2, drawW, drawH);
+      } else {
+        ctx.drawImage(trans, drawX, drawY, drawW, drawH);
+      }
       ctx.restore();
     }
   }
 
-  // 微信官方严格审核：清空主体不可编辑区 (Y: 342 ~ 1650, X: 96 ~ 957)
-  ctx.clearRect(96, 342, 861, 1308);
+  // 2. Top Part (顶部 342px 可编辑区域, Y: 0 ~ 342)
+  // 下沿默认紧贴卡片上沿 Y = 342
+  let topDrawY = 0;
+  let topDrawH = 0;
+  let topActualMinY: number | undefined;
+  let topActualMaxY: number | undefined;
 
+  if (effectiveTopPart && effectiveTopPart.source) {
+    const trans = await ensureTransparentSubject(effectiveTopPart.source);
+    const trimmed = await trimImageTransparentBorders(trans, {
+      alphaThreshold: 24,
+      bottomCropPercent: effectiveTopPart.bottomCropPercent || 0,
+      topCropPercent: effectiveTopPart.topCropPercent || 0,
+      padding: 0,
+    });
+    const bbox = trimmed.bbox;
+    const drawSource = trimmed.canvas;
+
+    if (bbox.hasContent) {
+      const baseH = effectiveTopPart.baseHeight || 342;
+      const effectiveScale = Math.min(Math.max(effectiveTopPart.scale ?? 1.0, 0.15), 5.0);
+      topDrawH = Math.round(baseH * effectiveScale);
+      const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
+      const topDrawX = Math.round((targetW - topDrawW) / 2 + (effectiveTopPart.offsetX || 0));
+      topDrawY = Math.round(342 - topDrawH + (effectiveTopPart.offsetY || 0));
+
+      topActualMinY = topDrawY;
+      topActualMaxY = topDrawY + topDrawH;
+
+      if (topDrawX < 0) clippedEdges.left = true;
+      if (topDrawY < 0) clippedEdges.top = true;
+      if (topDrawX + topDrawW > targetW) clippedEdges.right = true;
+      if (topDrawY + topDrawH > targetH) clippedEdges.bottom = true;
+
+      ctx.save();
+      if (addGlow) {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = 14;
+      }
+      if (effectiveTopPart.flipX) {
+        ctx.translate(topDrawX + topDrawW / 2, topDrawY + topDrawH / 2);
+        ctx.scale(-1, 1);
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, -topDrawW / 2, -topDrawH / 2, topDrawW, topDrawH);
+      } else {
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, topDrawX, topDrawY, topDrawW, topDrawH);
+      }
+      ctx.restore();
+    }
+  }
+
+  // 3. Bottom Part (底部 96px 可编辑区域, Y: 1650 ~ 1746)
+  // 上沿默认紧贴卡片下沿 Y = 1650
+  let bottomDrawY = 1650;
+  let bottomDrawH = 0;
+  let bottomActualMinY: number | undefined;
+  let bottomActualMaxY: number | undefined;
+
+  if (effectiveBottomPart && effectiveBottomPart.source) {
+    const trans = await ensureTransparentSubject(effectiveBottomPart.source);
+    const trimmed = await trimImageTransparentBorders(trans, {
+      alphaThreshold: 24,
+      bottomCropPercent: effectiveBottomPart.bottomCropPercent || 0,
+      topCropPercent: effectiveBottomPart.topCropPercent || 0,
+      padding: 0,
+    });
+    const bbox = trimmed.bbox;
+    const drawSource = trimmed.canvas;
+
+    if (bbox.hasContent) {
+      const baseH = effectiveBottomPart.baseHeight || 96;
+      const effectiveScale = Math.min(Math.max(effectiveBottomPart.scale ?? 1.0, 0.15), 5.0);
+      bottomDrawH = Math.round(baseH * effectiveScale);
+      const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
+      const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (effectiveBottomPart.offsetX || 0));
+      bottomDrawY = Math.round(1650 + (effectiveBottomPart.offsetY || 0));
+
+      bottomActualMinY = bottomDrawY;
+      bottomActualMaxY = bottomDrawY + bottomDrawH;
+
+      if (bottomDrawX < 0) clippedEdges.left = true;
+      if (bottomDrawY < 0) clippedEdges.top = true;
+      if (bottomDrawX + bottomDrawW > targetW) clippedEdges.right = true;
+      if (bottomDrawY + bottomDrawH > targetH) clippedEdges.bottom = true;
+
+      ctx.save();
+      if (addGlow) {
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = 12;
+      }
+      if (effectiveBottomPart.flipX) {
+        ctx.translate(bottomDrawX + bottomDrawW / 2, bottomDrawY + bottomDrawH / 2);
+        ctx.scale(-1, 1);
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, -bottomDrawW / 2, -bottomDrawH / 2, bottomDrawW, bottomDrawH);
+      } else {
+        ctx.drawImage(drawSource, bbox.minX, bbox.minY, bbox.width, bbox.height, bottomDrawX, bottomDrawY, bottomDrawW, bottomDrawH);
+      }
+      ctx.restore();
+    }
+  }
+
+  // 检测在强制清空前是否有像素落入了不可编辑主体区 (x:96..957, y:342..1650)
+  const intrusion = inspectCardIntrusion(ctx, card, 20);
+
+  // 微信官方严格机审合规保障：清空不可编辑主体区 (x: 96~957, y: 342~1650)
+  // 同时完整保留左右两侧 0~96px 与 957~1053px 可编辑侧翼！
+  ctx.clearRect(card.x, card.y, card.w, card.h);
+
+  const overallBbox = getAlphaBoundingBox(canvas, 20);
   const blob = await compressPngStrictUnderLimit(canvas, 285 * 1024);
   const url = URL.createObjectURL(blob);
+
+  const warnings: string[] = [];
+  if (blob.size > 300 * 1024) warnings.push('封面挂件体积超出 300KB');
+  if (intrusion.intruded) warnings.push('部分图案侵入中间红包主体区，已在导出图中自动透明镂空以确保过审');
+  if (clippedEdges.top || clippedEdges.bottom || clippedEdges.left || clippedEdges.right) {
+    warnings.push('部分图案超出 1053×1746 画布边界，超出部分将被裁切');
+  }
 
   return {
     blob,
@@ -1133,10 +1292,21 @@ export async function createCompositeCoverPendant(options: {
     height: targetH,
     format: 'PNG',
     isCompliant: blob.size <= 300 * 1024,
-    warnings: blob.size > 300 * 1024 ? ['封面挂件体积超出 300KB'] : [],
+    warnings,
     anchorX: 526,
-    anchorY: topPart ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
-    inEditableZone: true,
+    anchorY: effectiveTopPart ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
+    inEditableZone: !intrusion.intruded,
+    opaqueWidth: overallBbox.hasContent ? overallBbox.width : 0,
+    opaqueHeight: overallBbox.hasContent ? overallBbox.height : 0,
+    diagnostics: {
+      cardIntruded: intrusion.intruded,
+      intrudedPixelsCount: intrusion.count,
+      clippedEdges,
+      topActualMinY,
+      topActualMaxY,
+      bottomActualMinY,
+      bottomActualMaxY,
+    },
   };
 }
 
@@ -1160,7 +1330,7 @@ export async function createCoverPendant(
     scale = 1.0,
     offsetY = 0,
     offsetX = 0,
-    addGlow = true,
+    addGlow = false,
     glowColor = '#fef08a',
   } = options;
 
@@ -1193,7 +1363,7 @@ export async function createCoverPendant(
  * - Multiple Top Layers (顶部趴贴小熊多图叠加)
  * - Multiple Bottom Layers (底部垂饰多图叠加)
  * - Single Full Image with optional Mid-Split (整张单图直接渲染或从中间截开分别定位)
- * Automatically merges all layers into ONE compliant 480×384 transparent PNG for WeChat!
+ * Preserves Left (0~48px) & Right (432~480px) outer side margins while keeping cardBody (48, 96, 384, 216) 100% transparent!
  */
 export async function createCompositeBubblePendant(options: {
   topPart?: PendantPartConfig | null;
@@ -1216,12 +1386,15 @@ export async function createCompositeBubblePendant(options: {
 
   const targetW = WECHAT_RED_PACKET_SPECS.bubble.width; // 480
   const targetH = WECHAT_RED_PACKET_SPECS.bubble.height; // 384
+  const card = BUBBLE_PENDANT_COORDS.cardBody; // { x: 48, y: 96, w: 384, h: 216 }
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
   canvas.height = targetH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.clearRect(0, 0, targetW, targetH);
+
+  const clippedEdges = { top: false, bottom: false, left: false, right: false };
 
   // Build effective layer lists
   const effectiveTopLayers: PendantPartConfig[] = topLayers && topLayers.length > 0
@@ -1252,20 +1425,31 @@ export async function createCompositeBubblePendant(options: {
         baseHeight: 72,
       });
     } else {
-      const fScale = fullSplitConfig?.fullScale ?? 1.0;
+      const fScale = Math.min(Math.max(fullSplitConfig?.fullScale ?? 1.0, 0.2), 5.0);
       const fOffX = fullSplitConfig?.fullOffsetX ?? 0;
       const fOffY = fullSplitConfig?.fullOffsetY ?? 0;
-      const drawW = Math.round(targetW * fScale);
-      const drawH = Math.round(targetH * fScale);
+      // 等比适配 480×384，严禁拉伸变形
+      const baseScale = Math.min(targetW / trans.width, targetH / trans.height);
+      const drawW = Math.round(trans.width * baseScale * fScale);
+      const drawH = Math.round(trans.height * baseScale * fScale);
       const drawX = Math.round((targetW - drawW) / 2 + fOffX);
       const drawY = Math.round((targetH - drawH) / 2 + fOffY);
+
+      if (drawX < 0) clippedEdges.left = true;
+      if (drawY < 0) clippedEdges.top = true;
+      if (drawX + drawW > targetW) clippedEdges.right = true;
+      if (drawY + drawH > targetH) clippedEdges.bottom = true;
+
       ctx.drawImage(trans, drawX, drawY, drawW, drawH);
     }
   }
 
-  // 2. Render all Top Layers (顶部挂件核心展示区: Y: 0 ~ 96, 微信官方平台规范)
+  // 2. Render all Top Layers (顶部挂件核心展示区: Y: 0 ~ 96, 并支持向左右侧翼 0~48 / 432~480 自然延伸)
   let topDrawY = 0;
   let topDrawH = 0;
+  let topActualMinY: number | undefined;
+  let topActualMaxY: number | undefined;
+
   for (const layer of effectiveTopLayers) {
     if (!layer || !layer.source) continue;
     const trans = await ensureTransparentSubject(layer.source);
@@ -1284,16 +1468,18 @@ export async function createCompositeBubblePendant(options: {
       topDrawH = Math.round(baseH * effectiveScale);
       const topDrawW = Math.round(bbox.width * (topDrawH / bbox.height));
       const topDrawX = Math.round((targetW - topDrawW) / 2 + (layer.offsetX || 0));
-      // 基准：爪子/下沿紧贴气泡卡片上沿（Y = 96px），配合 offsetY 微调
       const anchorBaseY = layer.offsetY !== undefined ? (96 + layer.offsetY) : 96;
       topDrawY = Math.round(anchorBaseY - topDrawH);
 
-      ctx.save();
-      // 严格限制在顶部挂件核心区 (Y: 0 ~ 96px)，杜绝任何抗锯齿或模糊溢出至 96px 不可编辑区
-      ctx.beginPath();
-      ctx.rect(0, 0, targetW, 96);
-      ctx.clip();
+      topActualMinY = topActualMinY === undefined ? topDrawY : Math.min(topActualMinY, topDrawY);
+      topActualMaxY = topActualMaxY === undefined ? (topDrawY + topDrawH) : Math.max(topActualMaxY, topDrawY + topDrawH);
 
+      if (topDrawX < 0) clippedEdges.left = true;
+      if (topDrawY < 0) clippedEdges.top = true;
+      if (topDrawX + topDrawW > targetW) clippedEdges.right = true;
+      if (topDrawY + topDrawH > targetH) clippedEdges.bottom = true;
+
+      ctx.save();
       if (addGlow) {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
@@ -1310,10 +1496,12 @@ export async function createCompositeBubblePendant(options: {
     }
   }
 
-  // 3. Render all Bottom Layers (底部垂饰挂件区, Y: 312 ~ 384, 高 72px)
-  // 与顶部趴贴小熊功能 100% 完全对齐：支持多图、自动紧凑去留白、顶/底裁剪、水平镜像翻转、以 Y=312 为贴合基准！
+  // 3. Render all Bottom Layers (底部垂饰挂件区: Y: 312 ~ 384, 并支持向左右侧翼延伸)
   let bottomDrawY = 312;
   let bottomDrawH = 0;
+  let bottomActualMinY: number | undefined;
+  let bottomActualMaxY: number | undefined;
+
   for (const layer of effectiveBottomLayers) {
     if (!layer || !layer.source) continue;
     const trans = await ensureTransparentSubject(layer.source);
@@ -1332,15 +1520,17 @@ export async function createCompositeBubblePendant(options: {
       bottomDrawH = Math.round(baseH * effectiveScale);
       const bottomDrawW = Math.round(bbox.width * (bottomDrawH / bbox.height));
       const bottomDrawX = Math.round((targetW - bottomDrawW) / 2 + (layer.offsetX || 0));
-      // 基准：垂饰顶沿紧贴气泡卡片底边（Y = 312px），配合 offsetY 微调
       bottomDrawY = Math.round(312 + (layer.offsetY || 0));
 
-      ctx.save();
-      // 严格限制在底部垂饰区 (Y: 312 ~ 384px)
-      ctx.beginPath();
-      ctx.rect(0, 312, targetW, 72);
-      ctx.clip();
+      bottomActualMinY = bottomActualMinY === undefined ? bottomDrawY : Math.min(bottomActualMinY, bottomDrawY);
+      bottomActualMaxY = bottomActualMaxY === undefined ? (bottomDrawY + bottomDrawH) : Math.max(bottomActualMaxY, bottomDrawY + bottomDrawH);
 
+      if (bottomDrawX < 0) clippedEdges.left = true;
+      if (bottomDrawY < 0) clippedEdges.top = true;
+      if (bottomDrawX + bottomDrawW > targetW) clippedEdges.right = true;
+      if (bottomDrawY + bottomDrawH > targetH) clippedEdges.bottom = true;
+
+      ctx.save();
       if (addGlow) {
         ctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
         ctx.shadowBlur = 8;
@@ -1357,11 +1547,13 @@ export async function createCompositeBubblePendant(options: {
     }
   }
 
-  // 微信红包封面平台机审终极保障：
-  // 气泡挂件中间不可编辑区（Y: 96 ~ 312px，高度 216px）必须保持绝对 100% 透明！
-  // 任何透明度 alpha > 0 的像素点都会触发微信“进入不可编辑区”驳回。
-  // 此处做强制彻底清空，完全消除所有微小抗锯齿、阴影晕染或坐标浮点溢出，确保 100% 机审合规通过！
-  ctx.clearRect(0, 96, targetW, 216);
+  // 检测在清空前是否侵入气泡卡片区 rect(48, 96, 384, 216)
+  const intrusion = inspectCardIntrusion(ctx, card, 20);
+
+  // 微信官方严格机审合规保障：
+  // 精准清空中间气泡卡片主体区 rect(48, 96, 384, 216)（保持 100% alpha = 0）
+  // 同时保留左右两侧 0~48px 及 432~480px 的外挂侧翼可编辑空间！
+  ctx.clearRect(card.x, card.y, card.w, card.h);
 
   // 实时计算挂件不透明区域的外接矩形宽度（用于真机视觉饱满度预警）
   const fullData = ctx.getImageData(0, 0, targetW, targetH).data;
@@ -1400,6 +1592,13 @@ export async function createCompositeBubblePendant(options: {
   const blob = await compressPngStrictUnderLimit(canvas, 280 * 1024);
   const url = URL.createObjectURL(blob);
 
+  const warnings: string[] = [];
+  if (blob.size > 300 * 1024) warnings.push('气泡挂件体积超出 300KB');
+  if (intrusion.intruded) warnings.push('部分图案进入中间红包卡片区域，导出已自动镂空留白以确保过审');
+  if (clippedEdges.top || clippedEdges.bottom || clippedEdges.left || clippedEdges.right) {
+    warnings.push('部分图案超出 480×384 画布边界，超出部分将被裁切');
+  }
+
   return {
     blob,
     url,
@@ -1408,16 +1607,25 @@ export async function createCompositeBubblePendant(options: {
     height: targetH,
     format: 'PNG',
     isCompliant: blob.size <= 300 * 1024,
-    warnings: blob.size > 300 * 1024 ? ['气泡挂件体积超出 300KB'] : [],
+    warnings,
     anchorX: 240,
     anchorY: effectiveTopLayers.length > 0 ? Math.round(topDrawY + topDrawH / 2) : Math.round(bottomDrawY + bottomDrawH / 2),
-    inEditableZone: true,
+    inEditableZone: !intrusion.intruded,
     opaqueWidth,
     opaqueHeight,
     topOpaqueWidth,
     topOpaqueHeight,
     bottomOpaqueWidth,
     bottomOpaqueHeight,
+    diagnostics: {
+      cardIntruded: intrusion.intruded,
+      intrudedPixelsCount: intrusion.count,
+      clippedEdges,
+      topActualMinY,
+      topActualMaxY,
+      bottomActualMinY,
+      bottomActualMaxY,
+    },
   };
 }
 

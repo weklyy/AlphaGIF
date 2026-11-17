@@ -142,12 +142,9 @@ async function generateFortuneFestiveTheme(): Promise<{
   // Clear transparent canvas
   pctx.clearRect(0, 0, 1053, 1746);
 
-  // --- TOP EDITABLE ZONE (上端探头: Y 60 ~ 320) ---
-  // Mascot / Golden Tiger Head peeking out over the top edge of cover (Figure 2 Style)
+  // --- TOP EDITABLE ZONE (上端探头: Y 0 ~ 342, 贴紧 342px 主体上沿) ---
   pctx.save();
-  pctx.translate(526.5, 210);
-  pctx.shadowColor = 'rgba(255, 215, 0, 0.45)';
-  pctx.shadowBlur = 18;
+  pctx.translate(526.5, 224);
 
   // Tiger / Mascot Head
   const headGrad = pctx.createRadialGradient(0, 0, 10, 0, 0, 110);
@@ -197,6 +194,26 @@ async function generateFortuneFestiveTheme(): Promise<{
   pctx.textAlign = 'center';
   pctx.fillText('王', 0, -42);
 
+  // Mascot Paws resting flush on Y = 342 (local y = 118)
+  const drawTopPaw = (px: number) => {
+    pctx.save();
+    pctx.translate(px, 100);
+    pctx.fillStyle = '#ffffff';
+    pctx.beginPath();
+    pctx.ellipse(0, 0, 24, 18, 0, 0, Math.PI * 2);
+    pctx.fill();
+    pctx.lineWidth = 3;
+    pctx.strokeStyle = '#f59e0b';
+    pctx.stroke();
+    pctx.fillStyle = '#f43f5e';
+    pctx.beginPath();
+    pctx.arc(0, 0, 7, 0, Math.PI * 2);
+    pctx.fill();
+    pctx.restore();
+  };
+  drawTopPaw(-72);
+  drawTopPaw(72);
+
   // Left & Right top floating gold coins in top editable area
   const drawGoldCoin = (x: number, y: number, r: number) => {
     pctx.save();
@@ -213,81 +230,85 @@ async function generateFortuneFestiveTheme(): Promise<{
     pctx.fillRect(-r * 0.25, -r * 0.25, r * 0.5, r * 0.5);
     pctx.restore();
   };
-  drawGoldCoin(-240, 20, 35);
-  drawGoldCoin(240, 10, 38);
+  drawGoldCoin(-240, 15, 35);
+  drawGoldCoin(240, 5, 38);
   pctx.restore();
 
-  // --- BOTTOM EDITABLE ZONE (脊端垂饰: Y 1400 ~ 1700) ---
-  // Cute tiger paws & golden ingot hanging at spine (Figure 2 Style)
+  // --- BOTTOM EDITABLE ZONE (脊端垂饰: Y 1650 ~ 1746，严禁落入 342~1650 不可编辑区) ---
   pctx.save();
-  pctx.translate(526.5, 1540);
-  pctx.shadowColor = 'rgba(0,0,0,0.3)';
-  pctx.shadowBlur = 16;
+  pctx.translate(526.5, 1696);
 
-  // Ingot shape
-  const ingotGrad = pctx.createLinearGradient(-110, -50, 110, 50);
+  // Ingot shape strictly within 1650..1744 (local -46..+48)
+  const ingotGrad = pctx.createLinearGradient(-95, -40, 95, 40);
   ingotGrad.addColorStop(0, '#fef08a');
   ingotGrad.addColorStop(0.5, '#f59e0b');
   ingotGrad.addColorStop(1, '#d97706');
   pctx.fillStyle = ingotGrad;
   pctx.beginPath();
-  pctx.moveTo(-100, 0);
-  pctx.quadraticCurveTo(-115, -45, -45, -45);
-  pctx.quadraticCurveTo(0, -65, 45, -45);
-  pctx.quadraticCurveTo(115, -45, 100, 0);
-  pctx.quadraticCurveTo(120, 45, 0, 50);
-  pctx.quadraticCurveTo(-120, 45, -100, 0);
+  pctx.moveTo(-88, -6);
+  pctx.quadraticCurveTo(-102, -38, -42, -38);
+  pctx.quadraticCurveTo(0, -45, 42, -38);
+  pctx.quadraticCurveTo(102, -38, 88, -6);
+  pctx.quadraticCurveTo(104, 38, 0, 42);
+  pctx.quadraticCurveTo(-104, 38, -88, -6);
   pctx.closePath();
   pctx.fill();
-  pctx.lineWidth = 4;
+  pctx.lineWidth = 3.5;
   pctx.strokeStyle = '#fef9c3';
   pctx.stroke();
 
-  // Two tiger paws gripping spine
+  // Two tiger paws gripping spine top at Y=1650 (local y=-28)
   const drawPaw = (px: number) => {
     pctx.save();
-    pctx.translate(px, -45);
+    pctx.translate(px, -24);
     pctx.fillStyle = '#ffffff';
     pctx.beginPath();
-    pctx.arc(0, 0, 32, 0, Math.PI * 2);
+    pctx.arc(0, 0, 20, 0, Math.PI * 2);
     pctx.fill();
-    pctx.lineWidth = 3;
+    pctx.lineWidth = 2.5;
     pctx.strokeStyle = '#f59e0b';
     pctx.stroke();
-    // pads
     pctx.fillStyle = '#f43f5e';
     pctx.beginPath();
-    pctx.arc(0, 2, 14, 0, Math.PI * 2);
-    pctx.arc(-14, -14, 7, 0, Math.PI * 2);
-    pctx.arc(0, -18, 7, 0, Math.PI * 2);
-    pctx.arc(14, -14, 7, 0, Math.PI * 2);
+    pctx.arc(0, 2, 8, 0, Math.PI * 2);
     pctx.fill();
     pctx.restore();
   };
-  drawPaw(-60);
-  drawPaw(60);
+  drawPaw(-56);
+  drawPaw(56);
 
   // Ingot blessing word
   pctx.fillStyle = '#991b1b';
-  pctx.font = 'bold 36px sans-serif';
+  pctx.font = 'bold 28px sans-serif';
   pctx.textAlign = 'center';
   pctx.textBaseline = 'middle';
-  pctx.fillText('招财', 0, 5);
+  pctx.fillText('招财', 0, 6);
   pctx.restore();
 
-  // 3. Bubble Pendant: 480 x 384 (Figure 6: Upper editable zone Y: 0~96px with ZERO pixels in non-editable zone)
+  // Clear non-editable card body strictly
+  pctx.clearRect(96, 342, 861, 1308);
+
+  // 3. Bubble Pendant: 480 x 384 (Upper editable zone Y: 0~96px strictly, zero pixels in cardBody)
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
   const bctx = bubbleCanvas.getContext('2d')!;
   bctx.clearRect(0, 0, 480, 384);
 
-  // Fortune Pouch centered at (240, 48), completely within Y: 4px ~ 92px
+  // Fortune Pouch + coins strictly within Y: 4px ~ 96px
   bctx.save();
-  bctx.translate(240, 52);
-  bctx.scale(0.68, 0.68);
-  bctx.shadowColor = 'rgba(0,0,0,0.25)';
-  bctx.shadowBlur = 8;
+  bctx.translate(240, 54);
+  bctx.scale(0.64, 0.64);
+
+  // Side gold ingots for visual balance
+  bctx.fillStyle = '#fbbf24';
+  bctx.beginPath();
+  bctx.ellipse(-95, 42, 26, 16, 0, 0, Math.PI * 2);
+  bctx.ellipse(95, 42, 26, 16, 0, 0, Math.PI * 2);
+  bctx.fill();
+  bctx.strokeStyle = '#fef08a';
+  bctx.lineWidth = 3;
+  bctx.stroke();
 
   // Fortune Pouch
   const pouchGrad = bctx.createLinearGradient(-45, -35, 45, 50);
@@ -295,7 +316,7 @@ async function generateFortuneFestiveTheme(): Promise<{
   pouchGrad.addColorStop(1, '#991b1b');
   bctx.fillStyle = pouchGrad;
   bctx.beginPath();
-  bctx.ellipse(0, 16, 50, 54, 0, 0, Math.PI * 2);
+  bctx.ellipse(0, 14, 50, 50, 0, 0, Math.PI * 2);
   bctx.fill();
 
   // Gold tie ribbon
@@ -320,8 +341,10 @@ async function generateFortuneFestiveTheme(): Promise<{
   bctx.font = 'bold 28px sans-serif';
   bctx.textAlign = 'center';
   bctx.textBaseline = 'middle';
-  bctx.fillText('吉', 0, 18);
+  bctx.fillText('吉', 0, 16);
   bctx.restore();
+
+  bctx.clearRect(48, 96, 384, 216);
 
   // 4. Cover Story: 750 x 1250 (Full poster / branding card)
   const storyCanvas = document.createElement('canvas');
@@ -459,34 +482,42 @@ async function generateLionDanceTheme(): Promise<{
   const pctx = pendantCanvas.getContext('2d')!;
   pctx.clearRect(0, 0, 1053, 1746);
 
-  // --- TOP EDITABLE ZONE (上端探头: Y 60 ~ 320) ---
-  // Cyber Lion Crown / Head peeking out over cover
+  // --- TOP EDITABLE ZONE (上端探头: Y 0 ~ 342) ---
   pctx.save();
-  pctx.translate(526.5, 200);
-  pctx.shadowColor = 'rgba(244, 63, 94, 0.4)';
-  pctx.shadowBlur = 18;
+  pctx.translate(526.5, 232);
 
   // Lion crown head
   pctx.fillStyle = '#f59e0b';
   pctx.beginPath();
-  pctx.arc(0, 0, 90, 0, Math.PI * 2);
+  pctx.arc(0, 0, 92, 0, Math.PI * 2);
   pctx.fill();
   pctx.fillStyle = '#e11d48';
   pctx.beginPath();
-  pctx.arc(0, 0, 75, 0, Math.PI * 2);
+  pctx.arc(0, 0, 76, 0, Math.PI * 2);
   pctx.fill();
 
   pctx.fillStyle = '#ffffff';
-  pctx.font = 'bold 70px sans-serif';
+  pctx.font = 'bold 72px sans-serif';
   pctx.textAlign = 'center';
   pctx.textBaseline = 'middle';
   pctx.fillText('🦁', 0, 0);
+
+  // Lion Paws resting flush on Y=342 (local y=94, radiusY=16 -> bottom at 342)
+  for (const lx of [-68, 68]) {
+    pctx.fillStyle = '#fbbf24';
+    pctx.beginPath();
+    pctx.ellipse(lx, 94, 24, 16, 0, 0, Math.PI * 2);
+    pctx.fill();
+    pctx.lineWidth = 2.5;
+    pctx.strokeStyle = '#d97706';
+    pctx.stroke();
+  }
 
   // Festive ribbons in top zone
   const colors = ['#f43f5e', '#fbbf24', '#38bdf8', '#a855f7'];
   for (let i = 0; i < 12; i++) {
     pctx.save();
-    pctx.translate(-350 + i * 65, -80 + (i % 3) * 40);
+    pctx.translate(-350 + i * 65, -110 + (i % 3) * 40);
     pctx.rotate((i % 2 === 0 ? 0.3 : -0.3));
     pctx.fillStyle = colors[i % colors.length];
     pctx.fillRect(-12, -5, 24, 10);
@@ -494,51 +525,49 @@ async function generateLionDanceTheme(): Promise<{
   }
   pctx.restore();
 
-  // --- BOTTOM EDITABLE ZONE (脊端垂饰: Y 1400 ~ 1700) ---
-  // Lion paws & golden tassel pendant at spine
+  // --- BOTTOM EDITABLE ZONE (脊端垂饰: Y 1650 ~ 1746) ---
   pctx.save();
-  pctx.translate(526.5, 1540);
-  pctx.shadowColor = 'rgba(0,0,0,0.3)';
-  pctx.shadowBlur = 16;
+  pctx.translate(526.5, 1698);
 
-  // Bottom Golden Badge
+  // Bottom Golden Badge strictly inside 1650..1744 (local -44..+44)
   pctx.fillStyle = '#f59e0b';
   pctx.beginPath();
-  pctx.arc(0, 30, 65, 0, Math.PI * 2);
+  pctx.arc(0, 4, 40, 0, Math.PI * 2);
   pctx.fill();
   pctx.fillStyle = '#be123c';
   pctx.beginPath();
-  pctx.arc(0, 30, 52, 0, Math.PI * 2);
+  pctx.arc(0, 4, 32, 0, Math.PI * 2);
   pctx.fill();
   pctx.fillStyle = '#fef08a';
-  pctx.font = 'bold 44px sans-serif';
+  pctx.font = 'bold 28px sans-serif';
   pctx.textAlign = 'center';
   pctx.textBaseline = 'middle';
-  pctx.fillText('吉', 0, 30);
+  pctx.fillText('吉', 0, 4);
 
-  // Two Lion Paws
+  // Two Lion Paws flush at top edge Y=1650 (local y=-28)
   const drawLionPaw = (lx: number) => {
     pctx.save();
-    pctx.translate(lx, -35);
+    pctx.translate(lx, -26);
     pctx.fillStyle = '#fbbf24';
     pctx.beginPath();
-    pctx.arc(0, 0, 30, 0, Math.PI * 2);
+    pctx.arc(0, 0, 20, 0, Math.PI * 2);
     pctx.fill();
-    pctx.lineWidth = 3;
+    pctx.lineWidth = 2.5;
     pctx.strokeStyle = '#d97706';
     pctx.stroke();
-    // pads
     pctx.fillStyle = '#881337';
     pctx.beginPath();
-    pctx.arc(0, 0, 14, 0, Math.PI * 2);
+    pctx.arc(0, 0, 9, 0, Math.PI * 2);
     pctx.fill();
     pctx.restore();
   };
-  drawLionPaw(-75);
-  drawLionPaw(75);
+  drawLionPaw(-64);
+  drawLionPaw(64);
   pctx.restore();
 
-  // 3. Bubble Pendant: 480 x 384 (Figure 6: Upper zone Y: 0~96px strictly)
+  pctx.clearRect(96, 342, 861, 1308);
+
+  // 3. Bubble Pendant: 480 x 384 (Upper zone Y: 0~96px strictly, zero pixels in cardBody)
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
@@ -546,9 +575,8 @@ async function generateLionDanceTheme(): Promise<{
   bctx.clearRect(0, 0, 480, 384);
 
   bctx.save();
-  bctx.translate(240, 48);
-  bctx.shadowColor = 'rgba(0,0,0,0.25)';
-  bctx.shadowBlur = 8;
+  bctx.translate(240, 56);
+  // Center medallion + left/right auspicious tokens flush with Y=96
   bctx.fillStyle = '#fbbf24';
   bctx.beginPath();
   bctx.arc(0, 0, 38, 0, Math.PI * 2);
@@ -567,7 +595,20 @@ async function generateLionDanceTheme(): Promise<{
   bctx.textAlign = 'center';
   bctx.textBaseline = 'middle';
   bctx.fillText('發', 0, 0);
+
+  // Symmetrical resting lion paws at Y=96 (local y=24, radius=16)
+  for (const lx of [-62, 62]) {
+    bctx.fillStyle = '#fbbf24';
+    bctx.beginPath();
+    bctx.ellipse(lx, 26, 20, 13, 0, 0, Math.PI * 2);
+    bctx.fill();
+    bctx.strokeStyle = '#d97706';
+    bctx.lineWidth = 2;
+    bctx.stroke();
+  }
   bctx.restore();
+
+  bctx.clearRect(48, 96, 384, 216);
 
   // 4. Cover Story: 750 x 1250
   const storyCanvas = document.createElement('canvas');
@@ -645,62 +686,71 @@ async function generateCuteBearTheme() {
   ctx.font = '24px sans-serif';
   ctx.fillText('新春大吉 · 好事连连', 478, 920);
 
-  // 2. 封面挂件 (1053 x 1746) - 微信官方图2 & 图5 规范
-  // 小熊趴在红包顶部探头 (底边在 Y = 338，紧靠 Y = 342 红包上沿)，底部脊端配有金元宝萌爪 (Y = 1650~1746)
+  // 2. 封面挂件 (1053 x 1746) - 微信官方 0~342px & 1650~1746px 严格对齐规范
+  // 小熊趴在红包顶部探头 (爪底像素严格贴齐 Y = 342 红包卡片上沿，零缝隙)，底部脊端配有金元宝萌爪 (Y = 1650~1746)
   const pendantCanvas = document.createElement('canvas');
   pendantCanvas.width = 1053;
   pendantCanvas.height = 1746;
   const pctx = pendantCanvas.getContext('2d')!;
   pctx.clearRect(0, 0, 1053, 1746);
 
-  // Top Zone (0 ~ 342px): Cute bear peeking over top envelope rim (paws at Y = 338)
-  drawCuteBearPeeking(pctx, 526.5, 220, 260, 338);
+  // Top Zone (0 ~ 342px): Cute bear peeking over top envelope rim (paws flush at Y = 342)
+  drawCuteBearPeeking(pctx, 526.5, 224, 260, 342);
 
-  // Bottom Zone (1650 ~ 1746px): Cute golden ingot & paws at spine
+  // Bottom Zone (1650 ~ 1746px): Cute golden ingot & paws flush against Y = 1650 bottom rim
   pctx.save();
   pctx.translate(526.5, 1698);
-  const bGrad = pctx.createLinearGradient(-100, -25, 100, 25);
+  const bGrad = pctx.createLinearGradient(-90, -25, 90, 25);
   bGrad.addColorStop(0, '#fef08a');
   bGrad.addColorStop(0.5, '#f59e0b');
   bGrad.addColorStop(1, '#d97706');
   pctx.fillStyle = bGrad;
   pctx.beginPath();
-  pctx.roundRect(-80, -20, 160, 42, 21);
+  pctx.roundRect(-84, -30, 168, 48, 22);
   pctx.fill();
   pctx.lineWidth = 2.5;
   pctx.strokeStyle = '#fef9c3';
   pctx.stroke();
 
-  // Cute bear paws hanging over bottom spine
-  const pawR = 16;
+  pctx.fillStyle = '#991b1b';
+  pctx.font = 'bold 22px sans-serif';
+  pctx.textAlign = 'center';
+  pctx.textBaseline = 'middle';
+  pctx.fillText('招财进宝', 0, -5);
+
+  // Cute bear paws gripping bottom spine edge Y = 1650 (local y = -32)
+  const pawR = 15;
   pctx.fillStyle = '#ffffff';
-  pctx.beginPath();
-  pctx.arc(-42, 18, pawR, 0, Math.PI * 2);
-  pctx.arc(42, 18, pawR, 0, Math.PI * 2);
-  pctx.fill();
-  pctx.fillStyle = '#f43f5e';
-  pctx.beginPath();
-  pctx.arc(-42, 18, 6, 0, Math.PI * 2);
-  pctx.arc(42, 18, 6, 0, Math.PI * 2);
-  pctx.fill();
+  pctx.strokeStyle = '#fbbf24';
+  pctx.lineWidth = 2.5;
+  for (const px of [-46, 46]) {
+    pctx.beginPath();
+    pctx.arc(px, -31, pawR, 0, Math.PI * 2);
+    pctx.fill();
+    pctx.stroke();
+    pctx.fillStyle = '#f43f5e';
+    pctx.beginPath();
+    pctx.arc(px, -31, 5.5, 0, Math.PI * 2);
+    pctx.fill();
+    pctx.fillStyle = '#ffffff';
+  }
   pctx.restore();
 
-  // Clean forbidden area Y: 342..1650
+  // Clean forbidden envelope card area strictly: rect(96, 342, 861, 1308)
   pctx.clearRect(96, 342, 861, 1308);
 
-  // 3. 气泡挂件 (480 x 384) - 微信真机大比例规范 (主挂件高度 192~210px)
-  // 小熊双爪刚好趴在对话框气泡卡片顶缘 (Y = 196，爪子贴齐 Y = 196，在微信真实聊天中醒目大方)
+  // 3. 气泡挂件 (480 x 384) - 100% 微信规范：顶部可编辑区 0~96px，爪子严格贴齐 Y=96 卡片顶缘，卡片区零侵入
   const bubbleCanvas = document.createElement('canvas');
   bubbleCanvas.width = 480;
   bubbleCanvas.height = 384;
   const bctx = bubbleCanvas.getContext('2d')!;
   bctx.clearRect(0, 0, 480, 384);
 
-  // Draw cute bear with paws directly resting on Y = 196 (card top edge), size = 210px
-  drawCuteBearOnBubble(bctx, 240, 98, 210, 196);
+  // Draw cute bear strictly within Y: 0..96px with paws resting directly on Y = 96
+  drawCuteBearOnBubble(bctx, 240, 56, 106, 96);
 
-  // Clear middle card area Y: 196~342
-  bctx.clearRect(0, 196, 480, 146);
+  // Clear forbidden card area strictly: rect(48, 96, 384, 216)
+  bctx.clearRect(48, 96, 384, 216);
 
   // 4. 封面故事 (750 x 1250)
   const storyCanvas = document.createElement('canvas');
@@ -876,12 +926,12 @@ function drawCuteBearPeeking(ctx: CanvasRenderingContext2D, cx: number, cy: numb
   ctx.arc(cx + r * 0.22, cy - r * 0.12, r * 0.025, 0, Math.PI * 2);
   ctx.fill();
 
-  // Two cute paws resting along bottomY (peeking paws)
+  // Two cute paws resting flush along bottomY (peeking paws bottom edge === bottomY)
   ctx.fillStyle = '#ffffff';
   ctx.strokeStyle = '#fbbf24';
   ctx.lineWidth = 3;
   const pawR = r * 0.18;
-  const pawY = bottomY - pawR * 0.7;
+  const pawY = bottomY - (pawR * 0.8 + 1.5);
 
   ctx.beginPath();
   ctx.ellipse(cx - r * 0.42, pawY, pawR * 1.1, pawR * 0.8, -0.15, 0, Math.PI * 2);
@@ -904,12 +954,29 @@ function drawCuteBearPeeking(ctx: CanvasRenderingContext2D, cx: number, cy: numb
 }
 
 /**
- * Helper: Draw cute bear趴在气泡上 (Figure 3 & Figure 6)
- * Paws strictly rest at bubbleRimY (e.g. 276px), with 0 pixels in Y >= 280
+ * Helper: Draw cute bear resting directly on bubble rim Y=96 (within Y: 0~96)
+ * Also draws subtle festive side coins along X so the composition looks full & lively in chat
  */
 function drawCuteBearOnBubble(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number, bubbleRimY: number) {
   ctx.save();
   const r = size / 2;
+
+  // Festive mini gold coins resting flush on bubbleRimY beside the bear for balanced 185px visual width
+  for (const side of [-1, 1]) {
+    const coinX = cx + side * (r * 1.48);
+    const coinR = r * 0.24;
+    const coinY = bubbleRimY - coinR - 1.5;
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath();
+    ctx.arc(coinX, coinY, coinR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fef08a';
+    ctx.beginPath();
+    ctx.arc(coinX, coinY, coinR * 0.72, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#b45309';
+    ctx.fillRect(coinX - coinR * 0.22, coinY - coinR * 0.22, coinR * 0.44, coinR * 0.44);
+  }
 
   // Ears
   ctx.fillStyle = '#f59e0b';
@@ -951,7 +1018,7 @@ function drawCuteBearOnBubble(ctx: CanvasRenderingContext2D, cx: number, cy: num
 
   // Mouth
   ctx.strokeStyle = '#451a03';
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.arc(cx - r * 0.07, cy + r * 0.16, r * 0.06, 0.1, Math.PI * 0.9);
   ctx.arc(cx + r * 0.07, cy + r * 0.16, r * 0.06, 0.1, Math.PI * 0.9);
@@ -971,30 +1038,29 @@ function drawCuteBearOnBubble(ctx: CanvasRenderingContext2D, cx: number, cy: num
   ctx.arc(cx + r * 0.2, cy - r * 0.12, r * 0.025, 0, Math.PI * 2);
   ctx.fill();
 
-  // Two cute little paws hanging directly over the bubble rim (趴在气泡上, Figure 3)
-  // Paws touch bubbleRimY (96px), bottom of paws perfectly touches the envelope card edge
-  const pawR = r * 0.17;
+  // Two cute little paws resting flush on bubbleRimY (Y=96px)
+  const pawR = r * 0.2;
   const pawY = bubbleRimY - (pawR * 0.8 + 1.25);
 
   ctx.fillStyle = '#ffffff';
   ctx.strokeStyle = '#f59e0b';
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 2.2;
 
   ctx.beginPath();
-  ctx.ellipse(cx - r * 0.38, pawY, pawR * 1.1, pawR * 0.8, -0.15, 0, Math.PI * 2);
+  ctx.ellipse(cx - r * 0.42, pawY, pawR * 1.15, pawR * 0.8, -0.15, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
   ctx.beginPath();
-  ctx.ellipse(cx + r * 0.38, pawY, pawR * 1.1, pawR * 0.8, 0.15, 0, Math.PI * 2);
+  ctx.ellipse(cx + r * 0.42, pawY, pawR * 1.15, pawR * 0.8, 0.15, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
 
   // Pink paw pads
   ctx.fillStyle = '#f43f5e';
   ctx.beginPath();
-  ctx.arc(cx - r * 0.38, pawY, pawR * 0.32, 0, Math.PI * 2);
-  ctx.arc(cx + r * 0.38, pawY, pawR * 0.32, 0, Math.PI * 2);
+  ctx.arc(cx - r * 0.42, pawY, pawR * 0.34, 0, Math.PI * 2);
+  ctx.arc(cx + r * 0.42, pawY, pawR * 0.34, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.restore();

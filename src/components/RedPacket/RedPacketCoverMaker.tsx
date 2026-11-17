@@ -51,12 +51,14 @@ import {
 } from 'lucide-react';
 import {
   WECHAT_RED_PACKET_SPECS,
+  COVER_PENDANT_COORDS,
   BUBBLE_PENDANT_COORDS,
   MaterialResult,
   VideoAnalysisResult,
   PendantPartConfig,
   ManualTransparencyConfig,
   FullBubbleSplitConfig,
+  FullCoverPendantConfig,
   NormalizedCropBox,
   fitImageToTarget,
   createCoverPendant,
@@ -167,15 +169,33 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   // Customization Options: Cover Pendant (1053x1746) - Supporting Split (Top + Bottom) & Full Modes
   const [pendantUploadMode, setPendantUploadMode] = useState<'split' | 'full'>('split');
   const [pendantActivePart, setPendantActivePart] = useState<'top' | 'bottom'>('top');
+  const [pendantTopRawImg, setPendantTopRawImg] = useState<HTMLImageElement | null>(null);
   const [pendantTopImg, setPendantTopImg] = useState<HTMLImageElement | null>(null);
+  const [pendantBottomRawImg, setPendantBottomRawImg] = useState<HTMLImageElement | null>(null);
   const [pendantBottomImg, setPendantBottomImg] = useState<HTMLImageElement | null>(null);
+  const [pendantFullRawImg, setPendantFullRawImg] = useState<HTMLImageElement | null>(null);
   const [pendantFullImg, setPendantFullImg] = useState<HTMLImageElement | null>(null);
   const [pendantTopScale, setPendantTopScale] = useState<number>(1.0);
   const [pendantTopOffsetX, setPendantTopOffsetX] = useState<number>(0);
   const [pendantTopOffsetY, setPendantTopOffsetY] = useState<number>(0);
+  const [pendantTopFlipX, setPendantTopFlipX] = useState<boolean>(false);
+  const [pendantTopBgConfig, setPendantTopBgConfig] = useState<ManualTransparencyConfig>(DEFAULT_BG_CONFIG);
   const [pendantBottomScale, setPendantBottomScale] = useState<number>(1.0);
   const [pendantBottomOffsetX, setPendantBottomOffsetX] = useState<number>(0);
   const [pendantBottomOffsetY, setPendantBottomOffsetY] = useState<number>(0);
+  const [pendantBottomFlipX, setPendantBottomFlipX] = useState<boolean>(false);
+  const [pendantBottomBottomCrop, setPendantBottomBottomCrop] = useState<number>(0);
+  const [pendantBottomTopCrop, setPendantBottomTopCrop] = useState<number>(0);
+  const [pendantBottomBgConfig, setPendantBottomBgConfig] = useState<ManualTransparencyConfig>(DEFAULT_BG_CONFIG);
+  const [pendantFullBgConfig, setPendantFullBgConfig] = useState<ManualTransparencyConfig>(DEFAULT_BG_CONFIG);
+  const [pendantFullConfig, setPendantFullConfig] = useState<FullCoverPendantConfig>({
+    enabled: false,
+    splitRatio: 0.5,
+    scale: 1.0,
+    offsetX: 0,
+    offsetY: 0,
+    flipX: false,
+  });
   const [pendantPlacement, setPendantPlacement] = useState<'top' | 'bottom' | 'dual'>('top');
   const [pendantScale, setPendantScale] = useState(1.0);
   const [pendantOffsetX, setPendantOffsetX] = useState(0);
@@ -184,7 +204,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   const [pendantTopFileName, setPendantTopFileName] = useState('');
   const [pendantBottomFileName, setPendantBottomFileName] = useState('');
   const [pendantFullFileName, setPendantFullFileName] = useState('');
-  const [pendantAddGlow, setPendantAddGlow] = useState(true);
+  const [pendantAddGlow, setPendantAddGlow] = useState(false);
 
   // Customization Options: Bubble Pendant (480x384) - Multi-Layer Top + Bottom & Full Mid-Split Modes
   const [bubbleUploadMode, setBubbleUploadMode] = useState<'split' | 'full'>('split');
@@ -282,7 +302,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
   // Manual Background Transparency Modal States (自动化透明 + 吸管连通漫水/全图取色 + 叠加吸取 + 撤销历史 + 圆形笔刷)
   const [bgModalOpen, setBgModalOpen] = useState(false);
-  const [bgModalTarget, setBgModalTarget] = useState<'bubbleTop' | 'bubbleBottom' | 'bubbleFull'>('bubbleTop');
+  const [bgModalTarget, setBgModalTarget] = useState<'bubbleTop' | 'bubbleBottom' | 'bubbleFull' | 'pendantTop' | 'pendantBottom' | 'pendantFull'>('bubbleTop');
   const [bgModalRawImg, setBgModalRawImg] = useState<HTMLImageElement | null>(null);
   const [bgModalConfig, setBgModalConfig] = useState<ManualTransparencyConfig>(DEFAULT_BG_CONFIG);
   const [bgModalDetectedHex, setBgModalDetectedHex] = useState<string>('#ffffff');
@@ -433,38 +453,75 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       const pendantImg = await loadImageElement(pendantBlob);
       setCachedPendantImg(pendantImg);
       setCachedCutoutImg(pendantImg);
+      setPendantFullRawImg(pendantImg);
       setPendantFullImg(pendantImg);
       setPendantFullFileName('完整示范封面挂件.png');
+      setPendantFullBgConfig({ ...DEFAULT_BG_CONFIG });
+      setPendantFullConfig({ enabled: false, splitRatio: 0.5, scale: 1.0, offsetX: 0, offsetY: 0, flipX: false });
       const bubbleImg = await loadImageElement(bubbleBlob);
       setCachedBubbleImg(bubbleImg);
       setBubbleFullRawImg(bubbleImg);
       setBubbleFullImg(bubbleImg);
       setBubbleFullFileName('完整示范气泡挂件.png');
 
-      // Crop and separate top and bottom parts for intuitive split-mode editing
+      // Crop and separate top and bottom parts with lossless normalized scale so first edit NEVER jumps
       try {
-        const pTop = await cropImageRegion(pendantImg, 0, 0, 1053, 342);
-        setPendantTopImg(pTop);
-        setPendantTopFileName('小熊探头 (顶部342px)');
-        setPendantTopScale(1.0);
-        setPendantTopOffsetX(0);
-        setPendantTopOffsetY(0);
+        const pTopRaw = await cropImageRegion(pendantImg, 0, 0, 1053, 342);
+        const pTopTrimmed = await trimImageTransparentBorders(pTopRaw, { alphaThreshold: 24, padding: 0 });
+        const initTopScale = pTopTrimmed.bbox.hasContent
+          ? Math.max(0.2, Math.round((pTopTrimmed.bbox.height / 342) * 100) / 100)
+          : 1.0;
+        const pTopOffsetY = pTopTrimmed.bbox.hasContent ? 0 : 0;
 
-        const pBottom = await cropImageRegion(pendantImg, 0, 1650, 1053, 96);
-        setPendantBottomImg(pBottom);
-        setPendantBottomFileName('金元宝萌爪 (脊端96px)');
-        setPendantBottomScale(1.0);
+        setPendantTopRawImg(pTopTrimmed.bbox.hasContent ? pTopTrimmed.img : null);
+        setPendantTopImg(pTopTrimmed.bbox.hasContent ? pTopTrimmed.img : null);
+        setPendantTopFileName(pTopTrimmed.bbox.hasContent ? '顶部探头挂件 (0~342px)' : '');
+        setPendantTopScale(initTopScale);
+        setPendantTopOffsetX(0);
+        setPendantTopOffsetY(pTopOffsetY);
+        setPendantTopFlipX(false);
+        setPendantTopBottomCrop(0);
+        setPendantTopBgConfig({ ...DEFAULT_BG_CONFIG });
+
+        const pBottomRaw = await cropImageRegion(pendantImg, 0, 1650, 1053, 96);
+        const pBottomTrimmed = await trimImageTransparentBorders(pBottomRaw, { alphaThreshold: 24, padding: 0 });
+        const initBottomScale = pBottomTrimmed.bbox.hasContent
+          ? Math.max(0.2, Math.round((pBottomTrimmed.bbox.height / 96) * 100) / 100)
+          : 1.0;
+
+        setPendantBottomRawImg(pBottomTrimmed.bbox.hasContent ? pBottomTrimmed.img : null);
+        setPendantBottomImg(pBottomTrimmed.bbox.hasContent ? pBottomTrimmed.img : null);
+        setPendantBottomFileName(pBottomTrimmed.bbox.hasContent ? '底部脊端挂件 (1650~1746px)' : '');
+        setPendantBottomScale(initBottomScale);
         setPendantBottomOffsetX(0);
         setPendantBottomOffsetY(0);
+        setPendantBottomFlipX(false);
+        setPendantBottomBottomCrop(0);
+        setPendantBottomTopCrop(0);
+        setPendantBottomBgConfig({ ...DEFAULT_BG_CONFIG });
+
+        const compPendant = await createCompositeCoverPendant({
+          topPart: pTopTrimmed.bbox.hasContent
+            ? { source: pTopTrimmed.img, scale: initTopScale, offsetX: 0, offsetY: 0, flipX: false, baseHeight: 342 }
+            : null,
+          bottomPart: pBottomTrimmed.bbox.hasContent
+            ? { source: pBottomTrimmed.img, scale: initBottomScale, offsetX: 0, offsetY: 0, flipX: false, baseHeight: 96 }
+            : null,
+          addGlow: false,
+        });
+        setPendantResult(compPendant);
 
         const bTopRaw = await cropImageRegion(bubbleImg, 0, 0, 480, 96);
         const bTopTrimmed = await trimImageTransparentBorders(bTopRaw, { alphaThreshold: 24, padding: 0 });
+        const bTopScale = bTopTrimmed.bbox.hasContent
+          ? Math.max(0.2, Math.round((bTopTrimmed.bbox.height / 96) * 100) / 100)
+          : 1.0;
         const initTopLayer: BubbleLayerItem = {
           id: 'top-demo-1',
           name: '趴气泡小熊 #1',
           rawSource: bTopTrimmed.img,
           source: bTopTrimmed.img,
-          scale: 1.0,
+          scale: bTopScale,
           offsetX: 0,
           offsetY: 0,
           flipX: false,
@@ -480,12 +537,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         const bBottomTrimmed = await trimImageTransparentBorders(bBottomRaw, { alphaThreshold: 24, padding: 0 });
         let initBottomLayers: BubbleLayerItem[] = [];
         if (bBottomTrimmed.bbox.hasContent) {
+          const bBotScale = Math.max(0.2, Math.round((bBottomTrimmed.bbox.height / 72) * 100) / 100);
           const initBotLayer: BubbleLayerItem = {
             id: 'bot-demo-1',
             name: '底部迎福垂饰 #1',
             rawSource: bBottomTrimmed.img,
             source: bBottomTrimmed.img,
-            scale: 1.0,
+            scale: bBotScale,
             offsetX: 0,
             offsetY: 0,
             flipX: false,
@@ -530,17 +588,23 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     topScale?: number;
     topOffX?: number;
     topOffY?: number;
+    topFlipX?: boolean;
     bottomScale?: number;
     bottomOffX?: number;
     bottomOffY?: number;
+    bottomFlipX?: boolean;
+    bottomBottomCrop?: number;
+    bottomTopCrop?: number;
     fullScale?: number;
     fullOffX?: number;
     fullOffY?: number;
+    fullConfig?: FullCoverPendantConfig;
     topImg?: HTMLImageElement | null;
     bottomImg?: HTMLImageElement | null;
     fullImg?: HTMLImageElement | null;
     mode?: 'split' | 'full';
     topBottomCrop?: number;
+    addGlow?: boolean;
   }) => {
     const mode = opts?.mode ?? pendantUploadMode;
     const tImg = opts?.topImg !== undefined ? opts.topImg : pendantTopImg;
@@ -550,25 +614,59 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     const tScale = opts?.topScale ?? pendantTopScale;
     const tOffX = opts?.topOffX ?? pendantTopOffsetX;
     const tOffY = opts?.topOffY ?? pendantTopOffsetY;
+    const tFlipX = opts?.topFlipX ?? pendantTopFlipX;
     const tCrop = opts?.topBottomCrop !== undefined ? opts.topBottomCrop : pendantTopBottomCrop;
 
     const bScale = opts?.bottomScale ?? pendantBottomScale;
     const bOffX = opts?.bottomOffX ?? pendantBottomOffsetX;
     const bOffY = opts?.bottomOffY ?? pendantBottomOffsetY;
+    const bFlipX = opts?.bottomFlipX ?? pendantBottomFlipX;
+    const bBotCrop = opts?.bottomBottomCrop !== undefined ? opts.bottomBottomCrop : pendantBottomBottomCrop;
+    const bTopCrop = opts?.bottomTopCrop !== undefined ? opts.bottomTopCrop : pendantBottomTopCrop;
+
+    const glow = opts?.addGlow ?? pendantAddGlow;
+    const fCfg: FullCoverPendantConfig = opts?.fullConfig ?? {
+      ...pendantFullConfig,
+      scale: opts?.fullScale ?? pendantFullConfig.scale ?? 1.0,
+      offsetX: opts?.fullOffX ?? pendantFullConfig.offsetX ?? 0,
+      offsetY: opts?.fullOffY ?? pendantFullConfig.offsetY ?? 0,
+    };
 
     try {
       if (mode === 'split') {
         const res = await createCompositeCoverPendant({
-          topPart: tImg ? { source: tImg, scale: tScale, offsetX: tOffX, offsetY: tOffY, bottomCropPercent: tCrop } : null,
-          bottomPart: bImg ? { source: bImg, scale: bScale, offsetX: bOffX, offsetY: bOffY } : null,
-          addGlow: pendantAddGlow,
+          topPart: tImg
+            ? {
+                source: tImg,
+                scale: tScale,
+                offsetX: tOffX,
+                offsetY: tOffY,
+                flipX: tFlipX,
+                bottomCropPercent: tCrop,
+                baseHeight: 342,
+              }
+            : null,
+          bottomPart: bImg
+            ? {
+                source: bImg,
+                scale: bScale,
+                offsetX: bOffX,
+                offsetY: bOffY,
+                flipX: bFlipX,
+                bottomCropPercent: bBotCrop,
+                topCropPercent: bTopCrop,
+                baseHeight: 96,
+              }
+            : null,
+          addGlow: glow,
         });
         setPendantResult(res);
       } else {
         if (!fImg) return;
         const res = await createCompositeCoverPendant({
           fullSource: fImg,
-          addGlow: pendantAddGlow,
+          fullConfig: fCfg,
+          addGlow: glow,
         });
         setPendantResult(res);
       }
@@ -683,14 +781,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         });
       }
     } else {
+      const nextCfg: FullCoverPendantConfig = {
+        ...pendantFullConfig,
+        offsetX: overrideOffsetX ?? pendantFullConfig.offsetX ?? 0,
+        offsetY: overrideOffsetY ?? pendantFullConfig.offsetY ?? 0,
+        scale: overrideScale ?? pendantFullConfig.scale ?? 1.0,
+      };
+      setPendantFullConfig(nextCfg);
       if (overrideOffsetX !== undefined) setPendantOffsetX(overrideOffsetX);
       if (overrideOffsetY !== undefined) setPendantOffsetY(overrideOffsetY);
       if (overrideScale !== undefined) setPendantScale(overrideScale);
-      await renderCompositePendant({
-        fullOffX: overrideOffsetX,
-        fullOffY: overrideOffsetY,
-        fullScale: overrideScale,
-      });
+      await renderCompositePendant({ fullConfig: nextCfg });
     }
   };
 
@@ -710,8 +811,16 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       setPendantActivePart(part);
     }
 
-    const startOffX = part === 'top' ? pendantTopOffsetX : (part === 'bottom' ? pendantBottomOffsetX : pendantOffsetX);
-    const startOffY = part === 'top' ? pendantTopOffsetY : (part === 'bottom' ? pendantBottomOffsetY : pendantOffsetY);
+    const startOffX = part === 'top'
+      ? pendantTopOffsetX
+      : part === 'bottom'
+      ? pendantBottomOffsetX
+      : (pendantFullConfig.offsetX ?? 0);
+    const startOffY = part === 'top'
+      ? pendantTopOffsetY
+      : part === 'bottom'
+      ? pendantBottomOffsetY
+      : (pendantFullConfig.offsetY ?? 0);
 
     pendantDragStartRef.current = {
       clientX: e.clientX,
@@ -750,11 +859,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         renderCompositePendant({ bottomOffX: nextOffX, bottomOffY: nextOffY });
       }, 50);
     } else {
+      const nextCfg: FullCoverPendantConfig = { ...pendantFullConfig, offsetX: nextOffX, offsetY: nextOffY };
+      setPendantFullConfig(nextCfg);
       setPendantOffsetX(nextOffX);
       setPendantOffsetY(nextOffY);
       if (pendantDebounceTimerRef.current) clearTimeout(pendantDebounceTimerRef.current);
       pendantDebounceTimerRef.current = setTimeout(() => {
-        renderCompositePendant({ fullOffX: nextOffX, fullOffY: nextOffY });
+        renderCompositePendant({ fullConfig: nextCfg });
       }, 50);
     }
   };
@@ -773,7 +884,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       } else if (part === 'bottom') {
         await renderCompositePendant({ bottomOffX: pendantBottomOffsetX, bottomOffY: pendantBottomOffsetY });
       } else {
-        await renderCompositePendant({ fullOffX: pendantOffsetX, fullOffY: pendantOffsetY });
+        await renderCompositePendant({ fullConfig: pendantFullConfig });
       }
       pendantDragStartRef.current = null;
     }
@@ -926,9 +1037,11 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         renderCompositePendant({ bottomOffY: nextY });
       }
     } else {
-      const nextY = pendantOffsetY + deltaY;
+      const nextY = (pendantFullConfig.offsetY ?? 0) + deltaY;
+      const nextCfg: FullCoverPendantConfig = { ...pendantFullConfig, offsetY: nextY };
+      setPendantFullConfig(nextCfg);
       setPendantOffsetY(nextY);
-      renderCompositePendant({ fullOffY: nextY });
+      renderCompositePendant({ fullConfig: nextCfg });
     }
   };
 
@@ -951,10 +1064,12 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         else pendantDebounceTimerRef.current = setTimeout(() => renderCompositePendant({ bottomOffY: deltaY }), 50);
       }
     } else {
+      const nextCfg: FullCoverPendantConfig = { ...pendantFullConfig, offsetY: deltaY };
+      setPendantFullConfig(nextCfg);
       setPendantOffsetY(deltaY);
       if (pendantDebounceTimerRef.current) clearTimeout(pendantDebounceTimerRef.current);
-      if (isFinal) renderCompositePendant({ fullOffY: deltaY });
-      else pendantDebounceTimerRef.current = setTimeout(() => renderCompositePendant({ fullOffY: deltaY }), 50);
+      if (isFinal) renderCompositePendant({ fullConfig: nextCfg });
+      else pendantDebounceTimerRef.current = setTimeout(() => renderCompositePendant({ fullConfig: nextCfg }), 50);
     }
   };
 
@@ -1136,13 +1251,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
   // 8. Upload & Multi-Layer / Transparency Processing Handlers
   // -------------------------------------------------------------
   const processUploadedFileToTransparentLayer = async (
-    file: File,
+    fileOrImg: File | HTMLImageElement,
     progressCallback?: (p: number, msg: string) => void
   ): Promise<{ rawImg: HTMLImageElement; cutoutImg: HTMLImageElement }> => {
     // Yield immediately to let browser render upload modal progress
     await new Promise((r) => setTimeout(r, 20));
     progressCallback?.(15, '正在读取并解析图片通道...');
-    const rawImg = await loadImageElement(file);
+    const rawImg = fileOrImg instanceof HTMLImageElement ? fileOrImg : await loadImageElement(fileOrImg);
     await new Promise((r) => setTimeout(r, 20));
 
     const rw = rawImg.naturalWidth || rawImg.width;
@@ -1263,7 +1378,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       setProcessingProgress(70);
       await new Promise((r) => setTimeout(r, 20));
 
-      const { cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
+      const { cutoutImg } = await processUploadedFileToTransparentLayer(isVideo ? sourceImg : file, (p, msg) => {
         setProcessingProgress(60 + Math.round(p * 0.2));
         setProcessingStatus(msg);
       });
@@ -1272,14 +1387,38 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       setCachedPendantImg(cutoutImg);
       setCachedBubbleImg(cutoutImg);
 
-      // 4. Pendant: 1053x1746
+      // 4. Pendant: 1053x1746 (sync top part so Tab 2 is immediately editable)
       setProcessingStatus('正在装配 1053×1746 封面挂件并锁定上侧可编辑区...');
       setProcessingProgress(85);
-      const pendant = await createCoverPendant(cutoutImg, {
-        placement: 'top',
-        scale: pendantScale,
-        offsetX: 0,
-        offsetY: 0,
+      setPendantPlacement('top');
+      setPendantTopRawImg(sourceImg);
+      setPendantTopImg(cutoutImg);
+      setPendantTopFileName(file.name || '主图抠像挂件');
+      setPendantTopScale(1.0);
+      setPendantTopOffsetX(0);
+      setPendantTopOffsetY(0);
+      setPendantTopFlipX(false);
+      setPendantTopBottomCrop(0);
+      setPendantTopBgConfig({ ...DEFAULT_BG_CONFIG });
+      setPendantBottomImg(null);
+      setPendantBottomRawImg(null);
+      setPendantBottomFileName('');
+      setPendantFullImg(null);
+      setPendantFullRawImg(null);
+      setPendantFullFileName('');
+      setPendantFullConfig((prev) => ({ ...prev, enabled: false }));
+
+      const pendant = await createCompositeCoverPendant({
+        topPart: {
+          source: cutoutImg,
+          scale: 1.0,
+          offsetX: 0,
+          offsetY: 0,
+          flipX: false,
+          bottomCropPercent: 0,
+          baseHeight: COVER_PENDANT_COORDS.topZone.h,
+        },
+        bottomPart: null,
         addGlow: pendantAddGlow,
       });
       setPendantResult(pendant);
@@ -1394,26 +1533,32 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     setProcessingStatus(`正在处理封面挂件${slot === 'top' ? '顶部探头' : slot === 'bottom' ? '底部垂饰' : '完整图'}...`);
     setProcessingProgress(30);
     try {
-      const { cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
+      const { rawImg, cutoutImg } = await processUploadedFileToTransparentLayer(file, (p, msg) => {
         setProcessingProgress(50 + Math.round(p * 0.2));
         setProcessingStatus(msg);
       });
 
       setProcessingProgress(85);
       if (slot === 'top') {
+        setPendantTopRawImg(rawImg);
         setPendantTopImg(cutoutImg);
         setPendantTopFileName(file.name);
+        setPendantTopBgConfig({ ...DEFAULT_BG_CONFIG });
         setPendantActivePart('top');
         await renderCompositePendant({ topImg: cutoutImg });
       } else if (slot === 'bottom') {
+        setPendantBottomRawImg(rawImg);
         setPendantBottomImg(cutoutImg);
         setPendantBottomFileName(file.name);
+        setPendantBottomBgConfig({ ...DEFAULT_BG_CONFIG });
         setPendantActivePart('bottom');
         await renderCompositePendant({ bottomImg: cutoutImg });
       } else {
+        setPendantFullRawImg(rawImg);
         setPendantFullImg(cutoutImg);
         setPendantFullFileName(file.name);
-        await renderCompositePendant({ fullImg: cutoutImg });
+        setPendantFullBgConfig({ ...DEFAULT_BG_CONFIG });
+        await renderCompositePendant({ fullImg: cutoutImg, mode: 'full' });
       }
       setProcessingProgress(100);
       onNotification(`🎉 封面挂件${slot === 'top' ? '顶部' : slot === 'bottom' ? '底部' : '完整'}图片已更新，并已自动合成至微信 1053×1746 规范图！`);
@@ -1428,16 +1573,19 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
   const handleClearPendantSlot = async (slot: 'top' | 'bottom' | 'full') => {
     if (slot === 'top') {
+      setPendantTopRawImg(null);
       setPendantTopImg(null);
       setPendantTopFileName('');
       await renderCompositePendant({ topImg: null });
       onNotification('已清除封面挂件顶部图片');
     } else if (slot === 'bottom') {
+      setPendantBottomRawImg(null);
       setPendantBottomImg(null);
       setPendantBottomFileName('');
       await renderCompositePendant({ bottomImg: null });
       onNotification('已清除封面挂件底部图片');
     } else {
+      setPendantFullRawImg(null);
       setPendantFullImg(null);
       setPendantFullFileName('');
       onNotification('已清除封面挂件完整图片');
@@ -1667,7 +1815,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     }
   };
 
-  const handleAutoTightTrim = async (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop') => {
+  const handleAutoTightTrim = async (slot: 'bubbleTop' | 'bubbleBottom' | 'pendantTop' | 'pendantBottom') => {
     setIsProcessing(true);
     setProcessingStatus('正在智能检测主体轮廓，清除周围空白与接触阴影...');
     try {
@@ -1681,13 +1829,21 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         const trimmed = await trimImageTransparentBorders(activeBottomLayer.source, { alphaThreshold: 35, padding: 0 });
         updateActiveBubbleLayer('bottom', { source: trimmed.img, bottomCropPercent: 0, topCropPercent: 0 });
         onNotification('✨ 已成功紧凑裁切底部垂饰！顶部多余空白已清除，紧密贴齐 Y=312px 卡片底边');
-      } else {
+      } else if (slot === 'pendantTop') {
         if (!pendantTopImg) return;
         const trimmed = await trimImageTransparentBorders(pendantTopImg, { alphaThreshold: 35, padding: 0 });
         setPendantTopImg(trimmed.img);
         setPendantTopBottomCrop(0);
         await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0 });
-        onNotification('✨ 已成功紧凑裁切！挂件底部多余空白与阴影已清除');
+        onNotification('✨ 已成功紧凑裁切！封面挂件顶部多余空白与阴影已清除');
+      } else {
+        if (!pendantBottomImg) return;
+        const trimmed = await trimImageTransparentBorders(pendantBottomImg, { alphaThreshold: 35, padding: 0 });
+        setPendantBottomImg(trimmed.img);
+        setPendantBottomBottomCrop(0);
+        setPendantBottomTopCrop(0);
+        await renderCompositePendant({ bottomImg: trimmed.img, bottomBottomCrop: 0, bottomTopCrop: 0 });
+        onNotification('✨ 已成功紧凑裁切！封面挂件底部多余空白与阴影已清除');
       }
     } catch (e: any) {
       onNotification('裁切失败: ' + e.message);
@@ -1827,7 +1983,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [bgModalOpen, bgUndoStack, bgRedoStack]);
 
-  const handleOpenBgModal = (target: 'bubbleTop' | 'bubbleBottom' | 'bubbleFull') => {
+  const handleOpenBgModal = (target: 'bubbleTop' | 'bubbleBottom' | 'bubbleFull' | 'pendantTop' | 'pendantBottom' | 'pendantFull') => {
     let raw: HTMLImageElement | null = null;
     let cfg: ManualTransparencyConfig = { ...DEFAULT_BG_CONFIG };
 
@@ -1845,11 +2001,32 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
       }
       raw = activeBottomLayer.rawSource || activeBottomLayer.source;
       cfg = { ...activeBottomLayer.bgConfig };
-    } else {
+    } else if (target === 'bubbleFull') {
       raw = bubbleFullRawImg || bubbleFullImg;
       cfg = { ...bubbleFullBgConfig };
       if (!raw) {
         onNotification('请先上传完整挂件图片');
+        return;
+      }
+    } else if (target === 'pendantTop') {
+      raw = pendantTopRawImg || pendantTopImg;
+      cfg = { ...pendantTopBgConfig };
+      if (!raw) {
+        onNotification('请先上传封面挂件顶部图片');
+        return;
+      }
+    } else if (target === 'pendantBottom') {
+      raw = pendantBottomRawImg || pendantBottomImg;
+      cfg = { ...pendantBottomBgConfig };
+      if (!raw) {
+        onNotification('请先上传封面挂件底部图片');
+        return;
+      }
+    } else {
+      raw = pendantFullRawImg || pendantFullImg;
+      cfg = { ...pendantFullBgConfig };
+      if (!raw) {
+        onNotification('请先上传封面挂件完整图片');
         return;
       }
     }
@@ -2067,9 +2244,25 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         setBubbleFullImg(fullOut);
         setBubbleFullBgConfig(bgModalConfig);
         await renderCompositeBubble({ fullImg: fullOut, mode: 'full' });
+      } else if (bgModalTarget === 'pendantTop') {
+        setPendantTopImg(trimmed.img);
+        setPendantTopBgConfig(bgModalConfig);
+        setPendantTopBottomCrop(0);
+        await renderCompositePendant({ topImg: trimmed.img, topBottomCrop: 0, mode: 'split' });
+      } else if (bgModalTarget === 'pendantBottom') {
+        setPendantBottomImg(trimmed.img);
+        setPendantBottomBgConfig(bgModalConfig);
+        setPendantBottomBottomCrop(0);
+        setPendantBottomTopCrop(0);
+        await renderCompositePendant({ bottomImg: trimmed.img, bottomBottomCrop: 0, bottomTopCrop: 0, mode: 'split' });
+      } else if (bgModalTarget === 'pendantFull') {
+        const fullOut = await loadImageElement(canvas.toDataURL('image/png'));
+        setPendantFullImg(fullOut);
+        setPendantFullBgConfig(bgModalConfig);
+        await renderCompositePendant({ fullImg: fullOut, mode: 'full' });
       }
       setBgModalOpen(false);
-      onNotification('✨ 透明背景调整已生效！已同步更新至 480×384 规范画布与真机预览。');
+      onNotification('✨ 透明背景调整已生效！已同步更新至标准画布与真机预览。');
     } catch (e: any) {
       onNotification('应用透明处理失败: ' + e.message);
     } finally {
@@ -2207,7 +2400,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
         onNotification('🎉 底部垂饰裁剪完成！已更新并紧贴 Y=312px');
       } else {
         setPendantBottomImg(trimmed.img);
-        await renderCompositePendant({ bottomImg: trimmed.img });
+        setPendantBottomBottomCrop(0);
+        setPendantBottomTopCrop(0);
+        await renderCompositePendant({ bottomImg: trimmed.img, bottomBottomCrop: 0, bottomTopCrop: 0 });
         onNotification('🎉 封面挂件底部裁剪完成！');
       }
       setCropModalOpen(false);
@@ -2674,7 +2869,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               <span className="text-xs font-extrabold text-neutral-900 tracking-tight">⑤ 示范模板</span>
             </div>
             <span className="text-[10px] px-2 py-0.5 rounded-full font-bold font-mono bg-purple-100 text-purple-800">
-              5套精选
+              {DEMO_RED_PACKET_THEMES.length}套精选
             </span>
           </div>
           <div className="flex items-center justify-between text-[11px] font-medium text-neutral-500">
@@ -3317,15 +3512,19 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       )}
                     </div>
 
-                    <div className="flex items-center gap-3 mb-3">
+                    <div className="flex items-center gap-3 mb-2.5">
                       <div className="w-14 h-14 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
                         {pendantTopImg ? (
-                          <img src={pendantTopImg.src} alt="顶部挂件" className="w-full h-full object-contain p-1" />
+                          <img
+                            src={pendantTopImg.src}
+                            alt="顶部挂件"
+                            className={`w-full h-full object-contain p-1 ${pendantTopFlipX ? '-scale-x-100' : ''}`}
+                          />
                         ) : (
                           <Crown className="w-5 h-5 text-neutral-300" />
                         )}
                       </div>
-                      <div className="flex-1 space-y-1">
+                      <div className="flex-1 min-w-0 space-y-1">
                         <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
                           <Upload className="w-3.5 h-3.5" />
                           <span>{pendantTopImg ? '替换顶部图片' : '上传顶部图片'}</span>
@@ -3336,6 +3535,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             onChange={(e) => {
                               if (e.target.files && e.target.files[0]) {
                                 handleUploadPendantSlot(e.target.files[0], 'top');
+                                e.target.value = '';
                               }
                             }}
                           />
@@ -3346,10 +3546,57 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </div>
                     </div>
 
+                    {/* Top Part Parity Action Toolbar */}
+                    {pendantTopImg && (
+                      <div className="flex items-center gap-1.5 flex-wrap pb-2.5">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenBgModal('pendantTop')}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-purple-50 hover:bg-purple-100 active:scale-95 text-purple-900 font-bold text-[11px] rounded-lg cursor-pointer transition-all border border-purple-300 shadow-2xs"
+                        >
+                          <Wand2 className="w-3 h-3 text-purple-700" />
+                          <span>背景透明</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAutoTightTrim('pendantTop')}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 hover:bg-amber-200 active:scale-95 text-amber-900 font-bold text-[11px] rounded-lg cursor-pointer transition-all border border-amber-300 shadow-2xs"
+                        >
+                          <Scissors className="w-3 h-3 text-amber-700" />
+                          <span>紧凑去留白</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCropModal('pendantTop')}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-[11px] rounded-lg cursor-pointer transition-all border border-neutral-200 shadow-2xs"
+                        >
+                          <Crop className="w-3 h-3 text-neutral-600" />
+                          <span>手动裁剪</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = !pendantTopFlipX;
+                            setPendantTopFlipX(next);
+                            setPendantActivePart('top');
+                            renderCompositePendant({ topFlipX: next });
+                          }}
+                          className={`inline-flex items-center gap-1 px-2 py-1 font-bold text-[11px] rounded-lg cursor-pointer transition-all border shadow-2xs ${
+                            pendantTopFlipX
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-white hover:bg-neutral-50 text-neutral-700 border-neutral-200'
+                          }`}
+                        >
+                          <FlipHorizontal className="w-3 h-3" />
+                          <span>镜像翻转</span>
+                        </button>
+                      </div>
+                    )}
+
                     {/* Scale Controls (20% to 500%) with [+] and [-] fine-tuning */}
                     <div className="space-y-1.5 pt-2 border-t border-neutral-200/70 text-xs">
                       <div className="flex items-center justify-between font-bold text-neutral-700">
-                        <span>缩放大小 (最大500%)</span>
+                        <span>缩放大小 (高 {Math.round(342 * pendantTopScale)}px)</span>
                         <span className="font-mono text-amber-800 font-black">{Math.round(pendantTopScale * 100)}%</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -3395,7 +3642,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         </button>
                       </div>
                       <div className="flex items-center gap-1 pt-1 flex-wrap">
-                        {[0.5, 1.0, 1.5, 2.5, 3.5, 5.0].map((val) => (
+                        {[0.5, 0.8, 1.0, 1.5, 2.5].map((val) => (
                           <button
                             key={val}
                             type="button"
@@ -3423,7 +3670,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <Move className="w-3.5 h-3.5 text-amber-600" />
                           <span>位置与像素微调 (X / Y 轴)</span>
                         </span>
-                        <span className="text-[10px] text-neutral-400 font-normal">步进 2px · 画板可直接拖动</span>
+                        <span className="text-[10px] text-neutral-400 font-normal">步进 2px · 画板可拖动</span>
                       </div>
 
                       {/* 1. 水平 X 轴微调 */}
@@ -3453,7 +3700,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.max(-250, pendantTopOffsetX - 2);
+                              const val = Math.max(-450, pendantTopOffsetX - 2);
                               setPendantTopOffsetX(val);
                               renderCompositePendant({ topOffX: val });
                             }}
@@ -3465,8 +3712,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </button>
                           <input
                             type="range"
-                            min="-250"
-                            max="250"
+                            min="-450"
+                            max="450"
                             step="1"
                             value={pendantTopOffsetX}
                             onChange={(e) => {
@@ -3479,7 +3726,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.min(250, pendantTopOffsetX + 2);
+                              const val = Math.min(450, pendantTopOffsetX + 2);
                               setPendantTopOffsetX(val);
                               renderCompositePendant({ topOffX: val });
                             }}
@@ -3500,6 +3747,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
                               pendantTopOffsetY === 0
                                 ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : pendantTopOffsetY > 0
+                                ? 'bg-red-100 text-red-900 border-red-300'
                                 : 'bg-amber-50 text-amber-800 border-amber-200'
                             }`}>
                               👑 下沿: {342 + pendantTopOffsetY}px
@@ -3523,7 +3772,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.max(-150, pendantTopOffsetY - 2);
+                              const val = Math.max(-200, pendantTopOffsetY - 2);
                               setPendantTopOffsetY(val);
                               renderCompositePendant({ topOffY: val });
                             }}
@@ -3535,8 +3784,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </button>
                           <input
                             type="range"
-                            min="-150"
-                            max="150"
+                            min="-200"
+                            max="200"
                             step="1"
                             value={pendantTopOffsetY}
                             onChange={(e) => {
@@ -3549,7 +3798,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.min(150, pendantTopOffsetY + 2);
+                              const val = Math.min(200, pendantTopOffsetY + 2);
                               setPendantTopOffsetY(val);
                               renderCompositePendant({ topOffY: val });
                             }}
@@ -3560,6 +3809,32 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             <span>▼</span>
                           </button>
                         </div>
+                      </div>
+
+                      {/* 3. 底部留白裁切滑块 */}
+                      <div className="space-y-1 pt-2 border-t border-neutral-100">
+                        <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600">
+                          <span className="flex items-center gap-1">
+                            <Scissors className="w-3 h-3 text-amber-600" />
+                            <span>切除顶部素材下方冗余留白</span>
+                          </span>
+                          <span className="font-mono text-neutral-700">
+                            {pendantTopBottomCrop > 0 ? `裁 ${Math.round(pendantTopBottomCrop * 100)}%` : '0%'}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="0.7"
+                          step="0.05"
+                          value={pendantTopBottomCrop}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            setPendantTopBottomCrop(val);
+                            renderCompositePendant({ topBottomCrop: val });
+                          }}
+                          className="w-full accent-amber-600 cursor-pointer"
+                        />
                       </div>
                     </div>
                   </div>
@@ -3589,15 +3864,19 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       )}
                     </div>
 
-                    <div className="flex items-center gap-3 mb-3">
+                    <div className="flex items-center gap-3 mb-2.5">
                       <div className="w-14 h-14 rounded-xl bg-white border border-neutral-200 flex items-center justify-center overflow-hidden shrink-0 shadow-2xs">
                         {pendantBottomImg ? (
-                          <img src={pendantBottomImg.src} alt="底部挂件" className="w-full h-full object-contain p-1" />
+                          <img
+                            src={pendantBottomImg.src}
+                            alt="底部挂件"
+                            className={`w-full h-full object-contain p-1 ${pendantBottomFlipX ? '-scale-x-100' : ''}`}
+                          />
                         ) : (
                           <Sparkles className="w-5 h-5 text-neutral-300" />
                         )}
                       </div>
-                      <div className="flex-1 space-y-1">
+                      <div className="flex-1 min-w-0 space-y-1">
                         <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
                           <Upload className="w-3.5 h-3.5" />
                           <span>{pendantBottomImg ? '替换底部图片' : '上传底部图片'}</span>
@@ -3608,6 +3887,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             onChange={(e) => {
                               if (e.target.files && e.target.files[0]) {
                                 handleUploadPendantSlot(e.target.files[0], 'bottom');
+                                e.target.value = '';
                               }
                             }}
                           />
@@ -3618,10 +3898,57 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </div>
                     </div>
 
+                    {/* Bottom Part Parity Action Toolbar */}
+                    {pendantBottomImg && (
+                      <div className="flex items-center gap-1.5 flex-wrap pb-2.5">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenBgModal('pendantBottom')}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-purple-50 hover:bg-purple-100 active:scale-95 text-purple-900 font-bold text-[11px] rounded-lg cursor-pointer transition-all border border-purple-300 shadow-2xs"
+                        >
+                          <Wand2 className="w-3 h-3 text-purple-700" />
+                          <span>背景透明</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAutoTightTrim('pendantBottom')}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-amber-100 hover:bg-amber-200 active:scale-95 text-amber-900 font-bold text-[11px] rounded-lg cursor-pointer transition-all border border-amber-300 shadow-2xs"
+                        >
+                          <Scissors className="w-3 h-3 text-amber-700" />
+                          <span>紧凑去留白</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCropModal('pendantBottom')}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-white hover:bg-neutral-50 active:scale-95 text-neutral-700 font-bold text-[11px] rounded-lg cursor-pointer transition-all border border-neutral-200 shadow-2xs"
+                        >
+                          <Crop className="w-3 h-3 text-neutral-600" />
+                          <span>手动裁剪</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = !pendantBottomFlipX;
+                            setPendantBottomFlipX(next);
+                            setPendantActivePart('bottom');
+                            renderCompositePendant({ bottomFlipX: next });
+                          }}
+                          className={`inline-flex items-center gap-1 px-2 py-1 font-bold text-[11px] rounded-lg cursor-pointer transition-all border shadow-2xs ${
+                            pendantBottomFlipX
+                              ? 'bg-amber-600 text-white border-amber-600'
+                              : 'bg-white hover:bg-neutral-50 text-neutral-700 border-neutral-200'
+                          }`}
+                        >
+                          <FlipHorizontal className="w-3 h-3" />
+                          <span>镜像翻转</span>
+                        </button>
+                      </div>
+                    )}
+
                     {/* Scale Controls (20% to 500%) with [+] and [-] fine-tuning */}
                     <div className="space-y-1.5 pt-2 border-t border-neutral-200/70 text-xs">
                       <div className="flex items-center justify-between font-bold text-neutral-700">
-                        <span>缩放大小 (最大500%)</span>
+                        <span>缩放大小 (高 {Math.round(96 * pendantBottomScale)}px)</span>
                         <span className="font-mono text-amber-800 font-black">{Math.round(pendantBottomScale * 100)}%</span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -3667,7 +3994,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         </button>
                       </div>
                       <div className="flex items-center gap-1 pt-1 flex-wrap">
-                        {[0.5, 1.0, 1.5, 2.5, 3.5, 5.0].map((val) => (
+                        {[0.5, 0.8, 1.0, 1.5, 2.5].map((val) => (
                           <button
                             key={val}
                             type="button"
@@ -3695,7 +4022,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <Move className="w-3.5 h-3.5 text-amber-600" />
                           <span>位置与像素微调 (X / Y 轴)</span>
                         </span>
-                        <span className="text-[10px] text-neutral-400 font-normal">步进 2px · 画板可直接拖动</span>
+                        <span className="text-[10px] text-neutral-400 font-normal">步进 2px · 画板可拖动</span>
                       </div>
 
                       {/* 1. 水平 X 轴微调 */}
@@ -3725,7 +4052,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.max(-250, pendantBottomOffsetX - 2);
+                              const val = Math.max(-450, pendantBottomOffsetX - 2);
                               setPendantBottomOffsetX(val);
                               renderCompositePendant({ bottomOffX: val });
                             }}
@@ -3737,8 +4064,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </button>
                           <input
                             type="range"
-                            min="-250"
-                            max="250"
+                            min="-450"
+                            max="450"
                             step="1"
                             value={pendantBottomOffsetX}
                             onChange={(e) => {
@@ -3751,7 +4078,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              const val = Math.min(250, pendantBottomOffsetX + 2);
+                              const val = Math.min(450, pendantBottomOffsetX + 2);
                               setPendantBottomOffsetX(val);
                               renderCompositePendant({ bottomOffX: val });
                             }}
@@ -3772,6 +4099,8 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             <span className={`font-mono text-xs font-bold px-2 py-0.5 rounded border shadow-2xs ${
                               pendantBottomOffsetY === 0
                                 ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : pendantBottomOffsetY < 0
+                                ? 'bg-red-100 text-red-900 border-red-300'
                                 : 'bg-amber-50 text-amber-800 border-amber-200'
                             }`}>
                               ✨ 上沿: {1650 + pendantBottomOffsetY}px
@@ -3833,36 +4162,267 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </button>
                         </div>
                       </div>
+
+                      {/* 3. 上方留白裁切 */}
+                      <div className="space-y-1 pt-2 border-t border-neutral-100">
+                        <div className="flex items-center justify-between text-[11px] font-bold text-neutral-600">
+                          <span className="flex items-center gap-1">
+                            <Scissors className="w-3 h-3 text-amber-600" />
+                            <span>切除底部素材上方冗余留白</span>
+                          </span>
+                          <span className="font-mono text-neutral-700">
+                            {pendantBottomTopCrop > 0 ? `裁 ${Math.round(pendantBottomTopCrop * 100)}%` : '0%'}
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="0.5"
+                          step="0.05"
+                          value={pendantBottomTopCrop}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            setPendantBottomTopCrop(val);
+                            renderCompositePendant({ bottomTopCrop: val });
+                          }}
+                          className="w-full accent-amber-600 cursor-pointer"
+                        />
+                      </div>
                     </div>
                   </div>
                 </div>
               ) : (
-                /* Full Single Image Upload Card */
-                <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200 space-y-3">
-                  <div className="flex items-center justify-between">
+                /* Full Single Image Upload Card with Full Transform, Split & Transparency Controls */
+                <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200 space-y-3 text-xs">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                     <div>
                       <h4 className="font-bold text-xs text-neutral-900">完整透明挂件图片 (1053 × 1746)</h4>
-                      <p className="text-[11px] text-neutral-400 mt-0.5">上传已在设计软件中排版好的完整透明背景 PNG</p>
+                      <p className="text-[11px] text-neutral-400 mt-0.5">支持直接缩放平移，或启用「中间截开分置」将整体图拆分至上下安全区</p>
                     </div>
-                    <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{pendantFullImg ? '替换整张挂件' : '上传完整挂件图片'}</span>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
-                        className="hidden"
-                        onChange={(e) => {
-                          if (e.target.files && e.target.files[0]) {
-                            handleUploadPendantSlot(e.target.files[0], 'full');
-                          }
-                        }}
-                      />
-                    </label>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 active:scale-95 text-white font-bold text-xs rounded-xl cursor-pointer transition-all shadow-xs">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{pendantFullImg ? '替换整张挂件' : '上传完整挂件图片'}</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          className="hidden"
+                          onChange={(e) => {
+                            if (e.target.files && e.target.files[0]) {
+                              handleUploadPendantSlot(e.target.files[0], 'full');
+                              e.target.value = '';
+                            }
+                          }}
+                        />
+                      </label>
+                      {pendantFullImg && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenBgModal('pendantFull')}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-900 font-bold text-xs rounded-xl border border-purple-300 cursor-pointer"
+                          >
+                            <Wand2 className="w-3.5 h-3.5 text-purple-700" />
+                            <span>背景透明</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = { ...pendantFullConfig, flipX: !pendantFullConfig.flipX };
+                              setPendantFullConfig(next);
+                              renderCompositePendant({ mode: 'full', fullConfig: next });
+                            }}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 font-bold text-xs rounded-xl border cursor-pointer ${
+                              pendantFullConfig.flipX
+                                ? 'bg-amber-600 text-white border-amber-600'
+                                : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
+                            }`}
+                          >
+                            <FlipHorizontal className="w-3.5 h-3.5" />
+                            <span>镜像翻转</span>
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
+
+                  {pendantFullImg && (
+                    <div className="space-y-3 pt-2 border-t border-neutral-200/80">
+                      <div className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-neutral-200">
+                        <label htmlFor="pendant-full-split" className="font-bold text-neutral-800 cursor-pointer flex items-center gap-2">
+                          <input
+                            id="pendant-full-split"
+                            type="checkbox"
+                            checked={Boolean(pendantFullConfig.enabled)}
+                            onChange={(e) => {
+                              const next = { ...pendantFullConfig, enabled: e.target.checked };
+                              setPendantFullConfig(next);
+                              renderCompositePendant({ mode: 'full', fullConfig: next });
+                            }}
+                            className="w-4 h-4 accent-amber-600 rounded cursor-pointer"
+                          />
+                          <span>从中间截开分置 (上半部分对齐顶部 0~342px，下半部分对齐底部 1650~1746px)</span>
+                        </label>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div className="p-2.5 bg-white rounded-xl border border-neutral-200 space-y-1">
+                          <div className="flex justify-between font-bold text-neutral-700">
+                            <span>缩放比例</span>
+                            <span className="font-mono text-amber-800">{Math.round((pendantFullConfig.scale ?? 1.0) * 100)}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.2"
+                            max="3.0"
+                            step="0.05"
+                            value={pendantFullConfig.scale ?? 1.0}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              const next = { ...pendantFullConfig, scale: val };
+                              setPendantFullConfig(next);
+                              renderCompositePendant({ mode: 'full', fullConfig: next });
+                            }}
+                            className="w-full accent-amber-600 cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="p-2.5 bg-white rounded-xl border border-neutral-200 space-y-1">
+                          <div className="flex justify-between font-bold text-neutral-700">
+                            <span>水平 X 轴</span>
+                            <span className="font-mono text-amber-800">{pendantFullConfig.offsetX ?? 0}px</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="-450"
+                            max="450"
+                            step="1"
+                            value={pendantFullConfig.offsetX ?? 0}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              const next = { ...pendantFullConfig, offsetX: val };
+                              setPendantFullConfig(next);
+                              renderCompositePendant({ mode: 'full', fullConfig: next });
+                            }}
+                            className="w-full accent-amber-600 cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="p-2.5 bg-white rounded-xl border border-neutral-200 space-y-1">
+                          <div className="flex justify-between font-bold text-neutral-700">
+                            <span>垂直 Y 轴</span>
+                            <span className="font-mono text-amber-800">{pendantFullConfig.offsetY ?? 0}px</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="-300"
+                            max="300"
+                            step="1"
+                            value={pendantFullConfig.offsetY ?? 0}
+                            onChange={(e) => {
+                              const val = parseInt(e.target.value);
+                              const next = { ...pendantFullConfig, offsetY: val };
+                              setPendantFullConfig(next);
+                              renderCompositePendant({ mode: 'full', fullConfig: next });
+                            }}
+                            className="w-full accent-amber-600 cursor-pointer"
+                          />
+                        </div>
+                      </div>
+
+                      {pendantFullConfig.enabled && (
+                        <div className="p-2.5 bg-white rounded-xl border border-neutral-200 space-y-1">
+                          <div className="flex justify-between font-bold text-neutral-700">
+                            <span>✂️ 上下截开分界位置</span>
+                            <span className="font-mono text-amber-800">{Math.round((pendantFullConfig.splitRatio ?? 0.5) * 100)}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0.15"
+                            max="0.85"
+                            step="0.01"
+                            value={pendantFullConfig.splitRatio ?? 0.5}
+                            onChange={(e) => {
+                              const val = parseFloat(e.target.value);
+                              const next = { ...pendantFullConfig, splitRatio: val };
+                              setPendantFullConfig(next);
+                              renderCompositePendant({ mode: 'full', fullConfig: next });
+                            }}
+                            className="w-full accent-amber-600 cursor-pointer"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* Interactive Visual Canvas with Direct Dragging (No crosshair dot, smooth 2D movement) */}
+              {/* Real-Time Cover Pendant Compliance & Clipping Banner */}
+              {pendantResult && (() => {
+                const topOver342 = pendantUploadMode === 'split' && (342 + pendantTopOffsetY) > 342;
+                const botUnder1650 = pendantUploadMode === 'split' && (1650 + pendantBottomOffsetY) < 1650;
+                const diag = pendantResult.diagnostics;
+                const hasClip = diag && (diag.clippedEdges.top || diag.clippedEdges.bottom || diag.clippedEdges.left || diag.clippedEdges.right);
+                const isIntruded = diag?.cardIntruded || topOver342 || botUnder1650;
+
+                return (
+                  <div className={`p-3 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs ${
+                    isIntruded || hasClip
+                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                      : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
+                  }`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold">
+                        {isIntruded ? '⚠️ 挂件超出安全线（导出图已自动透明镂空主体区）' : hasClip ? '⚠️ 部分图像超出画布边界' : '✅ 1053×1746 平台审核完全合规'}
+                      </span>
+                      {pendantUploadMode === 'split' && (
+                        <>
+                          <span className={`px-2 py-0.5 rounded-full font-mono text-[11px] font-bold ${
+                            topOver342 ? 'bg-red-600 text-white' : 'bg-white/90 border border-emerald-200 text-emerald-800'
+                          }`}>
+                            顶部下沿: {342 + pendantTopOffsetY}px
+                          </span>
+                          <span className={`px-2 py-0.5 rounded-full font-mono text-[11px] font-bold ${
+                            botUnder1650 ? 'bg-red-600 text-white' : 'bg-white/90 border border-emerald-200 text-emerald-800'
+                          }`}>
+                            底部上沿: {1650 + pendantBottomOffsetY}px
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {(topOver342 || botUnder1650) && pendantUploadMode === 'split' && (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {topOver342 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPendantTopOffsetY(0);
+                              renderCompositePendant({ topOffY: 0 });
+                            }}
+                            className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl cursor-pointer text-[11px]"
+                          >
+                            🎯 顶部贴齐 342px
+                          </button>
+                        )}
+                        {botUnder1650 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPendantBottomOffsetY(0);
+                              renderCompositePendant({ bottomOffY: 0 });
+                            }}
+                            className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl cursor-pointer text-[11px]"
+                          >
+                            🎯 底部贴齐 1650px
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Interactive Visual Canvas with Direct Dragging & Real Cover Card Backdrop */}
               <div className="flex flex-col items-center pt-1">
                 <div className="flex items-center justify-center gap-3 w-full">
                   {/* Left Vertical Fine-Tuning Control Bar */}
@@ -3878,7 +4438,11 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
                     <div className="flex-1 flex flex-col items-center justify-center my-2 relative group py-2 w-full">
                       <span className="text-[9px] font-mono font-bold text-amber-800 bg-white/95 px-1 py-0.5 rounded border border-neutral-200 shadow-2xs whitespace-nowrap text-center mb-2">
-                        {pendantActivePart === 'top' ? `${342 + pendantTopOffsetY}px` : `${1650 + pendantBottomOffsetY}px`}
+                        {pendantUploadMode === 'full'
+                          ? `${pendantFullConfig.offsetY ?? 0}px`
+                          : pendantActivePart === 'top'
+                          ? `${342 + pendantTopOffsetY}px`
+                          : `${1650 + pendantBottomOffsetY}px`}
                       </span>
 
                       <div
@@ -3903,13 +4467,25 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         <div
                           className="w-full bg-amber-500 rounded-full pointer-events-none transition-all duration-75"
                           style={{
-                            height: `${Math.max(10, Math.min(90, 50 - (pendantActivePart === 'top' ? pendantTopOffsetY : pendantBottomOffsetY) / 1.5))}%`,
+                            height: `${Math.max(
+                              10,
+                              Math.min(
+                                90,
+                                50 -
+                                  (pendantUploadMode === 'full'
+                                    ? pendantFullConfig.offsetY ?? 0
+                                    : pendantActivePart === 'top'
+                                    ? pendantTopOffsetY
+                                    : pendantBottomOffsetY) /
+                                    1.5
+                              )
+                            )}%`,
                           }}
                         />
                       </div>
 
                       <span className="text-[9px] font-bold text-neutral-500 mt-2 whitespace-nowrap">
-                        {pendantActivePart === 'top' ? '顶部' : '底部'}
+                        {pendantUploadMode === 'full' ? '整图' : pendantActivePart === 'top' ? '顶部' : '底部'}
                       </span>
                     </div>
 
@@ -3934,40 +4510,54 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     }`}
                     title="在上方或下方直接按住拖拽，支持上下左右全向自由平移"
                   >
-                    {/* WeChat Red Packet Silhouette in Background */}
+                    {/* Real WeChat Red Envelope Card Silhouette (Using User's Actual Cover Image inside rect(96, 342, 861, 1308)) */}
                     <div
-                      className="absolute rounded-2xl bg-gradient-to-b from-red-600/15 to-red-800/25 border border-red-500/30 pointer-events-none z-0 flex flex-col items-center justify-between py-3"
+                      className="absolute rounded-[8px] overflow-hidden border border-red-400/50 bg-[#b91c1c] pointer-events-none z-0 flex flex-col justify-between shadow-sm"
                       style={{
-                        top: '19.59%', // exactly 342px in 1746px (Figure 5)
-                        height: '74.91%', // exactly 1308px in 1746px (Figure 5)
-                        left: '9.12%', // exactly 96px in 1053px (Figure 5)
-                        width: '81.77%', // exactly 861px in 1053px (Figure 5)
+                        top: `${(COVER_PENDANT_COORDS.cardBody.y / 1746) * 100}%`, // 19.59%
+                        height: `${(COVER_PENDANT_COORDS.cardBody.h / 1746) * 100}%`, // 74.91%
+                        left: `${(COVER_PENDANT_COORDS.cardBody.x / 1053) * 100}%`, // 9.12%
+                        width: `${(COVER_PENDANT_COORDS.cardBody.w / 1053) * 100}%`, // 81.77%
                       }}
                     >
-                      <div className="flex flex-col items-center gap-1 opacity-50">
-                        <div className="w-5 h-5 rounded-full bg-white/60" />
-                        <div className="w-10 h-1.5 rounded bg-white/50" />
+                      <div className="relative w-full aspect-[957/1278] overflow-hidden">
+                        {coverResult && (
+                          <img
+                            src={coverResult.url}
+                            alt="封面预览底图"
+                            className="w-full h-full object-cover object-top"
+                          />
+                        )}
                       </div>
-                      <div className="w-7 h-7 rounded-full bg-amber-400/80 border-2 border-amber-200 flex items-center justify-center text-[9px] text-amber-950 font-bold shadow-xs">
-                        開
+                      {/* Curved Envelope Flap & 開 button */}
+                      <div className="absolute inset-x-0 bottom-0 h-[24%] pointer-events-none">
+                        <svg viewBox="0 0 200 66" preserveAspectRatio="none" className="w-full h-full text-[#cf3630]">
+                          <path d="M 0,8 Q 100,48 200,8 L 200,66 L 0,66 Z" fill="currentColor" />
+                        </svg>
+                      </div>
+                      <div className="relative z-10 pb-2.5 flex justify-center">
+                        <div className="w-7 h-7 rounded-full bg-gradient-to-b from-[#ffe57f] to-[#d97706] border border-[#fffbeb] flex items-center justify-center text-[9px] text-[#78350f] font-black shadow-xs">
+                          開
+                        </div>
                       </div>
                     </div>
 
                     {pendantResult ? (
                       <>
+                        {/* Exact 1:1 Rendered Pendant Output (ZERO artificial CSS drop-shadow) */}
                         <img
                           src={pendantResult.url}
                           alt="封面挂件"
-                          className="w-full h-full object-contain rounded-xl drop-shadow-md z-10 pointer-events-none"
+                          className="w-full h-full object-contain z-10 pointer-events-none"
                         />
 
-                        {/* WeChat Figure 5 Official Editable Guides */}
+                        {/* WeChat Figure 5 Official Editable Guides (Top, Bottom, Left/Right Side Wings, Center Forbidden Card) */}
                         {showGuides && (
                           <div className="absolute inset-0 pointer-events-none z-20">
                             {/* Top Editable Area (0 ~ 342px) */}
                             <div
-                              className={`absolute inset-x-0 top-0 border border-dashed rounded-t-xl flex items-center justify-center transition-all ${
-                                pendantActivePart === 'top' ? 'border-amber-500 bg-amber-500/15' : 'border-amber-400/50 bg-amber-500/5'
+                              className={`absolute inset-x-0 top-0 border border-dashed flex items-center justify-center transition-all ${
+                                pendantActivePart === 'top' ? 'border-amber-500 bg-amber-500/12' : 'border-amber-400/60 bg-amber-500/5'
                               }`}
                               style={{ height: '19.59%' }}
                             >
@@ -3976,9 +4566,19 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                               </span>
                             </div>
 
-                            {/* Middle Forbidden Area (342 ~ 1650px) */}
+                            {/* Left & Right Editable Side Wings (0~96px & 957~1053px) */}
                             <div
-                              className="absolute border border-dashed border-red-300/80 bg-red-500/5 rounded-xl flex items-center justify-center"
+                              className="absolute border-r border-dashed border-emerald-500/80 bg-emerald-500/8"
+                              style={{ top: '19.59%', height: '74.91%', left: 0, width: '9.12%' }}
+                            />
+                            <div
+                              className="absolute border-l border-dashed border-emerald-500/80 bg-emerald-500/8"
+                              style={{ top: '19.59%', height: '74.91%', right: 0, width: '9.12%' }}
+                            />
+
+                            {/* Middle Forbidden Area (96..957, 342..1650px) */}
+                            <div
+                              className="absolute border border-dashed border-red-400/90 bg-red-500/6 rounded-[8px] flex items-center justify-center"
                               style={{
                                 top: '19.59%',
                                 height: '74.91%',
@@ -3986,22 +4586,22 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                                 width: '81.77%',
                               }}
                             >
-                              <span className="text-[8px] font-bold text-red-500 bg-white/95 px-1.5 py-0.5 rounded border border-red-200">
-                                🚫 不可编辑主体区 (1308×861)
+                              <span className="text-[8px] font-bold text-red-600 bg-white/95 px-1.5 py-0.5 rounded border border-red-200">
+                                🚫 不可编辑主体区 (861×1308)
                               </span>
                             </div>
 
                             {/* Bottom Editable Area (1650 ~ 1746px) */}
                             <div
-                              className={`absolute inset-x-0 border border-dashed rounded-b-xl flex items-center justify-center transition-all ${
-                                pendantActivePart === 'bottom' ? 'border-amber-500 bg-amber-500/15' : 'border-amber-400/50 bg-amber-500/5'
+                              className={`absolute inset-x-0 bottom-0 border border-dashed flex items-center justify-center transition-all ${
+                                pendantActivePart === 'bottom' ? 'border-amber-500 bg-amber-500/12' : 'border-amber-400/60 bg-amber-500/5'
                               }`}
                               style={{
                                 top: '94.50%',
                                 height: '5.50%',
                               }}
                             >
-                              <span className="absolute bottom-1 left-1.5 text-[8px] font-bold text-amber-900 bg-white/95 px-1 rounded shadow-2xs border border-amber-200">
+                              <span className="text-[7px] font-bold text-amber-900 bg-white/95 px-1 rounded shadow-2xs border border-amber-200">
                                 底部脊端区 (1650~1746px)
                               </span>
                             </div>
@@ -4009,7 +4609,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         )}
 
                         {/* Dynamic Moving Dashed Line for Top Part (探头下沿移动虚线) */}
-                        {(pendantTopImg || pendantActivePart === 'top') && (
+                        {pendantUploadMode === 'split' && (pendantTopImg || pendantActivePart === 'top') && (
                           <div
                             className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
                             style={{
@@ -4028,17 +4628,17 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             >
                               <span>探头下沿: {342 + pendantTopOffsetY}px</span>
                               {(342 + pendantTopOffsetY) === 342 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐342px</span>
+                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 对齐342px</span>
                               )}
                               {(342 + pendantTopOffsetY) > 342 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入主体区 +{pendantTopOffsetY}px</span>
+                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入+{pendantTopOffsetY}px</span>
                               )}
                             </div>
                           </div>
                         )}
 
                         {/* Dynamic Moving Dashed Line for Bottom Part (底部上沿移动虚线) */}
-                        {(pendantBottomImg || pendantActivePart === 'bottom') && (
+                        {pendantUploadMode === 'split' && (pendantBottomImg || pendantActivePart === 'bottom') && (
                           <div
                             className="absolute inset-x-0 pointer-events-none z-30 transition-all duration-75 flex items-center justify-center"
                             style={{
@@ -4057,10 +4657,10 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                             >
                               <span>底部上沿: {1650 + pendantBottomOffsetY}px</span>
                               {(1650 + pendantBottomOffsetY) === 1650 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 完美对齐1650px</span>
+                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">🎯 对齐1650px</span>
                               )}
                               {(1650 + pendantBottomOffsetY) < 1650 && (
-                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入主体区 {pendantBottomOffsetY}px</span>
+                                <span className="text-[8px] bg-white/20 px-1 rounded font-bold">⚠️ 侵入{pendantBottomOffsetY}px</span>
                               )}
                             </div>
                           </div>
@@ -4074,7 +4674,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     {isDraggingPendant && (
                       <div className="absolute top-2 bg-neutral-900/90 text-white text-[10px] px-3 py-1 rounded-full backdrop-blur-md font-mono z-30 flex items-center gap-1.5">
                         <Move className="w-3 h-3 text-amber-400" />
-                        <span>正在平移: {pendantActivePart === 'top' ? '顶部探头' : '底部脊端'}</span>
+                        <span>
+                          正在平移: {pendantUploadMode === 'full' ? '整张挂件' : pendantActivePart === 'top' ? '顶部探头' : '底部脊端'}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -4094,7 +4696,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     <div className="h-[74.91%] flex flex-col justify-center border-l-2 border-red-400 pl-2 text-red-700 bg-red-50/60 rounded-r-lg my-1">
                       <div className="font-extrabold text-red-700">中间 1308px</div>
                       <div className="text-[8px] text-red-600 font-sans font-bold">🚫 主体不可编辑</div>
-                      <div className="text-[8px] text-neutral-400">Y: 342 ~ 1650px</div>
+                      <div className="text-[8px] text-neutral-400">左右侧翼 0~96 / 957~1053 可放挂饰</div>
                     </div>
 
                     {/* Bottom 96px Bracket */}
@@ -4103,18 +4705,24 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         <span>底部 96px</span>
                       </div>
                       <div className="text-[8px] text-amber-700 font-sans">脊端可编辑区</div>
-                      <div className="text-[8px] text-neutral-400">Y: 1650 ~ 1746px</div>
                     </div>
                   </div>
                 </div>
 
-                <div className="mt-2 text-center space-y-1">
-                  <span className="text-[11px] font-bold text-amber-800 bg-amber-50 px-3 py-0.5 rounded-full border border-amber-200 inline-block font-mono shadow-2xs">
-                    ✅ 顶部探头 (0~342px) 与底部垂饰 (1650~1746px) 均已就位 · 符合微信规范 ✓
-                  </span>
-                  <p className="text-[10px] text-neutral-400">
-                    💡 提示：在上方画板上直接按住鼠标拖动，移动虚线实时显示对齐像素数
-                  </p>
+                <div className="mt-2.5 flex items-center justify-center gap-3 flex-wrap text-[11px]">
+                  <label className="inline-flex items-center gap-1.5 text-xs font-medium text-neutral-600 cursor-pointer bg-neutral-100 px-2.5 py-1 rounded-xl border border-neutral-200">
+                    <input
+                      type="checkbox"
+                      checked={pendantAddGlow}
+                      onChange={(e) => {
+                        const next = e.target.checked;
+                        setPendantAddGlow(next);
+                        renderCompositePendant({ addGlow: next });
+                      }}
+                      className="accent-amber-600 rounded cursor-pointer"
+                    />
+                    <span>附加暖金外发光边缘 (默认关闭以保持100%原始画质)</span>
+                  </label>
                 </div>
               </div>
 
@@ -4129,7 +4737,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </span>
                     </div>
                     <p className="text-[11px] text-amber-900/70">
-                      已将顶部与底部图片合成为一张透明PNG，中间严格留空，大小 &le; 300KB，可直接提交微信红包开放平台审核。
+                      已将顶部、底部与左右侧翼挂件合成为一张透明PNG，中间红包主体严格镂空，大小 &le; 300KB，所见即所得可直接导入开放平台。
                     </p>
                   </div>
                   <div className="flex items-center gap-2 flex-wrap shrink-0">
@@ -4203,12 +4811,19 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
 
               {/* 2. Real-Time WeChat Compliance & True Mobile Size Warning Banner */}
               {(() => {
-                const currentBottomY = 96 + bubbleTopOffsetY;
-                const approxH = Math.round(96 * bubbleTopScale);
+                const effTopOffsetY = bubbleUploadMode === 'full' ? bubbleFullSplitConfig.topOffsetY : bubbleTopOffsetY;
+                const effTopScale = bubbleUploadMode === 'full' ? bubbleFullSplitConfig.topScale : bubbleTopScale;
+                const effBotOffsetY = bubbleUploadMode === 'full' ? bubbleFullSplitConfig.bottomOffsetY : bubbleBottomOffsetY;
+                const currentBottomY = 96 + effTopOffsetY;
+                const approxH = Math.round(96 * effTopScale);
                 const currentTopY = currentBottomY - approxH;
-                const isBottomOver96 = bubbleUploadMode === 'split' && bubbleActivePart === 'top' && currentBottomY > 96;
-                const isBottomIntrude312 = bubbleUploadMode === 'split' && bubbleActivePart === 'bottom' && (312 + bubbleBottomOffsetY) < 312;
-                const isTopOverCanvas = bubbleUploadMode === 'split' && bubbleActivePart === 'top' && currentTopY < 0;
+                const isBottomOver96 = (bubbleUploadMode === 'split' ? bubbleActivePart === 'top' : bubbleFullSplitConfig.enabled) && currentBottomY > 96;
+                const isBottomIntrude312 = (bubbleUploadMode === 'split' ? bubbleActivePart === 'bottom' : bubbleFullSplitConfig.enabled) && (312 + effBotOffsetY) < 312;
+                const isTopOverCanvas = (bubbleUploadMode === 'split' ? bubbleActivePart === 'top' : bubbleFullSplitConfig.enabled) && currentTopY < 0;
+
+                const diag = bubbleResult?.diagnostics;
+                const hasPngClip = Boolean(diag && (diag.clippedEdges.top || diag.clippedEdges.bottom || diag.clippedEdges.left || diag.clippedEdges.right));
+                const hasCardIntrusion = Boolean(diag?.cardIntruded);
 
                 const opaqueW = bubbleResult?.topOpaqueWidth || bubbleResult?.opaqueWidth || 0;
                 const isNarrowOnMobile = opaqueW > 0 && opaqueW < 160;
@@ -4218,25 +4833,29 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                   <div className="space-y-2">
                     {/* Compliance Status Bar */}
                     <div className={`p-3 rounded-2xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs ${
-                      isBottomOver96 || isBottomIntrude312
+                      isBottomOver96 || isBottomIntrude312 || hasCardIntrusion
                         ? 'bg-red-50/90 border-red-300 text-red-950'
-                        : isTopOverCanvas
+                        : isTopOverCanvas || hasPngClip
                         ? 'bg-amber-50/90 border-amber-300 text-amber-950'
                         : 'bg-emerald-50/80 border-emerald-200 text-emerald-950'
                     }`}>
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-bold flex items-center gap-1 font-mono">
-                          {isBottomOver96 || isBottomIntrude312 ? '🚨 平台驳回风险' : isTopOverCanvas ? '⚠️ 顶沿溢出提醒' : '✅ 微信审核合规'}
+                          {isBottomOver96 || isBottomIntrude312 || hasCardIntrusion
+                            ? '⚠️ 主体区越界（已自动透明镂空）'
+                            : isTopOverCanvas || hasPngClip
+                            ? '⚠️ 画布边缘裁切提醒'
+                            : '✅ 微信审核合规'}
                         </span>
                         {bubbleUploadMode === 'split' && bubbleActivePart === 'top' && (
                           <>
                             <span className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] ${
                               isBottomOver96 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
                             }`}>
-                              顶部下沿: {currentBottomY}px {isBottomOver96 ? `(超标 ${currentBottomY - 96}px 必拒)` : '(<= 96px 合规)'}
+                              顶部下沿: {currentBottomY}px {isBottomOver96 ? `(进入卡片 ${currentBottomY - 96}px 已镂空)` : '(<= 96px 合规)'}
                             </span>
                             <span className="px-2 py-0.5 rounded-full bg-white/90 border border-neutral-200 font-mono text-[11px] text-neutral-700">
-                              高度: {approxH}px ({Math.round(bubbleTopScale * 100)}%)
+                              高度: {approxH}px ({Math.round(effTopScale * 100)}%)
                             </span>
                           </>
                         )}
@@ -4244,7 +4863,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           <span className={`px-2 py-0.5 rounded-full font-mono font-bold text-[11px] ${
                             isBottomIntrude312 ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'
                           }`}>
-                            底部上沿: {312 + bubbleBottomOffsetY}px {isBottomIntrude312 ? `(侵入卡片 ${312 - (312 + bubbleBottomOffsetY)}px)` : '(>= 312px 合规)'}
+                            底部上沿: {312 + effBotOffsetY}px {isBottomIntrude312 ? `(侵入卡片 ${312 - (312 + effBotOffsetY)}px 已镂空)` : '(>= 312px 合规)'}
                           </span>
                         )}
                         {opaqueW > 0 && (
@@ -4435,13 +5054,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                     </div>
                   </div>
 
-                  {/* 1:1 Standardized Canvas: width 480px, height 384px */}
+                  {/* 1:1 Standardized Canvas: strictly 480px × 384px */}
                   <div
                     ref={bubbleCanvasRef}
                     onPointerDown={handleBubblePointerDown}
                     onPointerMove={handleBubblePointerMove}
                     onPointerUp={handleBubblePointerUp}
-                    className={`relative w-[340px] sm:w-[480px] aspect-[480/384] rounded-2xl bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-white border border-neutral-300 flex items-center justify-center overflow-hidden shadow-sm select-none touch-none ${
+                    className={`relative w-[480px] h-[384px] shrink-0 rounded-2xl bg-[radial-gradient(#d4d4d8_1px,transparent_1px)] [background-size:12px_12px] bg-white border border-neutral-300 flex items-center justify-center overflow-hidden shadow-sm select-none touch-none ${
                       isDraggingBubble ? 'cursor-grabbing ring-2 ring-emerald-500' : 'cursor-grab hover:ring-1 hover:ring-neutral-400'
                     }`}
                     title="按住鼠标拖拽，可在 480×384 画布内自由平移微调"
@@ -4471,6 +5090,16 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                           </span>
                         </div>
 
+                        {/* 左右外延侧翼可编辑区: rect(0, 96, 48, 216) & rect(432, 96, 48, 216) */}
+                        <div
+                          className="absolute border-r border-dashed border-emerald-500/70 bg-emerald-500/6 pointer-events-none z-0"
+                          style={{ left: '0%', top: '25%', width: '10%', height: '56.25%' }}
+                        />
+                        <div
+                          className="absolute border-l border-dashed border-emerald-500/70 bg-emerald-500/6 pointer-events-none z-0"
+                          style={{ left: '90%', top: '25%', width: '10%', height: '56.25%' }}
+                        />
+
                         {/* 4. 底部装饰区: rect(x: 0, y: 312, w: 480, h: 72) */}
                         <div
                           className={`absolute inset-x-0 bottom-0 border-t-2 border-dashed transition-colors pointer-events-none z-0 flex items-end justify-between px-2 pb-1 ${
@@ -4495,9 +5124,9 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </>
                     )}
 
-                    {/* 2. 红包卡片主体: rect(x: 48, y: 96, w: 384, h: 216) */}
+                    {/* 2. 红包卡片主体: rect(x: 48, y: 96, w: 384, h: 216) — 使用真实封面图底纹 + 暖金遮罩 */}
                     <div
-                      className="absolute bg-gradient-to-r from-[#fa9d3b] to-[#f97316] rounded-xl border border-[#ea580c]/70 pointer-events-none z-5 flex flex-col justify-between shadow-xs overflow-hidden"
+                      className="absolute bg-[#fa9d3b] rounded-[14px] border border-[#ea580c]/70 pointer-events-none z-5 flex flex-col justify-between shadow-xs overflow-hidden"
                       style={{
                         left: `${(BUBBLE_PENDANT_COORDS.cardBody.x / 480) * 100}%`, // 48 / 480 = 10%
                         top: `${(BUBBLE_PENDANT_COORDS.cardBody.y / 384) * 100}%`, // 96 / 384 = 25%
@@ -4505,23 +5134,39 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                         height: `${(BUBBLE_PENDANT_COORDS.cardBody.h / 384) * 100}%`, // 216 / 384 = 56.25%
                       }}
                     >
-                      <div className="p-2 sm:p-2.5 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-lg bg-[#c23636] text-white flex items-center justify-center text-xs shadow-xs border border-white/20">
+                      {coverResult && (
+                        <>
+                          <img
+                            src={coverResult.url}
+                            alt="气泡底层封面"
+                            className="absolute inset-0 w-full h-full object-cover object-center pointer-events-none"
+                          />
+                          <div
+                            className="absolute inset-0 pointer-events-none"
+                            style={{
+                              background:
+                                'linear-gradient(90deg, rgba(229, 134, 42, 0.88) 0%, rgba(229, 134, 42, 0.65) 55%, rgba(229, 134, 42, 0.28) 100%)',
+                            }}
+                          />
+                        </>
+                      )}
+                      <div className="relative z-10 p-3 flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-10 h-10 rounded-lg bg-[#e0483e] text-white flex items-center justify-center text-base shadow-xs border border-amber-200/40">
                             🧧
                           </div>
                           <div className="space-y-0.5 text-left">
-                            <div className="text-[11px] font-bold text-white leading-tight">{blessingText || '恭喜发财，大吉大利'}</div>
-                            <div className="text-[8px] text-amber-100/90 font-mono">红包卡片主体 rect(48, 96, 384, 216)</div>
+                            <div className="text-[13px] font-bold text-white leading-tight drop-shadow-xs">{blessingText || '恭喜发财，大吉大利'}</div>
+                            <div className="text-[10px] text-amber-50/90 font-medium">领取红包</div>
                           </div>
                         </div>
-                        <span className="text-[7px] text-amber-100 font-mono font-bold bg-black/15 px-1.5 py-0.5 rounded">
+                        <span className="text-[8px] text-white/90 font-mono font-bold bg-black/20 px-1.5 py-0.5 rounded">
                           真机 0.6x = 230×129.6pt
                         </span>
                       </div>
-                      <div className="bg-white/95 px-2.5 py-1 flex items-center justify-between text-[8px] text-neutral-500 font-medium border-t border-amber-600/30">
+                      <div className="relative z-10 bg-white/95 px-3 py-1 flex items-center justify-between text-[9px] text-neutral-500 font-medium border-t border-black/5">
                         <span>微信红包</span>
-                        <span className="text-amber-700 font-bold text-[7px]">锚点 (X:48, Y:96)</span>
+                        <span className="text-amber-700 font-bold text-[8px]">卡片主体 rect(48, 96, 384, 216)</span>
                       </div>
                     </div>
 
@@ -4545,13 +5190,13 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
                       </div>
                     )}
 
-                    {/* Rendered Composite Result Overlay */}
+                    {/* Rendered Composite Result Overlay (ZERO artificial CSS drop-shadow) */}
                     {bubbleResult ? (
                       <>
                         <img
                           src={bubbleResult.url}
                           alt="气泡挂件"
-                          className="w-full h-full object-contain drop-shadow-md z-10 pointer-events-none"
+                          className="w-full h-full object-contain z-10 pointer-events-none"
                         />
 
                         {/* Top Moving Dashed Line Indicators */}
@@ -5720,6 +6365,7 @@ export const RedPacketCoverMaker: React.FC<RedPacketCoverMakerProps> = ({
               blessingText={blessingText}
               activeTab={activeTab}
               showSafeAreaGuide={showGuides}
+              onToggleSafeAreaGuide={() => setShowGuides((v) => !v)}
             />
 
             {/* Quick Sender Name & Blessing Input for Live Customization */}

@@ -48,6 +48,8 @@ import {
   removeBackgroundFromFrame,
   applyWhiteOutline,
   cleanEdgeBlackBordersAndMargins,
+  applyUnsharpMask,
+  decontaminateEdgeFringes,
   rgbToHex,
 } from '../../utils/gifProcessor';
 import {
@@ -1535,6 +1537,8 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
       const liveCtx = liveCanvas.getContext('2d');
 
       if (offCtx && liveCtx) {
+        offCtx.imageSmoothingEnabled = true;
+        offCtx.imageSmoothingQuality = 'high';
         offCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, renderW, renderH);
 
         if (config.removeFrameBorder) {
@@ -1580,12 +1584,12 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
             targetColor: config.bgColor || '#ffffff',
             targetColors: activeBgColors,
             tolerance: config.tolerance || 20,
-            contiguous: false,
-            defringe: 1,
+            contiguous: config.mattingContiguous ?? false,
+            defringe: config.defringeLevel ?? 0,
           });
 
           if (config.addWhiteOutline) {
-            applyWhiteOutline(processed, config.outlineWidth || 2, '#ffffff');
+            processed = applyWhiteOutline(processed, config.outlineWidth || 2, '#ffffff');
           }
         }
 
@@ -1625,6 +1629,20 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     const singleCellW = cellBounds.sw;
     const singleCellH = cellBounds.sh;
 
+    // Aspect-preserved placement inside 240x240 (matches export 1:1)
+    const cellAspect = singleCellW / Math.max(1, singleCellH);
+    let inspDw = 240;
+    let inspDh = 240;
+    let inspDx = 0;
+    let inspDy = 0;
+    if (cellAspect > 1) {
+      inspDh = Math.round(240 / cellAspect);
+      inspDy = Math.round((240 - inspDh) / 2);
+    } else if (cellAspect < 1) {
+      inspDw = Math.round(240 * cellAspect);
+      inspDx = Math.round((240 - inspDw) / 2);
+    }
+
     // Render original frame slice into inspectOriginalCanvasRef
     if (inspectOriginalCanvasRef.current) {
       const origCanvas = inspectOriginalCanvasRef.current;
@@ -1635,7 +1653,9 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
       const origCtx = origCanvas.getContext('2d');
       if (origCtx) {
         origCtx.clearRect(0, 0, 240, 240);
-        origCtx.drawImage(video, singleCellX, singleCellY, singleCellW, singleCellH, 0, 0, 240, 240);
+        origCtx.imageSmoothingEnabled = true;
+        origCtx.imageSmoothingQuality = 'high';
+        origCtx.drawImage(video, singleCellX, singleCellY, singleCellW, singleCellH, inspDx, inspDy, inspDw, inspDh);
       }
     }
 
@@ -1657,7 +1677,9 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
         const offInspCtx = offInsp.getContext('2d', { willReadFrequently: true });
         if (offInspCtx) {
           offInspCtx.clearRect(0, 0, 240, 240);
-          offInspCtx.drawImage(video, singleCellX, singleCellY, singleCellW, singleCellH, 0, 0, 240, 240);
+          offInspCtx.imageSmoothingEnabled = true;
+          offInspCtx.imageSmoothingQuality = 'high';
+          offInspCtx.drawImage(video, singleCellX, singleCellY, singleCellW, singleCellH, inspDx, inspDy, inspDw, inspDh);
           const cellRawData = offInspCtx.getImageData(0, 0, 240, 240);
 
           // Clean contiguous edge black bars and padding margins
@@ -1674,28 +1696,34 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               inset: 0,
               autoScale: false,
             });
-            inspCtx.putImageData(currentCellData, 0, 0);
           }
 
           if (config.frameEraserMaskUrl && brushCanvasRef.current) {
+            offInspCtx.putImageData(currentCellData, 0, 0);
             offInspCtx.save();
             offInspCtx.globalCompositeOperation = 'destination-out';
-            offInspCtx.drawImage(brushCanvasRef.current, singleCellX, singleCellY, singleCellW, singleCellH, 0, 0, 240, 240);
+            offInspCtx.drawImage(brushCanvasRef.current, singleCellX, singleCellY, singleCellW, singleCellH, inspDx, inspDy, inspDw, inspDh);
             offInspCtx.restore();
             currentCellData = offInspCtx.getImageData(0, 0, 240, 240);
           }
 
           if (config.autoTransparent) {
-            const cellProcessed = removeBackgroundFromFrame(currentCellData, {
+            let cellProcessed = removeBackgroundFromFrame(currentCellData, {
               targetColor: config.bgColor || '#ffffff',
               targetColors: activeBgColors,
               tolerance: config.tolerance || 20,
-              contiguous: false,
-              defringe: 1,
+              contiguous: config.mattingContiguous ?? false,
+              defringe: config.defringeLevel ?? 0,
             });
 
+            cellProcessed = decontaminateEdgeFringes(cellProcessed, activeBgColors);
+
+            if ((config.sharpenLevel ?? 30) > 0) {
+              cellProcessed = applyUnsharpMask(cellProcessed, config.sharpenLevel ?? 30);
+            }
+
             if (config.addWhiteOutline) {
-              applyWhiteOutline(cellProcessed, config.outlineWidth || 2, '#ffffff');
+              cellProcessed = applyWhiteOutline(cellProcessed, config.outlineWidth || 2, '#ffffff');
             }
 
             const data = cellProcessed.data;
@@ -1710,16 +1738,21 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
 
             inspCtx.putImageData(cellProcessed, 0, 0);
           } else {
+            let cellProcessed = currentCellData;
+            if ((config.sharpenLevel ?? 30) > 0) {
+              cellProcessed = applyUnsharpMask(cellProcessed, config.sharpenLevel ?? 30);
+            }
+
             let transparentCount = 0;
             const totalPx = 240 * 240;
             for (let i = 0; i < totalPx; i++) {
-              if (currentCellData.data[i * 4 + 3] === 0) transparentCount++;
+              if (cellProcessed.data[i * 4 + 3] === 0) transparentCount++;
             }
             const tPercent = Math.round((transparentCount / totalPx) * 100);
             const health = tPercent < 10 ? 'low' : tPercent > 82 ? 'high' : 'good';
             setCellStats({ transparentPercent: tPercent, health });
 
-            inspCtx.putImageData(currentCellData, 0, 0);
+            inspCtx.putImageData(cellProcessed, 0, 0);
           }
         }
       }
@@ -1735,9 +1768,13 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
     config.frameBorderInset,
     config.frameBorderAutoScale,
     config.bgColor,
+    config.bgColors,
     config.tolerance,
     config.addWhiteOutline,
     config.outlineWidth,
+    config.mattingContiguous,
+    config.defringeLevel,
+    config.sharpenLevel,
     config.cols,
     config.rows,
     config.colSplits,
@@ -5346,6 +5383,153 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
             </div>
           </div>
 
+          {/* GIF Output Clarity & Anti-Blur Enhancement Panel */}
+          <div className="p-3.5 bg-blue-50/60 rounded-xl border border-blue-200 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-blue-950 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                <span>GIF 导出高清画质与防糊增强</span>
+              </span>
+              <span className="text-[10px] font-mono font-bold text-blue-700 bg-white px-2 py-0.5 rounded border border-blue-200">
+                {(config.gifQualityMode || 'ultra') === 'ultra'
+                  ? '255色超清 (≤1MB)'
+                  : config.gifQualityMode === 'balanced'
+                  ? '255色均衡 (≤500KB)'
+                  : '128色轻量 (≤300KB)'}
+              </span>
+            </div>
+
+            {/* Source resolution diagnostic alert if single cell is low-res */}
+            {(cellPixelW < 300 || cellPixelH < 300) && (
+              <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-[11px] text-amber-900 space-y-1 leading-relaxed">
+                <div className="font-bold flex items-center gap-1 text-amber-950">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>检测到单格源像素仅 {cellPixelW}×{cellPixelH} px（偏低易发糊）</span>
+                </div>
+                <p className="text-[10px] text-amber-800">
+                  多宫格视频单格像素低于 300px 时，MP4 压缩会导致小字和毛发发虚。建议开启下方<span className="font-bold">锐化补偿 + 255色抖动</span>；如需极致清晰，推荐上传更高分辨率视频或先出无字视频，切片后用「✍️ 表情包配字」叠加高清矢量文字。
+                </p>
+              </div>
+            )}
+
+            {/* Quality Mode Selector */}
+            <div className="grid grid-cols-3 gap-1.5">
+              {[
+                { id: 'ultra', label: '超清画质', sub: '255色 · ≤1MB' },
+                { id: 'balanced', label: '均衡推荐', sub: '255色 · ≤500KB' },
+                { id: 'compact', label: '轻量省流', sub: '128色 · ≤300KB' },
+              ].map((m) => {
+                const active = (config.gifQualityMode || 'ultra') === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() =>
+                      onConfigChange({
+                        ...config,
+                        gifQualityMode: m.id as 'ultra' | 'balanced' | 'compact',
+                      })
+                    }
+                    className={`py-1.5 px-2 rounded-lg border text-center transition-all cursor-pointer ${
+                      active
+                        ? 'bg-blue-600 text-white border-blue-700 shadow-2xs font-bold'
+                        : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
+                    }`}
+                  >
+                    <div className="text-[11px]">{m.label}</div>
+                    <div className={`text-[9px] ${active ? 'text-blue-100' : 'text-stone-400'}`}>
+                      {m.sub}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Edge-Safe Sharpening Slider */}
+            <div className="p-2.5 bg-white rounded-lg border border-blue-100 space-y-1.5">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-semibold text-stone-800">清晰度锐化增强 (USM 抗模糊)</span>
+                <span className="font-mono font-bold text-blue-700">
+                  {config.sharpenLevel ?? 30}%
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="80"
+                step="5"
+                value={config.sharpenLevel ?? 30}
+                onChange={(e) =>
+                  onConfigChange({
+                    ...config,
+                    sharpenLevel: parseInt(e.target.value, 10) || 0,
+                  })
+                }
+                className="w-full accent-blue-600 cursor-pointer"
+              />
+              <div className="grid grid-cols-4 gap-1">
+                {[
+                  { label: '关闭', val: 0 },
+                  { label: '轻度 20%', val: 20 },
+                  { label: '推荐 30%', val: 30 },
+                  { label: '强效 55%', val: 55 },
+                ].map((lvl) => (
+                  <button
+                    key={lvl.val}
+                    type="button"
+                    onClick={() => onConfigChange({ ...config, sharpenLevel: lvl.val })}
+                    className={`py-0.5 rounded text-[10px] border cursor-pointer ${
+                      (config.sharpenLevel ?? 30) === lvl.val
+                        ? 'bg-blue-50 border-blue-500 text-blue-800 font-bold'
+                        : 'bg-stone-50 border-stone-200 text-stone-600 hover:bg-stone-100'
+                    }`}
+                  >
+                    {lvl.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Dithering & Non-Destructive Matting Toggles */}
+            <div className="space-y-2 pt-0.5">
+              <label className="flex items-start gap-2 text-[11px] text-stone-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={config.enableDithering ?? true}
+                  onChange={(e) =>
+                    onConfigChange({ ...config, enableDithering: e.target.checked })
+                  }
+                  className="w-3.5 h-3.5 mt-0.5 accent-blue-600 rounded"
+                />
+                <span>
+                  <span className="font-semibold">智能平滑抖动 (消除 3D 毛发/光影色块断层)</span>
+                  <span className="block text-[10px] text-stone-500">
+                    24位精确色彩匹配 + 限幅误差扩散，立体角色更细腻顺滑
+                  </span>
+                </span>
+              </label>
+
+              {config.autoTransparent && (
+                <label className="flex items-start gap-2 text-[11px] text-stone-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.mattingContiguous ?? false}
+                    onChange={(e) =>
+                      onConfigChange({ ...config, mattingContiguous: e.target.checked })
+                    }
+                    className="w-3.5 h-3.5 mt-0.5 accent-blue-600 rounded"
+                  />
+                  <span>
+                    <span className="font-semibold">仅外边缘连通抠图 (保护内部白衣/白纸/高光)</span>
+                    <span className="block text-[10px] text-stone-500">
+                      若角色内有白色衬衫、纸张或眼白被挖空发虚，请勾选此项
+                    </span>
+                  </span>
+                </label>
+              )}
+            </div>
+          </div>
+
           {/* Slicing Progress Bar or Action Button */}
           {isSlicing ? (
             <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 space-y-2">
@@ -5363,7 +5547,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
                 />
               </div>
               <p className="text-[11px] text-emerald-700">
-                正在多线程量化压缩，严格锁定 240×240 尺寸与 500KB 微信红线...
+                正在进行 255 色高保真量化与清晰度增强，严格锁定 240×240 微信标准...
               </p>
             </div>
           ) : (
@@ -5375,7 +5559,7 @@ export const GridSlicerControls: React.FC<GridSlicerControlsProps> = ({
               className="w-full py-3.5 px-4 bg-[#07c160] hover:bg-[#06ad56] text-white font-bold text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-all hover:shadow-lg active:scale-[0.99]"
             >
               <Scissors className="w-4 h-4" />
-              <span>开始对齐多宫格逐帧切片 (导出 {totalCells} 个 240×240 标准 GIF)</span>
+              <span>开始对齐多宫格逐帧切片 (导出 {totalCells} 个 240×240 高清 GIF)</span>
             </button>
           )}
         </div>

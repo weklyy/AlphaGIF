@@ -1215,10 +1215,270 @@ export function scaleImageData(imageData: ImageData, targetW: number, targetH: n
   return ctx2.getImageData(0, 0, targetW, targetH);
 }
 
+/**
+ * Edge-safe Unsharp Mask (USM) sharpening for 240x240 stickers.
+ * Only sharpens RGB across opaque neighbors (alpha > 64) so transparent edges never get halos.
+ */
+export function applyUnsharpMask(imageData: ImageData, amountPct: number = 30): ImageData {
+  if (amountPct <= 0) return imageData;
+  const width = imageData.width;
+  const height = imageData.height;
+  const src = imageData.data;
+  const result = new ImageData(new Uint8ClampedArray(src), width, height);
+  const dst = result.data;
+
+  const amount = Math.max(0, Math.min(1.5, (amountPct / 100) * 1.15));
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+      if (src[idx + 3] <= 64) continue;
+
+      // Check 4 cardinal neighbors: only sharpen if surrounded by opaque pixels or weight only opaque ones
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let weightSum = 0;
+
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nIdx = ((y + dy) * width + (x + dx)) * 4;
+          if (src[nIdx + 3] > 64) {
+            const w = dx === 0 && dy === 0 ? 4 : dx === 0 || dy === 0 ? 2 : 1;
+            sumR += src[nIdx] * w;
+            sumG += src[nIdx + 1] * w;
+            sumB += src[nIdx + 2] * w;
+            weightSum += w;
+          }
+        }
+      }
+
+      if (weightSum > 4) {
+        const blurR = sumR / weightSum;
+        const blurG = sumG / weightSum;
+        const blurB = sumB / weightSum;
+
+        dst[idx] = Math.max(0, Math.min(255, Math.round(src[idx] + amount * (src[idx] - blurR))));
+        dst[idx + 1] = Math.max(0, Math.min(255, Math.round(src[idx + 1] + amount * (src[idx + 1] - blurG))));
+        dst[idx + 2] = Math.max(0, Math.min(255, Math.round(src[idx + 2] + amount * (src[idx + 2] - blurB))));
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Color decontamination for anti-aliased 1px outer boundary pixels after background keying.
+ * Strips lingering white/background bleed from dark strokes & fur without eroding pixels.
+ */
+export function decontaminateEdgeFringes(
+  imageData: ImageData,
+  bgHexColors: string[] = ['#ffffff']
+): ImageData {
+  const width = imageData.width;
+  const height = imageData.height;
+  const src = imageData.data;
+  const result = new ImageData(new Uint8ClampedArray(src), width, height);
+  const dst = result.data;
+
+  const bgRgbs = (bgHexColors.length > 0 ? bgHexColors : ['#ffffff']).map((c) => hexToRgb(c));
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+      if (src[idx + 3] <= 64) continue;
+
+      // Must touch at least one transparent pixel to be a boundary pixel
+      const hasTransNeighbor =
+        src[((y - 1) * width + x) * 4 + 3] <= 64 ||
+        src[((y + 1) * width + x) * 4 + 3] <= 64 ||
+        src[(y * width + (x - 1)) * 4 + 3] <= 64 ||
+        src[(y * width + (x + 1)) * 4 + 3] <= 64;
+
+      if (!hasTransNeighbor) continue;
+
+      // Average interior opaque neighbors (pixels that don't touch transparent background)
+      let intR = 0;
+      let intG = 0;
+      let intB = 0;
+      let intCount = 0;
+
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nIdx = ((y + dy) * width + (x + dx)) * 4;
+          if (src[nIdx + 3] > 64) {
+            intR += src[nIdx];
+            intG += src[nIdx + 1];
+            intB += src[nIdx + 2];
+            intCount++;
+          }
+        }
+      }
+
+      if (intCount < 2) continue;
+      intR /= intCount;
+      intG /= intCount;
+      intB /= intCount;
+
+      const r = src[idx];
+      const g = src[idx + 1];
+      const b = src[idx + 2];
+
+      // Find closest background color
+      let nearestBg = bgRgbs[0];
+      let minBgDist = Infinity;
+      for (const bg of bgRgbs) {
+        const d = colorDistance(r, g, b, bg.r, bg.g, bg.b);
+        if (d < minBgDist) {
+          minBgDist = d;
+          nearestBg = bg;
+        }
+      }
+
+      // Check if boundary pixel is shifted from interior color toward bg color (anti-aliased fringe)
+      const intToBg = colorDistance(intR, intG, intB, nearestBg.r, nearestBg.g, nearestBg.b);
+      const pixToInt = colorDistance(r, g, b, intR, intG, intB);
+      if (intToBg > 45 && pixToInt > 18 && minBgDist < intToBg * 0.85) {
+        // Pull pixel 55% back toward its true interior color to remove gray/white fringe halo
+        dst[idx] = Math.max(0, Math.min(255, Math.round(r * 0.45 + intR * 0.55)));
+        dst[idx + 1] = Math.max(0, Math.min(255, Math.round(g * 0.45 + intG * 0.55)));
+        dst[idx + 2] = Math.max(0, Math.min(255, Math.round(b * 0.45 + intB * 0.55)));
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * High-precision 24-bit RGB palette mapper with perceptual color distance
+ * and optional damped Floyd-Steinberg dithering (opaque pixels only).
+ * Avoids gifenc's lossy RGB565 lookup truncation and eliminates gradient banding.
+ */
+export function mapFrameToPalette24Bit(
+  frameData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  opaquePalette: number[][],
+  enableDither: boolean = false
+): Uint8Array {
+  const totalPixels = width * height;
+  const finalIndices = new Uint8Array(totalPixels);
+  if (opaquePalette.length === 0) return finalIndices;
+
+  const cache = new Map<number, number>();
+  const palLen = opaquePalette.length;
+
+  const findNearest = (r: number, g: number, b: number): number => {
+    const key = (r << 16) | (g << 8) | b;
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < palLen; i++) {
+      const p = opaquePalette[i];
+      const dr = r - p[0];
+      const dg = g - p[1];
+      const db = b - p[2];
+      // Perceptual luminance-weighted RGB distance
+      const dist = dr * dr * 3 + dg * dg * 6 + db * db;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+        if (dist === 0) break;
+      }
+    }
+    cache.set(key, bestIdx);
+    return bestIdx;
+  };
+
+  if (!enableDither) {
+    for (let p = 0; p < totalPixels; p++) {
+      const i = p * 4;
+      if (frameData[i + 3] <= 64) {
+        finalIndices[p] = 0;
+      } else {
+        finalIndices[p] = findNearest(frameData[i], frameData[i + 1], frameData[i + 2]) + 1;
+      }
+    }
+    return finalIndices;
+  }
+
+  // Clamped Floyd-Steinberg error diffusion (0.72 damping, max +-28 error)
+  // Smooths 3D fur/skin gradients while keeping sharp text/lines noise-free
+  const errR = new Float32Array(totalPixels);
+  const errG = new Float32Array(totalPixels);
+  const errB = new Float32Array(totalPixels);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const p = y * width + x;
+      const i = p * 4;
+      if (frameData[i + 3] <= 64) {
+        finalIndices[p] = 0;
+        continue;
+      }
+
+      const r = Math.max(0, Math.min(255, Math.round(frameData[i] + errR[p])));
+      const g = Math.max(0, Math.min(255, Math.round(frameData[i + 1] + errG[p])));
+      const b = Math.max(0, Math.min(255, Math.round(frameData[i + 2] + errB[p])));
+
+      const bestIdx = findNearest(r, g, b);
+      finalIndices[p] = bestIdx + 1;
+
+      const pal = opaquePalette[bestIdx];
+      const qeR = Math.max(-28, Math.min(28, (r - pal[0]) * 0.72));
+      const qeG = Math.max(-28, Math.min(28, (g - pal[1]) * 0.72));
+      const qeB = Math.max(-28, Math.min(28, (b - pal[2]) * 0.72));
+
+      if (x + 1 < width) {
+        const np = p + 1;
+        if (frameData[np * 4 + 3] > 64) {
+          errR[np] += qeR * (7 / 16);
+          errG[np] += qeG * (7 / 16);
+          errB[np] += qeB * (7 / 16);
+        }
+      }
+      if (y + 1 < height) {
+        if (x - 1 >= 0) {
+          const np = p + width - 1;
+          if (frameData[np * 4 + 3] > 64) {
+            errR[np] += qeR * (3 / 16);
+            errG[np] += qeG * (3 / 16);
+            errB[np] += qeB * (3 / 16);
+          }
+        }
+        {
+          const np = p + width;
+          if (frameData[np * 4 + 3] > 64) {
+            errR[np] += qeR * (5 / 16);
+            errG[np] += qeG * (5 / 16);
+            errB[np] += qeB * (5 / 16);
+          }
+        }
+        if (x + 1 < width) {
+          const np = p + width + 1;
+          if (frameData[np * 4 + 3] > 64) {
+            errR[np] += qeR * (1 / 16);
+            errG[np] += qeG * (1 / 16);
+            errB[np] += qeB * (1 / 16);
+          }
+        }
+      }
+    }
+  }
+
+  return finalIndices;
+}
+
 export interface GifEncodingParams {
   maxColors?: number; // 32, 64, 128, 255
   scaleRatio?: number; // 0.5 to 1.0
   frameStep?: number; // 1, 2, 3
+  dither?: boolean;
 }
 
 // Encode processed frames into a GIF blob with custom compression parameters
@@ -1232,6 +1492,7 @@ export async function encodeTransparentGifWithParams(
   const maxColors = Math.max(16, Math.min(255, params?.maxColors ?? 255));
   const scaleRatio = Math.max(0.3, Math.min(1.0, params?.scaleRatio ?? 1.0));
   const frameStep = Math.max(1, Math.min(4, params?.frameStep ?? 1));
+  const enableDither = params?.dither ?? false;
 
   // 1. Frame Sampling / Stepping (accumulate delay to preserve exact playback speed and overall duration)
   let sampledFrames: { imageData: ImageData; delay: number }[] = [];
@@ -1311,17 +1572,8 @@ export async function encodeTransparentGifWithParams(
       // Build full palette: index 0 is transparent dummy color
       const fullPalette = [[0, 0, 0], ...opaquePalette];
 
-      // Map entire frame
-      const rawIndices = applyPalette(data, opaquePalette, 'rgb565');
-      const finalIndices = new Uint8Array(totalPixels);
-
-      for (let p = 0; p < totalPixels; p++) {
-        if (data[p * 4 + 3] <= 64) {
-          finalIndices[p] = 0; // transparent
-        } else {
-          finalIndices[p] = rawIndices[p] + 1; // opaque color index in fullPalette
-        }
-      }
+      // Map entire frame using true 24-bit perceptual color matching (+ optional Floyd-Steinberg dither)
+      const finalIndices = mapFrameToPalette24Bit(data, outW, outH, opaquePalette, enableDither);
 
       gif.writeFrame(finalIndices, outW, outH, {
         palette: fullPalette,

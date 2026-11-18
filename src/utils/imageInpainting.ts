@@ -1465,6 +1465,8 @@ export function autoCenterAndScaleSubject(
 
   // Clear target canvas
   ctx.clearRect(0, 0, targetCanvasSize, targetCanvasSize);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
 
   // Translate to center (120, 120), scale, and shift source so subjCx/subjCy lands at center
   ctx.save();

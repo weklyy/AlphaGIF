@@ -99,6 +99,11 @@ export default function App() {
     tolerance: 20,
     addWhiteOutline: true,
     outlineWidth: 2,
+    gifQualityMode: 'ultra',
+    sharpenLevel: 30,
+    enableDithering: true,
+    mattingContiguous: false,
+    defringeLevel: 0,
   });
   const [isSlicing, setIsSlicing] = useState(false);
   const [sliceProgress, setSliceProgress] = useState(0);

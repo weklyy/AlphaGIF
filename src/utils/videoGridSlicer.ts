@@ -1,6 +1,12 @@
-import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { GridConfig, SlicedStickerItem } from '../types';
-import { removeBackgroundFromFrame, applyWhiteOutline, cleanEdgeBlackBordersAndMargins } from './gifProcessor';
+import {
+  removeBackgroundFromFrame,
+  applyWhiteOutline,
+  cleanEdgeBlackBordersAndMargins,
+  applyUnsharpMask,
+  decontaminateEdgeFringes,
+  encodeTransparentGifWithParams,
+} from './gifProcessor';
 import { calculateCellBounds } from './gridGeometry';
 import { autoCenterAndScaleSubject } from './imageInpainting';
 import { removeSquareFrameBorder } from './frameBorderRemover';
@@ -275,7 +281,17 @@ export async function sliceVideoIntoStickers(
     loopMode = 'normal',
     smartAutoCenter,
     subjectScaleTarget = 0.82,
+    gifQualityMode = 'ultra',
+    sharpenLevel = 30,
+    enableDithering = true,
+    mattingContiguous = false,
+    defringeLevel = 0,
   } = config;
+
+  // Pause preview playback so seeking doesn't race with playback frames
+  if (!videoSource.paused) {
+    videoSource.pause();
+  }
 
   const totalCells = cols * rows;
   const vidW = videoSource.videoWidth || 960;
@@ -287,9 +303,6 @@ export async function sliceVideoIntoStickers(
   const gridY = (Math.max(0, Math.min(100, activeCrop.y)) / 100) * vidH;
   const gridW = (Math.max(1, Math.min(100, activeCrop.width)) / 100) * vidW;
   const gridH = (Math.max(1, Math.min(100, activeCrop.height)) / 100) * vidH;
-
-  const cellW = gridW / cols;
-  const cellH = gridH / rows;
 
   const playbackSpeed = Math.max(0.5, Math.min(5, speed || 1.0));
   const validStart = Math.max(0, startTime);
@@ -325,6 +338,12 @@ export async function sliceVideoIntoStickers(
   sampleCanvas.width = 240;
   sampleCanvas.height = 240;
   const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true })!;
+  sampleCtx.imageSmoothingEnabled = true;
+  sampleCtx.imageSmoothingQuality = 'high';
+
+  // Intermediate canvas for 2-step progressive downsampling when source cell > 480px
+  const stepCanvas = document.createElement('canvas');
+  const stepCtx = stepCanvas.getContext('2d', { willReadFrequently: true })!;
 
   // Frame delay in milliseconds for the output animation
   const frameDelayMs = Math.round((1 / targetFps) * 1000);
@@ -344,22 +363,36 @@ export async function sliceVideoIntoStickers(
     }
   }
 
+  const activeBgColors = Array.isArray(config.bgColors) && config.bgColors.length > 0
+    ? config.bgColors
+    : [bgColor || '#ffffff'];
+
   // Seek and extract each time slice
   for (let timeIdx = 0; timeIdx < sampleTimes.length; timeIdx++) {
-    const time = sampleTimes[timeIdx];
+    const time = Math.min(videoSource.duration || timeIdx, sampleTimes[timeIdx]);
 
-    // Seek video
-    await new Promise<void>((resolve) => {
-      const handleSeeked = () => {
-        videoSource.removeEventListener('seeked', handleSeeked);
-        resolve();
-      };
-      videoSource.addEventListener('seeked', handleSeeked);
-      videoSource.currentTime = time;
-    });
+    // Safe video seek (guards against browsers not firing 'seeked' if already at target time)
+    if (Math.abs(videoSource.currentTime - time) > 0.002) {
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          videoSource.removeEventListener('seeked', handleSeeked);
+          clearTimeout(timer);
+          resolve();
+        };
+        const handleSeeked = () => finish();
+        const timer = setTimeout(finish, 1500);
+        videoSource.addEventListener('seeked', handleSeeked);
+        videoSource.currentTime = time;
+      });
+    }
+    // Wait one animation frame to ensure decoded video texture is ready for drawImage
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
     const percentSeek = Math.round(((timeIdx + 1) / sampleTimes.length) * 40);
-    onProgress?.(percentSeek, 0, totalCells, `正在截取视频时间帧 (${timeIdx + 1}/${sampleTimes.length})...`);
+    onProgress?.(percentSeek, 0, totalCells, `正在高清截取视频时间帧 (${timeIdx + 1}/${sampleTimes.length})...`);
 
     // Crop each cell
     for (let c = 0; c < totalCells; c++) {
@@ -392,6 +425,9 @@ export async function sliceVideoIntoStickers(
       const sh = cellBounds.sh;
 
       sampleCtx.clearRect(0, 0, 240, 240);
+      sampleCtx.imageSmoothingEnabled = true;
+      sampleCtx.imageSmoothingQuality = 'high';
+
       // Center and scale inside 240x240 box
       const aspect = sw / sh;
       let dw = 240;
@@ -406,11 +442,27 @@ export async function sliceVideoIntoStickers(
         dx = Math.round((240 - dw) / 2);
       }
 
-      sampleCtx.drawImage(videoSource, sx, sy, sw, sh, dx, dy, dw, dh);
+      // 2-step progressive downsampling if source cell is more than 2x larger than 240px
+      if (sw > dw * 2 || sh > dh * 2) {
+        const midW = Math.max(dw, Math.round(dw * 2));
+        const midH = Math.max(dh, Math.round(dh * 2));
+        if (stepCanvas.width !== midW || stepCanvas.height !== midH) {
+          stepCanvas.width = midW;
+          stepCanvas.height = midH;
+        }
+        stepCtx.clearRect(0, 0, midW, midH);
+        stepCtx.imageSmoothingEnabled = true;
+        stepCtx.imageSmoothingQuality = 'high';
+        stepCtx.drawImage(videoSource, sx, sy, sw, sh, 0, 0, midW, midH);
+        sampleCtx.drawImage(stepCanvas, 0, 0, midW, midH, dx, dy, dw, dh);
+      } else {
+        sampleCtx.drawImage(videoSource, sx, sy, sw, sh, dx, dy, dw, dh);
+      }
+
       let imgData = sampleCtx.getImageData(0, 0, 240, 240);
 
       // Clean unselected margins & edge black bars so unpainted padding and video letterboxing
-      // are completely transparent, while keeping 100% of internal content intact without keying ("内容保持原图完整不扣图")
+      // are completely transparent, while keeping 100% of internal content intact without keying
       imgData = cleanEdgeBlackBordersAndMargins(imgData, 32);
 
       // One-Click Remove Square Frame (black frame or other color frames)
@@ -435,19 +487,18 @@ export async function sliceVideoIntoStickers(
         imgData = sampleCtx.getImageData(0, 0, 240, 240);
       }
 
-      // Apply background transparency if enabled
+      // Apply background transparency if enabled (non-destructive defringe default 0)
       if (autoTransparent) {
-        const activeBgColors = Array.isArray(config.bgColors) && config.bgColors.length > 0
-          ? config.bgColors
-          : [bgColor || '#ffffff'];
-
         imgData = removeBackgroundFromFrame(imgData, {
           targetColor: bgColor || '#ffffff',
           targetColors: activeBgColors,
           tolerance: tolerance || 20,
-          contiguous: false,
-          defringe: 1,
+          contiguous: mattingContiguous,
+          defringe: defringeLevel,
         });
+
+        // Strip white/bg color bleed on 1px anti-aliased boundary pixels without eroding strokes
+        imgData = decontaminateEdgeFringes(imgData, activeBgColors);
       }
 
       // AI Smart Auto-Center for animated cell
@@ -459,6 +510,11 @@ export async function sliceVideoIntoStickers(
           bgColor,
           tolerance || 20
         );
+      }
+
+      // Edge-safe Unsharp Mask (restores crispness on fur, eyes & Chinese text)
+      if (sharpenLevel > 0) {
+        imgData = applyUnsharpMask(imgData, sharpenLevel);
       }
 
       // Add WeChat official 2px white outline if requested
@@ -473,7 +529,16 @@ export async function sliceVideoIntoStickers(
     }
   }
 
-  // Now encode each cell into a standard 240x240 GIF (<500KB)
+  // Target size threshold based on chosen quality mode
+  const targetBytes =
+    gifQualityMode === 'compact'
+      ? 300 * 1024
+      : gifQualityMode === 'balanced'
+      ? 500 * 1024
+      : 1000 * 1024; // WeChat official dynamic GIF limit is 1MB (1024KB)
+  const initialColors = gifQualityMode === 'compact' ? 128 : 255;
+
+  // Now encode each cell into a standard 240x240 high-clarity GIF
   const slicedStickers: SlicedStickerItem[] = [];
 
   for (let c = 0; c < totalCells; c++) {
@@ -482,10 +547,8 @@ export async function sliceVideoIntoStickers(
     const name = `${cellNumStr}_T.gif`;
 
     const progressBase = 40 + Math.round(((c + 1) / totalCells) * 58);
-    onProgress?.(progressBase, c + 1, totalCells, `正在压缩编码第 ${c + 1}/${totalCells} 个表情 GIF...`);
+    onProgress?.(progressBase, c + 1, totalCells, `正在高保真编码第 ${c + 1}/${totalCells} 个表情 GIF...`);
 
-    const gif = GIFEncoder();
-    
     // Apply AI Loop Mode (Boomerang ping-pong loop)
     let frames = item.frames;
     if (loopMode === 'boomerang' && frames.length >= 3) {
@@ -493,67 +556,48 @@ export async function sliceVideoIntoStickers(
       frames = [...frames, ...returnFrames];
     }
 
-    for (let f = 0; f < frames.length; f++) {
-      const frameData = frames[f].imageData.data;
-      const totalPixels = 240 * 240;
+    // Pass 1: Maximum clarity (255 colors + 24-bit perceptual mapping + optional smart dithering)
+    let bestEncoded = await encodeTransparentGifWithParams(frames, 240, 240, {
+      maxColors: initialColors,
+      scaleRatio: 1.0,
+      frameStep: 1,
+      dither: enableDithering,
+    });
 
-      let opaqueCount = 0;
-      for (let p = 0; p < totalPixels; p++) {
-        if (frameData[p * 4 + 3] > 64) opaqueCount++;
+    // Adaptive size guard: only step down if file exceeds targetBytes
+    if (bestEncoded.blob.size > targetBytes) {
+      const fallbackPasses: { maxColors: number; frameStep: number; dither: boolean }[] = [];
+      if (enableDithering) {
+        fallbackPasses.push({ maxColors: initialColors, frameStep: 1, dither: false });
+      }
+      if (initialColors > 192) {
+        fallbackPasses.push({ maxColors: 192, frameStep: 1, dither: false });
+      }
+      if (initialColors > 128) {
+        fallbackPasses.push({ maxColors: 128, frameStep: 1, dither: false });
+      }
+      if (frames.length > 8) {
+        fallbackPasses.push({ maxColors: 128, frameStep: 2, dither: false });
+        fallbackPasses.push({ maxColors: 64, frameStep: 2, dither: false });
       }
 
-      if (opaqueCount === 0) {
-        const palette = [[0, 0, 0]];
-        const index = new Uint8Array(totalPixels);
-        gif.writeFrame(index, 240, 240, {
-          palette,
-          delay: frames[f].delay,
-          transparent: true,
-          transparentIndex: 0,
-          dispose: 2,
-          repeat: 0,
+      for (const pass of fallbackPasses) {
+        const attempt = await encodeTransparentGifWithParams(frames, 240, 240, {
+          maxColors: pass.maxColors,
+          scaleRatio: 1.0,
+          frameStep: pass.frameStep,
+          dither: pass.dither,
         });
-      } else {
-        const opaquePixels = new Uint8Array(opaqueCount * 4);
-        let opIdx = 0;
-        for (let p = 0; p < totalPixels; p++) {
-          if (frameData[p * 4 + 3] > 64) {
-            opaquePixels[opIdx] = frameData[p * 4];
-            opaquePixels[opIdx + 1] = frameData[p * 4 + 1];
-            opaquePixels[opIdx + 2] = frameData[p * 4 + 2];
-            opaquePixels[opIdx + 3] = 255;
-            opIdx += 4;
-          }
+        if (attempt.blob.size < bestEncoded.blob.size) {
+          bestEncoded = attempt;
         }
-
-        // Quantize colors (up to 128 colors to guarantee <500KB size)
-        const opaquePalette = quantize(opaquePixels, 128, { format: 'rgb565' });
-        const fullPalette = [[0, 0, 0], ...opaquePalette];
-        const rawIndices = applyPalette(frameData, opaquePalette, 'rgb565');
-        const finalIndices = new Uint8Array(totalPixels);
-
-        for (let p = 0; p < totalPixels; p++) {
-          if (frameData[p * 4 + 3] <= 64) {
-            finalIndices[p] = 0;
-          } else {
-            finalIndices[p] = rawIndices[p] + 1;
-          }
+        if (bestEncoded.blob.size <= targetBytes) {
+          break;
         }
-
-        gif.writeFrame(finalIndices, 240, 240, {
-          palette: fullPalette,
-          delay: frames[f].delay,
-          transparent: true, // Always transparent: index 0 is transparent background
-          transparentIndex: 0,
-          dispose: 2,
-          repeat: 0,
-        });
       }
     }
 
-    gif.finish();
-    const bytes = gif.bytes();
-    const blob = new Blob([bytes], { type: 'image/gif' });
+    const blob = bestEncoded.blob;
     const url = URL.createObjectURL(blob);
 
     // Pick a representative frame (middle frame usually has the best pose)
@@ -580,13 +624,13 @@ export async function sliceVideoIntoStickers(
       size: blob.size,
       width: 240,
       height: 240,
-      frameCount: frames.length,
+      frameCount: bestEncoded.frameCount,
       duration: outputDuration,
       representativeFrameData,
       representativeDataUrl,
     });
   }
 
-  onProgress?.(100, totalCells, totalCells, '切片完成！');
+  onProgress?.(100, totalCells, totalCells, '高清切片全部完成！');
   return slicedStickers;
 }

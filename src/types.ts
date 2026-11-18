@@ -170,6 +170,11 @@ export interface GridConfig {
   frameBorderAutoScale?: boolean; // 是否自动裁剪至内框并自适应填充 240x240 (默认 true)
   frameEraserMaskUrl?: string; // 画笔涂抹消框蒙版 (PNG DataURL，非透明像素表示已抹除)
   frameEraserSyncAllCells?: boolean; // 涂抹消框是否同步应用至全图所有格子 (默认 true)
+  gifQualityMode?: 'ultra' | 'balanced' | 'compact'; // 导出GIF画质档位: ultra=255色超清(<=1MB), balanced=高保真(<=500KB), compact=轻量(<=300KB)
+  sharpenLevel?: number; // 清晰度锐化增强 0 - 100 (默认 30, 抵消视频压缩和缩小造成的发虚)
+  enableDithering?: boolean; // 是否开启智能误差扩散抖动 (默认 true, 消除3D毛发/渐变色块断层)
+  mattingContiguous?: boolean; // 是否仅从外边缘连通抠图 (防止误删人物内部白衣/眼睛/文字)
+  defringeLevel?: number; // 边缘腐蚀深度 0 - 2 (默认 0, 避免啃伤细字体和轮廓)
 }
 
 export interface ImageGridConfig {

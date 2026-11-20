@@ -92,12 +92,12 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const [selectedPresetKey, setSelectedPresetKey] = useState<IdPhotoPresetKey>('1-inch');
   const [customUnit, setCustomUnit] = useState<'px' | 'mm'>('px');
   const [customDpi, setCustomDpi] = useState<number>(300);
-  const [customWidthMm, setCustomWidthMm] = useState<number>(16.1);
-  const [customHeightMm, setCustomHeightMm] = useState<number>(22.0);
-  const [customWidthPx, setCustomWidthPx] = useState<number>(190);
-  const [customHeightPx, setCustomHeightPx] = useState<number>(260);
-  const [customWidthInput, setCustomWidthInput] = useState<string>('190');
-  const [customHeightInput, setCustomHeightInput] = useState<string>('260');
+  const [customWidthMm, setCustomWidthMm] = useState<number>(25);
+  const [customHeightMm, setCustomHeightMm] = useState<number>(35);
+  const [customWidthPx, setCustomWidthPx] = useState<number>(295);
+  const [customHeightPx, setCustomHeightPx] = useState<number>(413);
+  const [customWidthInput, setCustomWidthInput] = useState<string>('295');
+  const [customHeightInput, setCustomHeightInput] = useState<string>('413');
   const [lockCustomAspect, setLockCustomAspect] = useState<boolean>(false);
 
   // Background color state
@@ -249,6 +249,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   const handleCustomDpiChange = (nextDpi: number) => {
     setCustomDpi(nextDpi);
     if (customUnit === 'mm') {
+      setSelectedPresetKey('custom');
       const nextWPx = Math.max(40, Math.min(4000, mmToPx(customWidthMm, nextDpi)));
       const nextHPx = Math.max(40, Math.min(4000, mmToPx(customHeightMm, nextDpi)));
       setCustomWidthPx(nextWPx);
@@ -264,6 +265,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     const parsed = parseFloat(valStr);
     if (!Number.isFinite(parsed) || parsed <= 0) return;
 
+    setSelectedPresetKey('custom');
     const ratio = customWidthPx > 0 ? customHeightPx / customWidthPx : 260 / 190;
     if (customUnit === 'px') {
       const nextWPx = Math.max(40, Math.min(4000, Math.round(parsed)));
@@ -295,6 +297,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     const parsed = parseFloat(valStr);
     if (!Number.isFinite(parsed) || parsed <= 0) return;
 
+    setSelectedPresetKey('custom');
     const ratio = customHeightPx > 0 ? customWidthPx / customHeightPx : 190 / 260;
     if (customUnit === 'px') {
       const nextHPx = Math.max(40, Math.min(4000, Math.round(parsed)));
@@ -332,11 +335,18 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   };
 
   const handleSwapCustomDimensions = () => {
+    setSelectedPresetKey('custom');
     syncCustomDimensions(customHeightPx, customWidthPx, customUnit, customDpi);
   };
 
   const handleSelectPreset = (spec: IdPhotoPresetSpec) => {
     setSelectedPresetKey(spec.key);
+    if (spec.key !== 'custom') {
+      syncCustomDimensions(spec.widthPx, spec.heightPx, customUnit, spec.dpi);
+    } else {
+      handleCustomInputBlur();
+    }
+
     if (spec.key === 'skill-exam') {
       setExportFormat('jpg');
       setFileSizeMinKb(spec.recommendedMinSizeKb ?? 15);
@@ -350,8 +360,16 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
       onNotification?.(
         '✅ 已套用职业技能/竞赛报名规范：190×260 px · JPG · 纯白/浅蓝底 · 严格 15-20KB（<20KB），请在右侧填写18位身份证号命名'
       );
-    } else if (spec.key === 'custom') {
-      handleCustomInputBlur();
+    } else if (spec.key === 'social-card') {
+      setExportFormat('jpg');
+      setFileSizeMinKb(spec.recommendedMinSizeKb ?? 14);
+      setFileSizeLimitKb(spec.recommendedSizeKb ?? 40);
+      setShowCustomKbInputs(true);
+      setClarityConfig((prev) => ({ ...prev, exportDpiMultiplier: 1 }));
+      if (selectedColorId !== 'white') {
+        setSelectedColorId('white');
+      }
+      onNotification?.('✅ 已套用社保卡/二代证规范：358×441 px · JPG · 纯白底 · 14-40KB');
     }
   };
 
@@ -1930,162 +1948,166 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   )}
                 </div>
 
-                {/* Full Custom Size & Unit Workspace when 'custom' is selected */}
-                {selectedPresetKey === 'custom' && (
-                  <div className="p-4 bg-stone-50/90 rounded-xl border border-indigo-200/90 space-y-3.5 text-xs animate-in fade-in duration-150">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-stone-200/80">
-                      <div className="flex items-center gap-1.5 font-bold text-stone-900">
-                        <Ruler className="w-4 h-4 text-indigo-600" />
-                        <span>自定义尺寸设置</span>
-                        <span className="font-mono text-[11px] font-semibold text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded-md">
-                          {targetWidthPx} × {targetHeightPx} px
-                        </span>
-                      </div>
-
-                      {/* Unit Switcher (px vs mm) + DPI */}
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-center p-0.5 bg-stone-200/80 rounded-lg text-[11px] font-semibold">
-                          <button
-                            type="button"
-                            onClick={() => handleCustomUnitSwitch('px')}
-                            className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                              customUnit === 'px'
-                                ? 'bg-white text-stone-900 shadow-2xs'
-                                : 'text-stone-600 hover:text-stone-900'
-                            }`}
-                          >
-                            按像素 (px)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleCustomUnitSwitch('mm')}
-                            className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
-                              customUnit === 'mm'
-                                ? 'bg-white text-stone-900 shadow-2xs'
-                                : 'text-stone-600 hover:text-stone-900'
-                            }`}
-                          >
-                            按毫米 (mm)
-                          </button>
-                        </div>
-
-                        <select
-                          value={customDpi}
-                          onChange={(e) => handleCustomDpiChange(Number(e.target.value))}
-                          className="px-2 py-1 bg-white border border-stone-300 rounded-lg text-[11px] font-mono font-semibold text-stone-700 cursor-pointer"
-                          title="打印分辨率 DPI（用于 px 与 mm 换算）"
-                        >
-                          <option value={72}>72 DPI</option>
-                          <option value={96}>96 DPI</option>
-                          <option value={150}>150 DPI</option>
-                          <option value={300}>300 DPI</option>
-                          <option value={600}>600 DPI</option>
-                        </select>
-                      </div>
+                {/* Always-Visible Custom Size & Unit Workspace (Edit anytime without extra clicks) */}
+                <div
+                  className={`p-4 rounded-xl border space-y-3.5 text-xs transition-colors ${
+                    selectedPresetKey === 'custom'
+                      ? 'bg-indigo-50/45 border-indigo-300 ring-1 ring-indigo-500/15'
+                      : 'bg-stone-50/90 border-stone-200/90'
+                  }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-stone-200/80">
+                    <div className="flex items-center gap-1.5 font-bold text-stone-900 flex-wrap">
+                      <Ruler className="w-4 h-4 text-indigo-600" />
+                      <span>自定义尺寸设置（直接修改宽高即可生效）</span>
+                      <span className="font-mono text-[11px] font-semibold text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded-md">
+                        {targetWidthPx} × {targetHeightPx} px
+                      </span>
                     </div>
 
-                    {/* Width / Lock / Swap / Height Row */}
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
-                      <div className="sm:col-span-5">
-                        <label className="block text-stone-600 font-semibold mb-1">
-                          宽度 ({customUnit === 'px' ? '像素 px' : '毫米 mm'})
-                        </label>
-                        <input
-                          type="number"
-                          min={customUnit === 'px' ? 40 : 4}
-                          max={customUnit === 'px' ? 4000 : 300}
-                          step={customUnit === 'px' ? 1 : 0.5}
-                          value={customWidthInput}
-                          onChange={(e) => handleCustomWidthChange(e.target.value)}
-                          onBlur={handleCustomInputBlur}
-                          placeholder={customUnit === 'px' ? '如 190' : '如 16.1'}
-                          className="w-full px-3 py-2 bg-white border border-stone-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none rounded-lg font-mono font-bold text-stone-900"
-                        />
-                      </div>
-
-                      <div className="sm:col-span-2 flex items-center justify-center gap-1.5 pb-0.5">
+                    {/* Unit Switcher (px vs mm) + DPI */}
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center p-0.5 bg-stone-200/80 rounded-lg text-[11px] font-semibold">
                         <button
                           type="button"
-                          onClick={() => setLockCustomAspect((v) => !v)}
-                          className={`p-2 rounded-lg border transition-colors cursor-pointer ${
-                            lockCustomAspect
-                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
-                              : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
+                          onClick={() => handleCustomUnitSwitch('px')}
+                          className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                            customUnit === 'px'
+                              ? 'bg-white text-stone-900 shadow-2xs'
+                              : 'text-stone-600 hover:text-stone-900'
                           }`}
-                          title={lockCustomAspect ? '已锁定宽高比（点击解锁）' : '点击锁定当前宽高比'}
                         >
-                          {lockCustomAspect ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                          按像素 (px)
                         </button>
                         <button
                           type="button"
-                          onClick={handleSwapCustomDimensions}
-                          className="p-2 rounded-lg border bg-white text-stone-600 border-stone-300 hover:bg-stone-100 transition-colors cursor-pointer"
-                          title="一键互换宽和高"
+                          onClick={() => handleCustomUnitSwitch('mm')}
+                          className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                            customUnit === 'mm'
+                              ? 'bg-white text-stone-900 shadow-2xs'
+                              : 'text-stone-600 hover:text-stone-900'
+                          }`}
                         >
-                          <ArrowLeftRight className="w-3.5 h-3.5" />
+                          按毫米 (mm)
                         </button>
                       </div>
 
-                      <div className="sm:col-span-5">
-                        <label className="block text-stone-600 font-semibold mb-1">
-                          高度 ({customUnit === 'px' ? '像素 px' : '毫米 mm'})
-                        </label>
-                        <input
-                          type="number"
-                          min={customUnit === 'px' ? 40 : 4}
-                          max={customUnit === 'px' ? 4000 : 300}
-                          step={customUnit === 'px' ? 1 : 0.5}
-                          value={customHeightInput}
-                          onChange={(e) => handleCustomHeightChange(e.target.value)}
-                          onBlur={handleCustomInputBlur}
-                          placeholder={customUnit === 'px' ? '如 260' : '如 22.0'}
-                          className="w-full px-3 py-2 bg-white border border-stone-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none rounded-lg font-mono font-bold text-stone-900"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Live Conversion Summary */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-500 bg-white px-3 py-2 rounded-lg border border-stone-200/80">
-                      <span>
-                        实际输出像素：<strong className="font-mono text-stone-900">{targetWidthPx} × {targetHeightPx} px</strong>
-                      </span>
-                      <span>
-                        对应冲印尺寸：<strong className="font-mono text-stone-700">{displayWidthMm} × {displayHeightMm} mm</strong> ({displayDpi} DPI)
-                      </span>
-                      <span>
-                        宽高比：<strong className="font-mono text-stone-700">{(targetWidthPx / targetHeightPx).toFixed(2)} : 1</strong>
-                      </span>
-                    </div>
-
-                    {/* Quick Custom Size Templates */}
-                    <div className="space-y-1.5">
-                      <span className="text-[11px] font-semibold text-stone-600">常用报名自定义像素快捷填入：</span>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                        {QUICK_CUSTOM_SIZE_TEMPLATES.map((tpl) => {
-                          const isMatch =
-                            targetWidthPx === tpl.widthPx && targetHeightPx === tpl.heightPx;
-                          return (
-                            <button
-                              key={tpl.id}
-                              type="button"
-                              onClick={() => handleApplyQuickCustomTemplate(tpl)}
-                              className={`px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
-                                isMatch
-                                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
-                                  : 'bg-white hover:bg-indigo-50/70 border-stone-200 text-stone-700'
-                              }`}
-                            >
-                              <div className="text-[11px] font-bold truncate">{tpl.label}</div>
-                              <div className={`text-[10px] truncate ${isMatch ? 'text-indigo-100' : 'text-stone-400'}`}>
-                                {tpl.note}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
+                      <select
+                        value={customDpi}
+                        onChange={(e) => handleCustomDpiChange(Number(e.target.value))}
+                        className="px-2 py-1 bg-white border border-stone-300 rounded-lg text-[11px] font-mono font-semibold text-stone-700 cursor-pointer"
+                        title="打印分辨率 DPI（用于 px 与 mm 换算）"
+                      >
+                        <option value={72}>72 DPI</option>
+                        <option value={96}>96 DPI</option>
+                        <option value={150}>150 DPI</option>
+                        <option value={300}>300 DPI</option>
+                        <option value={600}>600 DPI</option>
+                      </select>
                     </div>
                   </div>
-                )}
+
+                  {/* Width / Lock / Swap / Height Row */}
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
+                    <div className="sm:col-span-5">
+                      <label className="block text-stone-600 font-semibold mb-1">
+                        宽度 ({customUnit === 'px' ? '像素 px' : '毫米 mm'})
+                      </label>
+                      <input
+                        type="number"
+                        min={customUnit === 'px' ? 40 : 4}
+                        max={customUnit === 'px' ? 4000 : 300}
+                        step={customUnit === 'px' ? 1 : 0.5}
+                        value={customWidthInput}
+                        onChange={(e) => handleCustomWidthChange(e.target.value)}
+                        onBlur={handleCustomInputBlur}
+                        placeholder={customUnit === 'px' ? '如 190' : '如 16.1'}
+                        className="w-full px-3 py-2 bg-white border border-stone-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none rounded-lg font-mono font-bold text-stone-900"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-2 flex items-center justify-center gap-1.5 pb-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setLockCustomAspect((v) => !v)}
+                        className={`p-2 rounded-lg border transition-colors cursor-pointer ${
+                          lockCustomAspect
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                            : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
+                        }`}
+                        title={lockCustomAspect ? '已锁定宽高比（点击解锁）' : '点击锁定当前宽高比'}
+                      >
+                        {lockCustomAspect ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSwapCustomDimensions}
+                        className="p-2 rounded-lg border bg-white text-stone-600 border-stone-300 hover:bg-stone-100 transition-colors cursor-pointer"
+                        title="一键互换宽和高"
+                      >
+                        <ArrowLeftRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="sm:col-span-5">
+                      <label className="block text-stone-600 font-semibold mb-1">
+                        高度 ({customUnit === 'px' ? '像素 px' : '毫米 mm'})
+                      </label>
+                      <input
+                        type="number"
+                        min={customUnit === 'px' ? 40 : 4}
+                        max={customUnit === 'px' ? 4000 : 300}
+                        step={customUnit === 'px' ? 1 : 0.5}
+                        value={customHeightInput}
+                        onChange={(e) => handleCustomHeightChange(e.target.value)}
+                        onBlur={handleCustomInputBlur}
+                        placeholder={customUnit === 'px' ? '如 260' : '如 22.0'}
+                        className="w-full px-3 py-2 bg-white border border-stone-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none rounded-lg font-mono font-bold text-stone-900"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Live Conversion Summary */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-500 bg-white px-3 py-2 rounded-lg border border-stone-200/80">
+                    <span>
+                      实际输出像素：<strong className="font-mono text-stone-900">{targetWidthPx} × {targetHeightPx} px</strong>
+                    </span>
+                    <span>
+                      对应冲印尺寸：<strong className="font-mono text-stone-700">{displayWidthMm} × {displayHeightMm} mm</strong> ({displayDpi} DPI)
+                    </span>
+                    <span>
+                      宽高比：<strong className="font-mono text-stone-700">{(targetWidthPx / targetHeightPx).toFixed(2)} : 1</strong>
+                    </span>
+                  </div>
+
+                  {/* Quick Custom Size Templates */}
+                  <div className="space-y-1.5">
+                    <span className="text-[11px] font-semibold text-stone-600">常用报名自定义像素一键填入：</span>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                      {QUICK_CUSTOM_SIZE_TEMPLATES.map((tpl) => {
+                        const isMatch =
+                          targetWidthPx === tpl.widthPx && targetHeightPx === tpl.heightPx;
+                        return (
+                          <button
+                            key={tpl.id}
+                            type="button"
+                            onClick={() => handleApplyQuickCustomTemplate(tpl)}
+                            className={`px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
+                              isMatch
+                                ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                                : 'bg-white hover:bg-indigo-50/70 border-stone-200 text-stone-700'
+                            }`}
+                          >
+                            <div className="text-[11px] font-bold truncate">{tpl.label}</div>
+                            <div className={`text-[10px] truncate ${isMatch ? 'text-indigo-100' : 'text-stone-400'}`}>
+                              {tpl.note}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -2609,6 +2631,44 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     JPG
                   </button>
                 </div>
+              </div>
+
+              {/* Quick Size Switcher Strip directly in Preview Header */}
+              <div className="flex flex-wrap items-center gap-1 pt-1">
+                {(['1-inch', '2-inch', 'skill-exam', 'social-card', 'custom'] as IdPhotoPresetKey[]).map(
+                  (key) => {
+                    const spec = ID_PHOTO_PRESETS.find((p) => p.key === key);
+                    if (!spec) return null;
+                    const active = selectedPresetKey === key;
+                    const shortLabel =
+                      key === '1-inch'
+                        ? '1寸 295×413'
+                        : key === '2-inch'
+                        ? '2寸 413×579'
+                        : key === 'skill-exam'
+                        ? '竞赛 190×260'
+                        : key === 'social-card'
+                        ? '社保 358×441'
+                        : `自定义 ${customWidthPx}×${customHeightPx}`;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          handleSelectPreset(spec);
+                          if (key === 'custom') setActiveStepTab('spec');
+                        }}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                            : 'bg-stone-50 text-stone-600 border-stone-200 hover:bg-stone-100 hover:text-stone-900'
+                        }`}
+                      >
+                        {shortLabel}
+                      </button>
+                    );
+                  }
+                )}
               </div>
 
               {/* Top Toolbar Outside the Photo: Compare Original & Guidelines */}

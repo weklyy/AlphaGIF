@@ -137,35 +137,38 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       return Math.sqrt((r - bgR) ** 2 + (g - bgG) ** 2 + (b - bgB) ** 2);
     };
 
-    const maxTol = 55;
+    const maxTol = 54;
     const visited = new Uint8Array(totalPixels);
     const queue = new Int32Array(totalPixels);
     let head = 0;
     let tail = 0;
 
-    const archCenterX = width * 0.5;
-    const archCenterY = height * 0.36;
-    const archRx = width * 0.27;
-    const archRy = height * 0.26;
+    const isSkin = (r: number, g: number, b: number) =>
+      r >= 85 && g >= 45 && b >= 25 && r > g + 9 && g >= b - 5 && r - b >= 18;
+    const bgIsSkinLike = isSkin(bgR, bgG, bgB);
 
-    const enqueue = (x: number, y: number) => {
+    const enqueue = (x: number, y: number, prevR?: number, prevG?: number, prevB?: number) => {
       if (x < 0 || x >= width || y < 0 || y >= height) return;
-      if (y >= height * 0.85) return;
-
-      const dxNorm = (x - archCenterX) / archRx;
-      const dyNorm = (y - archCenterY) / archRy;
-      if (dxNorm * dxNorm + dyNorm * dyNorm <= 1.0) return;
+      if (y >= height * 0.92) return;
 
       const idx = y * width + x;
       if (visited[idx]) return;
-      visited[idx] = 1;
 
       const p = idx * 4;
       const r = rawSrc[p];
       const g = rawSrc[p + 1];
       const b = rawSrc[p + 2];
+      const dist = colorDist(r, g, b);
 
-      if (colorDist(r, g, b) <= maxTol) {
+      if (!bgIsSkinLike && isSkin(r, g, b) && dist > 20) return;
+
+      if (prevR !== undefined && prevG !== undefined && prevB !== undefined) {
+        const step = Math.sqrt((r - prevR) ** 2 + (g - prevG) ** 2 + (b - prevB) ** 2);
+        if (step > 24) return;
+      }
+
+      if (dist <= maxTol) {
+        visited[idx] = 1;
         distMap[idx] = 0;
         rawSrc[p + 3] = 0;
         queue[tail++] = idx;
@@ -173,7 +176,7 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
     };
 
     for (let x = 0; x < width; x++) enqueue(x, 0);
-    for (let y = 0; y < maxY; y++) {
+    for (let y = 0; y < Math.round(height * 0.85); y++) {
       enqueue(0, y);
       enqueue(width - 1, y);
     }
@@ -182,11 +185,13 @@ export function buildSilhouetteField(sourceData: ImageData): SilhouetteField {
       const curr = queue[head++];
       const cx = curr % width;
       const cy = Math.floor(curr / width);
+      const cp = curr * 4;
+      const cR = rawSrc[cp], cG = rawSrc[cp + 1], cB = rawSrc[cp + 2];
 
-      if (cx > 0) enqueue(cx - 1, cy);
-      if (cx < width - 1) enqueue(cx + 1, cy);
-      if (cy > 0) enqueue(cx, cy - 1);
-      if (cy < height - 1) enqueue(cx, cy + 1);
+      if (cx > 0) enqueue(cx - 1, cy, cR, cG, cB);
+      if (cx < width - 1) enqueue(cx + 1, cy, cR, cG, cB);
+      if (cy > 0) enqueue(cx, cy - 1, cR, cG, cB);
+      if (cy < height - 1) enqueue(cx, cy + 1, cR, cG, cB);
     }
   }
 

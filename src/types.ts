@@ -331,6 +331,7 @@ export type IdPhotoPresetKey =
   | 'small-2-inch' // 小 2 寸 / 护照 (35x45mm -> 413x531px @ 300DPI)
   | 'large-2-inch' // 大 2 寸 (35x53mm -> 413x626px @ 300DPI)
   | 'skill-exam'   // 职业技能/竞赛报名 (190x260px, JPG, 15-20KB, 白/浅蓝底)
+  | 'social-card'  // 社保卡/二代证 (358x441px, JPG, 14-40KB, 纯白底)
   | 'gwy'          // 国家公务员报名 (35x45mm, <20KB / <50KB)
   | 'ky'           // 全国研究生入学考试 (480x640px)
   | 'cet'          // 英语四六级考试 (240x320px)

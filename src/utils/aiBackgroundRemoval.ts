@@ -223,9 +223,12 @@ function refineMaskWithHighResImage(
   };
 
   // Sample interior crown hair (between headTopY + 3% and headTopY + 15% of height, where coarseAlpha >= 200)
+  // IMPORTANT: Exclude pixels that closely match the flat background wall color so a white wall halo
+  // above the head is NEVER misclassified as white/silver hair!
   let hairLumSum = 0;
   let hairChromaSum = 0;
   let hairSampleCount = 0;
+  let texturedLightHairCount = 0;
   const crownStartY = Math.min(height - 1, headTopY + Math.round(height * 0.025));
   const crownEndY = Math.min(height - 1, headTopY + Math.round(height * 0.16));
   for (let y = crownStartY; y <= crownEndY; y += 2) {
@@ -239,21 +242,40 @@ function refineMaskWithHighResImage(
         if (isSkinColor(r, g, b)) continue;
         if (isBlueOrCyanBg && (b > r + 20 || g > r + 20)) continue;
         if (isRedBg && r > g + 30 && r > b + 30) continue;
+        // Skip uniform background-wall pixels (flat luminance + very close to wall color)
+        if (!isChromaticBg && bgDistMap[i] < 24) continue;
 
-        hairLumSum += lumMap[i];
+        const cL = lumMap[i];
+        const localGrad =
+          x > 0 && x + 1 < width && y > 0 && y + 1 < height
+            ? (Math.abs(cL - lumMap[i - 1]) +
+                Math.abs(cL - lumMap[i + 1]) +
+                Math.abs(cL - lumMap[i - width]) +
+                Math.abs(cL - lumMap[i + width])) *
+              0.25
+            : 0;
+
+        hairLumSum += cL;
         hairChromaSum += Math.max(r, g, b) - Math.min(r, g, b);
         hairSampleCount++;
+        if (cL >= 105 && localGrad >= 3.2) {
+          texturedLightHairCount++;
+        }
       }
     }
   }
 
-  const avgCrownHairLum = hairSampleCount > 10 ? hairLumSum / hairSampleCount : 45;
-  const avgCrownHairChroma = hairSampleCount > 10 ? hairChromaSum / hairSampleCount : 15;
+  const avgCrownHairLum = hairSampleCount > 12 ? hairLumSum / hairSampleCount : 45;
+  const avgCrownHairChroma = hairSampleCount > 12 ? hairChromaSum / hairSampleCount : 15;
 
-  // Subject has white/silver/grey hair ONLY if interior crown hair has high luminance (>= 98) and low chroma (< 35),
-  // AND white hair protection against white walls is only needed when the wall is achromatic (!isChromaticBg)!
+  // Subject has white/silver/grey hair ONLY if interior crown hair has high luminance (>= 105),
+  // low chroma (< 35), AND real hair-strand texture (not a flat white wall!)
   const hasWhiteOrGreyHairOnLightWall =
-    !isChromaticBg && avgCrownHairLum >= 98 && avgCrownHairChroma < 38;
+    !isChromaticBg &&
+    hairSampleCount > 12 &&
+    avgCrownHairLum >= 105 &&
+    avgCrownHairChroma < 35 &&
+    texturedLightHairCount >= Math.max(8, hairSampleCount * 0.22);
 
   const cranialProtectMaxY = Math.min(
     Math.round(height * 0.50),
@@ -431,23 +453,40 @@ function refineMaskWithHighResImage(
         if (cAlpha >= 24 && textureMap[ni] > 2.2) continue;
       }
 
+      const isUpperHeadZone = ny < shoulderZoneY;
       const isLateralPocketZone =
         ny >= cranialProtectMaxY && ny < height * 0.88 && (nx < width * 0.38 || nx > width * 0.62);
-      const allowedDepth = isLateralPocketZone
-        ? maxErodePx * 1.45
-        : hasWhiteOrGreyHairOnLightWall && ny < cranialProtectMaxY
-        ? 1.5
-        : maxErodePx;
+      const allowedDepth =
+        hasWhiteOrGreyHairOnLightWall && ny < cranialProtectMaxY
+          ? 1.5
+          : isUpperHeadZone
+          ? Math.max(maxErodePx * 3.5, Math.round(width * 0.18))
+          : isLateralPocketZone
+          ? maxErodePx * 1.45
+          : maxErodePx;
 
       if (distInsideFg[ni] > allowedDepth) continue;
+
+      const np = ni * 4;
+      const nR = srcData[np], nG = srcData[np + 1], nB = srcData[np + 2];
+      // Protect warm skin pixels from background flood-fill on light/blue walls
+      if (!isRedBg && isSkinColor(nR, nG, nB) && bgDistMap[ni] > 18) continue;
 
       const step = colorStep(curr, ni);
       const bDist = bgDistMap[ni];
       const isChromaMatch = isChromaticBg && hasBackdropChroma(ni);
 
       // For blue/cyan/red studio backdrops, allow slightly wider tolerance to eat up the entire blue/cyan halo right up to the hair/suit edge!
-      const maxStep = isChromaMatch ? 22.0 : cAlpha < 110 ? 16.0 : 12.0;
-      const maxBgDist = isChromaMatch ? 46 : cAlpha < 90 ? 38 : cAlpha < 185 ? 32 : 24;
+      const maxStep = isChromaMatch ? 22.0 : cAlpha < 110 ? 16.0 : 13.0;
+      const maxBgDist = isChromaMatch
+        ? 46
+        : cAlpha < 90
+        ? 40
+        : isUpperHeadZone && !hasWhiteOrGreyHairOnLightWall
+        ? 34
+        : cAlpha < 185
+        ? 32
+        : 24;
 
       if (step <= maxStep && bDist <= maxBgDist) {
         visitedBg[ni] = 1;
@@ -928,7 +967,8 @@ async function segmentWithMediaPipe(
 
     const SelfieSegmentationClass = (window as any).SelfieSegmentation;
     const selfie = new SelfieSegmentationClass({
-      locateFile: (file: string) => `/mediapipe/selfie_segmentation/${file}`,
+      locateFile: (file: string) =>
+        `${window.location.origin}/mediapipe/selfie_segmentation/${file}`,
     });
 
     selfie.setOptions({
@@ -949,7 +989,7 @@ async function segmentWithMediaPipe(
       const timeout = setTimeout(() => {
         try { selfie.close(); } catch {}
         reject(new Error('MediaPipe timeout'));
-      }, 4500);
+      }, 15000);
 
       selfie.onResults((results: any) => {
         clearTimeout(timeout);
@@ -964,21 +1004,37 @@ async function segmentWithMediaPipe(
           srcCtx.drawImage(imageSource, 0, 0, width, height);
           const srcImgData = srcCtx.getImageData(0, 0, width, height);
 
-          // 2. Extract coarse semantic probability mask
+          // 2. Extract coarse semantic probability mask (supports both alpha-based & grayscale-based masks)
           const maskCanvas = document.createElement('canvas');
           maskCanvas.width = width;
           maskCanvas.height = height;
           const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true })!;
-          maskCtx.fillStyle = '#FFFFFF';
-          maskCtx.fillRect(0, 0, width, height);
-          maskCtx.globalCompositeOperation = 'destination-in';
+          maskCtx.clearRect(0, 0, width, height);
           maskCtx.drawImage(mask, 0, 0, width, height);
           const rawMaskData = maskCtx.getImageData(0, 0, width, height).data;
 
           const totalPixels = width * height;
+          let minA = 255, maxA = 0;
+          for (let i = 0; i < totalPixels; i += 16) {
+            const aVal = rawMaskData[i * 4 + 3];
+            if (aVal < minA) minA = aVal;
+            if (aVal > maxA) maxA = aVal;
+          }
+          const useAlphaChannel = maxA - minA > 40;
+
           const coarseAlpha = new Uint8Array(totalPixels);
+          let fgCount = 0;
           for (let i = 0; i < totalPixels; i++) {
-            coarseAlpha[i] = rawMaskData[i * 4 + 3];
+            const v = useAlphaChannel ? rawMaskData[i * 4 + 3] : rawMaskData[i * 4];
+            coarseAlpha[i] = v;
+            if (v >= 128) fgCount++;
+          }
+
+          const fgRatio = fgCount / Math.max(1, totalPixels);
+          if (fgRatio < 0.03 || fgRatio > 0.97) {
+            try { selfie.close(); } catch {}
+            reject(new Error('MediaPipe mask degenerate'));
+            return;
           }
 
           // 3. Run High-Resolution Trimap, Chroma-Unmixing & Joint Bilateral Edge-Snapping Refinement
@@ -1132,7 +1188,7 @@ export async function removeBackgroundWithAI(
 
     const aiExecutionPromise = imglyRemoveBackground(inputSource, config);
     const timeoutPromise = new Promise<Blob>((_, reject) =>
-      setTimeout(() => reject(new Error('网络模型下载超时，自动切换至边缘自适应算法')), 4500)
+      setTimeout(() => reject(new Error('网络模型下载超时，自动切换至边缘自适应算法')), 12000)
     );
     const outputBlob = await Promise.race([aiExecutionPromise, timeoutPromise]);
 
@@ -1256,6 +1312,7 @@ export async function smartEdgeGuidedKeying(
     return { blob: outBlob, url: outUrl, imageData: imgData, width, height };
   }
 
+  // Build smooth top/left/right background color reference (handles indoor wall gradients!)
   let sumR = 0, sumG = 0, sumB = 0, samples = 0;
   const sample = (x: number, y: number) => {
     if (x < 0 || x >= width || y < 0 || y >= height) return;
@@ -1266,15 +1323,11 @@ export async function smartEdgeGuidedKeying(
     samples++;
   };
 
-  for (let x = 0; x < width * 0.25; x += 3) {
+  for (let x = 0; x < width; x += 4) {
     sample(x, 0);
     sample(x, 2);
   }
-  for (let x = Math.round(width * 0.75); x < width; x += 3) {
-    sample(x, 0);
-    sample(x, 2);
-  }
-  const maxSampleY = Math.round(height * 0.35);
+  const maxSampleY = Math.round(height * 0.45);
   for (let y = 0; y < maxSampleY; y += 3) {
     sample(0, y);
     sample(2, y);
@@ -1286,11 +1339,56 @@ export async function smartEdgeGuidedKeying(
   const bgG = samples > 0 ? sumG / samples : 235;
   const bgB = samples > 0 ? sumB / samples : 235;
 
-  const colorDistToBg = (r: number, g: number, b: number) => {
-    const dr = r - bgR;
-    const dg = g - bgG;
-    const db = b - bgB;
+  const isSkinTone = (r: number, g: number, b: number) => {
+    if (r < 85 || g < 45 || b < 25) return false;
+    return r > g + 9 && g >= b - 5 && r - b >= 18;
+  };
+  const bgIsSkinLike = isSkinTone(bgR, bgG, bgB);
+
+  // Per-row left & right border wall profile so slight left-to-right lighting falloff is tracked cleanly
+  const rowLeftR = new Float32Array(height);
+  const rowLeftG = new Float32Array(height);
+  const rowLeftB = new Float32Array(height);
+  const rowRightR = new Float32Array(height);
+  const rowRightG = new Float32Array(height);
+  const rowRightB = new Float32Array(height);
+
+  const colorDist = (r1: number, g1: number, b1: number, r2: number, g2: number, b2: number) => {
+    const dr = r1 - r2;
+    const dg = g1 - g2;
+    const db = b1 - b2;
     return Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
+  };
+
+  let lastLR = bgR, lastLG = bgG, lastLB = bgB;
+  let lastRR = bgR, lastRG = bgG, lastRB = bgB;
+  for (let y = 0; y < height; y++) {
+    const lp = (y * width + 1) * 4;
+    const rp = (y * width + Math.max(0, width - 2)) * 4;
+    if (colorDist(data[lp], data[lp + 1], data[lp + 2], bgR, bgG, bgB) <= 55) {
+      lastLR = lastLR * 0.7 + data[lp] * 0.3;
+      lastLG = lastLG * 0.7 + data[lp + 1] * 0.3;
+      lastLB = lastLB * 0.7 + data[lp + 2] * 0.3;
+    }
+    if (colorDist(data[rp], data[rp + 1], data[rp + 2], bgR, bgG, bgB) <= 55) {
+      lastRR = lastRR * 0.7 + data[rp] * 0.3;
+      lastRG = lastRG * 0.7 + data[rp + 1] * 0.3;
+      lastRB = lastRB * 0.7 + data[rp + 2] * 0.3;
+    }
+    rowLeftR[y] = lastLR;
+    rowLeftG[y] = lastLG;
+    rowLeftB[y] = lastLB;
+    rowRightR[y] = lastRR;
+    rowRightG[y] = lastRG;
+    rowRightB[y] = lastRB;
+  }
+
+  const localBgDist = (x: number, y: number, r: number, g: number, b: number) => {
+    const t = x / Math.max(1, width - 1);
+    const lR = rowLeftR[y] * (1 - t) + rowRightR[y] * t;
+    const lG = rowLeftG[y] * (1 - t) + rowRightG[y] * t;
+    const lB = rowLeftB[y] * (1 - t) + rowRightB[y] * t;
+    return Math.min(colorDist(r, g, b, bgR, bgG, bgB), colorDist(r, g, b, lR, lG, lB));
   };
 
   const visited = new Uint8Array(totalPixels);
@@ -1301,17 +1399,13 @@ export async function smartEdgeGuidedKeying(
   let head = 0;
   let tail = 0;
 
-  const archCenterX = width * 0.5;
-  const archCenterY = height * 0.36;
-  const archRx = width * 0.27;
-  const archRy = height * 0.26;
-
   const trySeed = (x: number, y: number) => {
     if (x < 0 || x >= width || y < 0 || y >= height) return;
     const idx = y * width + x;
     if (visited[idx]) return;
     const p = idx * 4;
-    if (colorDistToBg(data[p], data[p + 1], data[p + 2]) <= 46) {
+    const r = data[p], g = data[p + 1], b = data[p + 2];
+    if (localBgDist(x, y, r, g, b) <= 52 && !(!bgIsSkinLike && isSkinTone(r, g, b) && localBgDist(x, y, r, g, b) > 22)) {
       visited[idx] = 1;
       coarseAlpha[idx] = 0;
       queue[tail++] = idx;
@@ -1319,11 +1413,12 @@ export async function smartEdgeGuidedKeying(
   };
 
   for (let x = 0; x < width; x++) trySeed(x, 0);
-  for (let y = 0; y < Math.round(height * 0.85); y++) {
+  for (let y = 0; y < Math.round(height * 0.92); y++) {
     trySeed(0, y);
     trySeed(width - 1, y);
   }
 
+  // Edge-guided adaptive BFS flood-fill (NO hardcoded geometric oval blocking headroom!)
   while (head < tail) {
     const curr = queue[head++];
     const cx = curr % width;
@@ -1344,15 +1439,18 @@ export async function smartEdgeGuidedKeying(
       const nx = ni % width;
       const ny = (ni / width) | 0;
 
-      const dxNorm = (nx - archCenterX) / archRx;
-      const dyNorm = (ny - archCenterY) / archRy;
-      if (dxNorm * dxNorm + dyNorm * dyNorm <= 1.0) continue;
-
       const np = ni * 4;
       const nR = data[np], nG = data[np + 1], nB = data[np + 2];
-      const dr = nR - cR, dg = nG - cG, db = nB - cB;
-      const stepDist = Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9);
-      if (stepDist <= 12 && colorDistToBg(nR, nG, nB) <= 45) {
+      const bgD = localBgDist(nx, ny, nR, nG, nB);
+
+      // Protect warm human skin (forehead/ears/neck) from ever being eaten on light/blue walls
+      if (!bgIsSkinLike && isSkinTone(nR, nG, nB) && bgD > 18) continue;
+
+      const stepDist = colorDist(nR, nG, nB, cR, cG, cB);
+      const maxStep = ny < height * 0.45 ? 16 : 13;
+      const maxBg = ny < height * 0.45 ? 54 : 46;
+
+      if (stepDist <= maxStep && bgD <= maxBg) {
         visited[ni] = 1;
         coarseAlpha[ni] = 0;
         queue[tail++] = ni;

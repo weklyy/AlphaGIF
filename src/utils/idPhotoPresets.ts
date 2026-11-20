@@ -139,18 +139,202 @@ export const ID_PHOTO_PRESETS: IdPhotoPresetSpec[] = [
     recommendedSizeKb: 80,
   },
   {
+    key: 'skill-exam',
+    name: '职业技能/竞赛照',
+    category: 'exam',
+    widthMm: 16,
+    heightMm: 22,
+    widthPx: 190,
+    heightPx: 260,
+    dpi: 300,
+    description: '职业技能等级考核认定/竞赛报名专用（190×260 px）：JPG 格式、纯白或浅蓝底、严格小于 20KB（建议 15K-20K）、18位身份证号命名（X大写）',
+    recommendedSizeKb: 20,
+    recommendedMinSizeKb: 15,
+    recommendedFormat: 'jpg',
+    recommendedBgIds: ['white', 'blue-light', 'blue-sky'],
+    badgeText: '190×260 · 15-20K',
+  },
+  {
     key: 'custom',
     name: '自定义尺寸',
     category: 'custom',
-    widthMm: 25,
-    heightMm: 35,
-    widthPx: 300,
-    heightPx: 400,
+    widthMm: 16,
+    heightMm: 22,
+    widthPx: 190,
+    heightPx: 260,
     dpi: 300,
-    description: '手动输入任意像素尺寸 (宽 × 高 px) 或毫米 (mm)',
-    recommendedSizeKb: 100,
+    description: '自由输入任意像素 (px) 或物理毫米 (mm) 与 DPI，支持自定义文件大小区间 (KB) 与身份证号命名',
+    recommendedSizeKb: 20,
+    badgeText: '自由定制',
   },
 ];
+
+export interface QuickCustomSizeTemplate {
+  id: string;
+  label: string;
+  widthPx: number;
+  heightPx: number;
+  minKb?: number;
+  maxKb?: number;
+  format?: 'jpg' | 'png';
+  bgId?: string;
+  note: string;
+}
+
+export const QUICK_CUSTOM_SIZE_TEMPLATES: QuickCustomSizeTemplate[] = [
+  {
+    id: 'skill-190x260',
+    label: '职业技能/竞赛 190×260',
+    widthPx: 190,
+    heightPx: 260,
+    minKb: 15,
+    maxKb: 20,
+    format: 'jpg',
+    bgId: 'white',
+    note: 'JPG · 15-20KB · 白/浅蓝底',
+  },
+  {
+    id: 'social-358x441',
+    label: '社保卡/二代证 358×441',
+    widthPx: 358,
+    heightPx: 441,
+    minKb: 14,
+    maxKb: 40,
+    format: 'jpg',
+    bgId: 'white',
+    note: 'JPG · 14-40KB · 纯白底',
+  },
+  {
+    id: 'cet-240x320',
+    label: '四六级/学信 240×320',
+    widthPx: 240,
+    heightPx: 320,
+    maxKb: 50,
+    format: 'jpg',
+    bgId: 'blue-light',
+    note: 'JPG · ≤50KB · 浅蓝底',
+  },
+  {
+    id: 'std-295x413',
+    label: '标准1寸 295×413',
+    widthPx: 295,
+    heightPx: 413,
+    maxKb: 100,
+    format: 'jpg',
+    note: '300DPI · 25×35mm',
+  },
+  {
+    id: 'gwy-413x531',
+    label: '公考/小2寸 413×531',
+    widthPx: 413,
+    heightPx: 531,
+    maxKb: 50,
+    format: 'jpg',
+    note: 'JPG · ≤50KB',
+  },
+  {
+    id: 'ky-480x640',
+    label: '考研报名 480×640',
+    widthPx: 480,
+    heightPx: 640,
+    maxKb: 100,
+    format: 'jpg',
+    bgId: 'blue-light',
+    note: 'JPG · ≤100KB · 3:4',
+  },
+];
+
+export function pxToMm(px: number, dpi: number = 300): number {
+  if (!px || !dpi) return 0;
+  return Number(((px / dpi) * 25.4).toFixed(1));
+}
+
+export function mmToPx(mm: number, dpi: number = 300): number {
+  if (!mm || !dpi) return 0;
+  return Math.max(10, Math.round((mm / 25.4) * dpi));
+}
+
+export interface IdCardValidationResult {
+  normalized: string;
+  isEmpty: boolean;
+  isIdCardPattern: boolean;
+  isValidChecksum: boolean;
+  hasLowercaseXConverted: boolean;
+  status: 'empty' | 'valid-id' | 'invalid-checksum' | 'custom-name';
+  message: string;
+}
+
+const ID_WEIGHTS = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+const ID_CHECK_CODES = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
+
+export function sanitizeIdPhotoFileName(raw: string, autoUpperX: boolean = true): string {
+  // Remove filesystem-illegal characters
+  let cleaned = raw.replace(/[\\/:*?"<>|]/g, '').trim();
+  if (autoUpperX && /^\d{0,17}[xX]?$/.test(cleaned)) {
+    cleaned = cleaned.replace(/x/g, 'X');
+  }
+  return cleaned;
+}
+
+export function validateChineseIdNumber(raw: string): IdCardValidationResult {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return {
+      normalized: '',
+      isEmpty: true,
+      isIdCardPattern: false,
+      isValidChecksum: false,
+      hasLowercaseXConverted: false,
+      status: 'empty',
+      message: '未填写自定义文件名，将使用默认规格名称导出',
+    };
+  }
+
+  const hasLowercaseXConverted = /x/.test(trimmed) && /^\d{17}[xX]$/.test(trimmed);
+  const normalized = sanitizeIdPhotoFileName(trimmed, true);
+
+  if (/^\d{17}[\dX]$/.test(normalized)) {
+    let sum = 0;
+    for (let i = 0; i < 17; i++) {
+      sum += Number(normalized[i]) * ID_WEIGHTS[i];
+    }
+    const expected = ID_CHECK_CODES[sum % 11];
+    const isValidChecksum = normalized[17] === expected;
+    if (isValidChecksum) {
+      return {
+        normalized,
+        isEmpty: false,
+        isIdCardPattern: true,
+        isValidChecksum: true,
+        hasLowercaseXConverted,
+        status: 'valid-id',
+        message: '18位身份证号格式与校验位均正确（X已自动大写）',
+      };
+    }
+    return {
+      normalized,
+      isEmpty: false,
+      isIdCardPattern: true,
+      isValidChecksum: false,
+      hasLowercaseXConverted,
+      status: 'invalid-checksum',
+      message: `已满足18位格式，但第18位校验码应为「${expected}」，请核对号码是否有误`,
+    };
+  }
+
+  const digitOnly = /^\d+$/.test(normalized);
+  return {
+    normalized,
+    isEmpty: false,
+    isIdCardPattern: false,
+    isValidChecksum: false,
+    hasLowercaseXConverted: false,
+    status: 'custom-name',
+    message: digitOnly
+      ? `当前已输入 ${normalized.length}/18 位数字（身份证号需完整 18 位）`
+      : '将直接按此自定义文件名导出',
+  };
+}
 
 export interface IdColorPreset {
   id: string;
@@ -232,17 +416,24 @@ export const POPULAR_ID_COLORS: IdColorPreset[] = [
   },
   {
     id: 'blue-light',
-    name: '清爽淡蓝',
+    name: '标准浅蓝',
     type: 'color',
     hex: '#60A5FA',
-    description: '考研/四六级系统常用淡天蓝背景',
+    description: '职业技能考核、考研、四六级系统常用标准浅蓝背景',
+  },
+  {
+    id: 'blue-sky',
+    name: '淡雅浅天蓝',
+    type: 'color',
+    hex: '#87CEFA',
+    description: '清爽浅天蓝色背景（RGB 135, 206, 250），适合浅蓝底报名要求',
   },
   {
     id: 'white',
     name: '纯白色',
     type: 'color',
     hex: '#FFFFFF',
-    description: '身份证、护照、港澳台通行证、驾照、教师资格证官方规定纯白底',
+    description: '身份证、护照、职业技能考核、驾照、教师资格证官方规定纯白底',
   },
   {
     id: 'morandi-gray',
@@ -336,78 +527,243 @@ export function adjustColorBrightness(hex: string, percent: number): string {
   return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
 }
 
+export interface ExportSizeOptions {
+  targetMinKb?: number;
+  strictKeepDimensions?: boolean;
+  strictUnderMax?: boolean;
+}
+
+export interface ExportPhotoResult {
+  blob: Blob;
+  url: string;
+  size: number;
+  qualityUsed: number;
+  width: number;
+  height: number;
+  paddedBytes?: number;
+  withinLimit: boolean;
+}
+
 /**
- * Intelligent file size optimizer (binary search quality + minor resolution adjustment)
- * to strictly satisfy exam system requirements like <= 20KB, <= 50KB, <= 100KB!
+ * Safely pad a valid JPEG Blob to an exact target byte size using standard ISO/IEC 10918-1
+ * COM (Comment, 0xFF 0xFE) segments inserted right after APP0/APP1 so the JFIF header
+ * and every single image pixel remain 100% untouched.
+ */
+async function padJpegToTargetBytes(blob: Blob, targetBytes: number): Promise<Blob> {
+  const buf = await blob.arrayBuffer();
+  const src = new Uint8Array(buf);
+  if (src.length >= targetBytes || src.length < 4 || src[0] !== 0xff || src[1] !== 0xd8) {
+    return blob;
+  }
+
+  // Keep SOI (FF D8) and leading APP0 (JFIF) / APP1 (EXIF) header intact at byte 0
+  let insertPos = 2;
+  if (
+    src.length > 6 &&
+    src[2] === 0xff &&
+    (src[3] === 0xe0 || src[3] === 0xe1)
+  ) {
+    const segLen = (src[4] << 8) | src[5];
+    if (2 + 2 + segLen < src.length) {
+      insertPos = 2 + 2 + segLen;
+    }
+  }
+
+  let remaining = targetBytes - src.length;
+  if (remaining < 4) return blob;
+
+  const chunks: Uint8Array[] = [];
+  while (remaining >= 4) {
+    // Each COM segment adds (2 marker + segLen) bytes, where segLen <= 65535 and >= 2
+    const chunkTotal = Math.min(remaining, 65535);
+    // Avoid leaving a remainder of 1..3 bytes that cannot form a valid COM segment
+    const adjustedTotal =
+      remaining - chunkTotal > 0 && remaining - chunkTotal < 4
+        ? remaining - 4
+        : chunkTotal;
+    const segLen = adjustedTotal - 2;
+    const seg = new Uint8Array(adjustedTotal);
+    seg[0] = 0xff;
+    seg[1] = 0xfe;
+    seg[2] = (segLen >> 8) & 0xff;
+    seg[3] = segLen & 0xff;
+    seg.fill(0x20, 4); // ASCII spaces
+    chunks.push(seg);
+    remaining -= adjustedTotal;
+  }
+
+  const totalPad = chunks.reduce((acc, c) => acc + c.length, 0);
+  const out = new Uint8Array(src.length + totalPad);
+  out.set(src.subarray(0, insertPos), 0);
+  let offset = insertPos;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  out.set(src.subarray(insertPos), offset);
+
+  return new Blob([out], { type: 'image/jpeg' });
+}
+
+/**
+ * Intelligent file size optimizer (12-iteration binary search quality + safe range targeting)
+ * Strictly satisfies exam system requirements like < 20KB (15K-20K), <= 50KB, <= 100KB
+ * while preserving exact pixel dimensions whenever requested!
  */
 export async function exportPhotoUnderSizeLimit(
   canvas: HTMLCanvasElement,
   format: 'png' | 'jpg',
-  targetMaxKb?: number
-): Promise<{ blob: Blob; url: string; size: number; qualityUsed: number }> {
-  // If PNG or unlimited, export directly
-  if (format === 'png' || !targetMaxKb || targetMaxKb <= 0) {
+  targetMaxKb?: number,
+  options?: ExportSizeOptions
+): Promise<ExportPhotoResult> {
+  const targetMinKb = options?.targetMinKb && options.targetMinKb > 0 ? options.targetMinKb : 0;
+  const strictKeepDimensions = options?.strictKeepDimensions ?? true;
+  const strictUnderMax = options?.strictUnderMax ?? true;
+
+  // If PNG or neither min nor max KB limit is set, export directly at high quality
+  if (format === 'png' || (!targetMaxKb && !targetMinKb)) {
     const mime = format === 'png' ? 'image/png' : 'image/jpeg';
-    const blob = await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b!), mime, 0.96));
+    const blob = await new Promise<Blob>((resolve) =>
+      canvas.toBlob((b) => resolve(b!), mime, 0.96)
+    );
     return {
       blob,
       url: URL.createObjectURL(blob),
       size: blob.size,
       qualityUsed: 0.96,
+      width: canvas.width,
+      height: canvas.height,
+      withinLimit: true,
     };
   }
 
-  const targetBytes = targetMaxKb * 1024;
-  let minQuality = 0.15;
-  let maxQuality = 0.98;
+  // Compute dual-safe byte ceiling so strictly "< 20KB" passes BOTH 1000-byte KB & 1024-byte KiB checks
+  const hasMax = Boolean(targetMaxKb && targetMaxKb > 0);
+  const maxBytes = hasMax
+    ? strictUnderMax
+      ? Math.max(1024, Math.min(Math.floor(targetMaxKb! * 1024) - 256, Math.floor(targetMaxKb! * 1000) - 150))
+      : Math.floor(targetMaxKb! * 1024)
+    : Number.MAX_SAFE_INTEGER;
+
+  // Compute safe lower bound (>= targetMinKb under both 1000 and 1024 definitions)
+  const rawMinBytes = targetMinKb > 0 ? Math.ceil(targetMinKb * 1024) + 256 : 0;
+  const minBytes = hasMax ? Math.min(rawMinBytes, Math.max(1024, maxBytes - 512)) : rawMinBytes;
+
+  const toJpegBlob = (c: HTMLCanvasElement, q: number) =>
+    new Promise<Blob>((resolve) => c.toBlob((b) => resolve(b!), 'image/jpeg', q));
+
   let bestBlob: Blob | null = null;
-  let bestQuality = 0.85;
+  let bestQuality = 0.95;
+  let finalW = canvas.width;
+  let finalH = canvas.height;
 
-  // Binary search for ideal JPEG compression quality
-  for (let iteration = 0; iteration < 8; iteration++) {
-    const q = (minQuality + maxQuality) / 2;
-    const testBlob = await new Promise<Blob>((resolve) =>
-      canvas.toBlob((b) => resolve(b!), 'image/jpeg', q)
-    );
-
-    if (testBlob.size <= targetBytes) {
-      bestBlob = testBlob;
-      bestQuality = q;
-      // We can try higher quality
-      minQuality = q;
-    } else {
-      // Too large, decrease quality
-      maxQuality = q;
-    }
-  }
-
-  // If even lowest quality is still over the limit, scale down canvas slightly
-  if (!bestBlob || bestBlob.size > targetBytes) {
-    let scale = 0.9;
-    while (scale >= 0.5) {
-      const scaledCanvas = document.createElement('canvas');
-      scaledCanvas.width = Math.round(canvas.width * scale);
-      scaledCanvas.height = Math.round(canvas.height * scale);
-      const sCtx = scaledCanvas.getContext('2d')!;
-      sCtx.drawImage(canvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
-      const scaledBlob = await new Promise<Blob>((resolve) =>
-        scaledCanvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.75)
-      );
-      if (scaledBlob.size <= targetBytes || scale <= 0.55) {
-        bestBlob = scaledBlob;
-        bestQuality = 0.75;
-        break;
+  // First check highest quality (0.99) — if already under maxBytes, we preserve maximum clarity
+  const highBlob = await toJpegBlob(canvas, 0.99);
+  if (highBlob.size <= maxBytes) {
+    bestBlob = highBlob;
+    bestQuality = 0.99;
+    // If smaller than minBytes, see if q=1.0 naturally brings it closer or inside [minBytes, maxBytes]
+    if (minBytes > 0 && highBlob.size < minBytes) {
+      const maxQBlob = await toJpegBlob(canvas, 1.0);
+      if (maxQBlob.size <= maxBytes) {
+        bestBlob = maxQBlob;
+        bestQuality = 1.0;
+      } else {
+        // Binary search between 0.92 and 1.0 to get maximum genuine quality under maxBytes
+        let lo = 0.92;
+        let hi = 1.0;
+        for (let i = 0; i < 8; i++) {
+          const mid = (lo + hi) / 2;
+          const b = await toJpegBlob(canvas, mid);
+          if (b.size <= maxBytes) {
+            bestBlob = b;
+            bestQuality = mid;
+            lo = mid;
+          } else {
+            hi = mid;
+          }
+        }
       }
-      scale -= 0.1;
+    }
+  } else {
+    // 12-iteration binary search for highest JPEG quality strictly under maxBytes
+    let minQuality = 0.08;
+    let maxQuality = 0.99;
+    for (let iteration = 0; iteration < 12; iteration++) {
+      const q = (minQuality + maxQuality) / 2;
+      const testBlob = await toJpegBlob(canvas, q);
+      if (testBlob.size <= maxBytes) {
+        bestBlob = testBlob;
+        bestQuality = q;
+        minQuality = q;
+      } else {
+        maxQuality = q;
+      }
     }
   }
 
-  const finalBlob = bestBlob || (await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b!), 'image/jpeg', 0.5)));
+  // If still over limit even at q=0.08
+  if (!bestBlob || bestBlob.size > maxBytes) {
+    if (strictKeepDimensions) {
+      // Keep exact pixel dimensions, try ultra-low quality before giving up
+      for (const q of [0.06, 0.04, 0.02]) {
+        const b = await toJpegBlob(canvas, q);
+        bestBlob = b;
+        bestQuality = q;
+        if (b.size <= maxBytes) break;
+      }
+    } else {
+      let scale = 0.9;
+      while (scale >= 0.45) {
+        const scaledCanvas = document.createElement('canvas');
+        scaledCanvas.width = Math.max(40, Math.round(canvas.width * scale));
+        scaledCanvas.height = Math.max(40, Math.round(canvas.height * scale));
+        const sCtx = scaledCanvas.getContext('2d')!;
+        sCtx.imageSmoothingEnabled = true;
+        sCtx.imageSmoothingQuality = 'high';
+        sCtx.drawImage(canvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
+        const scaledBlob = await toJpegBlob(scaledCanvas, 0.72);
+        if (scaledBlob.size <= maxBytes || scale <= 0.5) {
+          bestBlob = scaledBlob;
+          bestQuality = 0.72;
+          finalW = scaledCanvas.width;
+          finalH = scaledCanvas.height;
+          break;
+        }
+        scale -= 0.1;
+      }
+    }
+  }
+
+  let finalBlob = bestBlob || (await toJpegBlob(canvas, 0.5));
+  let paddedBytes = 0;
+
+  // If user requested a minimum KB (e.g. 15K-20K) and the high-quality JPEG is still below minBytes,
+  // pad cleanly inside [minBytes, maxBytes] using a standard JPEG COM segment (zero quality loss)
+  if (minBytes > 0 && finalBlob.size < minBytes) {
+    const desiredBytes = hasMax
+      ? Math.min(maxBytes - 128, Math.max(minBytes + 512, Math.round((minBytes + maxBytes) * 0.55)))
+      : minBytes + 512;
+    if (desiredBytes > finalBlob.size + 4) {
+      const originalLen = finalBlob.size;
+      finalBlob = await padJpegToTargetBytes(finalBlob, desiredBytes);
+      paddedBytes = Math.max(0, finalBlob.size - originalLen);
+    }
+  }
+
+  const withinLimit =
+    (!hasMax || finalBlob.size <= maxBytes) &&
+    (minBytes <= 0 || finalBlob.size >= targetMinKb * 1000);
+
   return {
     blob: finalBlob,
     url: URL.createObjectURL(finalBlob),
     size: finalBlob.size,
     qualityUsed: bestQuality,
+    width: finalW,
+    height: finalH,
+    paddedBytes,
+    withinLimit,
   };
 }
 

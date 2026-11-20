@@ -31,6 +31,12 @@ import {
   Plus,
   Minus,
   RotateCcw,
+  Lock,
+  Unlock,
+  ArrowLeftRight,
+  Ruler,
+  FileText,
+  ShieldCheck,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import {
@@ -42,9 +48,15 @@ import {
 import {
   ID_PHOTO_PRESETS,
   POPULAR_ID_COLORS,
+  QUICK_CUSTOM_SIZE_TEMPLATES,
+  QuickCustomSizeTemplate,
   IdColorPreset,
   drawIdBackground,
   exportPhotoUnderSizeLimit,
+  pxToMm,
+  mmToPx,
+  sanitizeIdPhotoFileName,
+  validateChineseIdNumber,
 } from '../../utils/idPhotoPresets';
 import {
   SUIT_OVERLAYS,
@@ -76,12 +88,17 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   onSendToRetouch,
   onNotification,
 }) => {
-  // Current specification preset
+  // Current specification preset & custom dimension state
   const [selectedPresetKey, setSelectedPresetKey] = useState<IdPhotoPresetKey>('1-inch');
-  const [customWidthMm, setCustomWidthMm] = useState<number>(25);
-  const [customHeightMm, setCustomHeightMm] = useState<number>(35);
-  const [customWidthPx, setCustomWidthPx] = useState<number>(295);
-  const [customHeightPx, setCustomHeightPx] = useState<number>(413);
+  const [customUnit, setCustomUnit] = useState<'px' | 'mm'>('px');
+  const [customDpi, setCustomDpi] = useState<number>(300);
+  const [customWidthMm, setCustomWidthMm] = useState<number>(16.1);
+  const [customHeightMm, setCustomHeightMm] = useState<number>(22.0);
+  const [customWidthPx, setCustomWidthPx] = useState<number>(190);
+  const [customHeightPx, setCustomHeightPx] = useState<number>(260);
+  const [customWidthInput, setCustomWidthInput] = useState<string>('190');
+  const [customHeightInput, setCustomHeightInput] = useState<string>('260');
+  const [lockCustomAspect, setLockCustomAspect] = useState<boolean>(false);
 
   // Background color state
   const [selectedColorId, setSelectedColorId] = useState<string>('red-guobiao');
@@ -135,8 +152,19 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
 
   // Export options
   const [exportFormat, setExportFormat] = useState<'png' | 'jpg'>('png');
-  const [fileSizeLimitKb, setFileSizeLimitKb] = useState<number>(0); // 0 for unlimited
+  const [fileSizeLimitKb, setFileSizeLimitKb] = useState<number>(0); // 0 for unlimited (strictly < limit when > 0)
+  const [fileSizeMinKb, setFileSizeMinKb] = useState<number>(0); // 0 for no lower bound (e.g. 15 for 15-20KB)
+  const [showCustomKbInputs, setShowCustomKbInputs] = useState<boolean>(false);
+  const [customFileName, setCustomFileName] = useState<string>('');
+  const [autoUpperIdX, setAutoUpperIdX] = useState<boolean>(true);
   const [showGuidelines, setShowGuidelines] = useState<boolean>(true);
+  const [estimatedOutput, setEstimatedOutput] = useState<{
+    sizeBytes: number;
+    width: number;
+    height: number;
+    quality: number;
+    withinLimit: boolean;
+  } | null>(null);
 
   // Modals
   const [isCameraOpen, setIsCameraOpen] = useState<boolean>(false);
@@ -168,9 +196,185 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     ID_PHOTO_PRESETS.find((p) => p.key === selectedPresetKey) || ID_PHOTO_PRESETS[0];
 
   const targetWidthPx =
-    selectedPresetKey === 'custom' ? customWidthPx : currentSpec.widthPx;
+    selectedPresetKey === 'custom'
+      ? Math.max(40, Math.min(4000, Math.round(customWidthPx || 190)))
+      : currentSpec.widthPx;
   const targetHeightPx =
-    selectedPresetKey === 'custom' ? customHeightPx : currentSpec.heightPx;
+    selectedPresetKey === 'custom'
+      ? Math.max(40, Math.min(4000, Math.round(customHeightPx || 260)))
+      : currentSpec.heightPx;
+  const displayWidthMm =
+    selectedPresetKey === 'custom' ? pxToMm(targetWidthPx, customDpi) : currentSpec.widthMm;
+  const displayHeightMm =
+    selectedPresetKey === 'custom' ? pxToMm(targetHeightPx, customDpi) : currentSpec.heightMm;
+  const displayDpi = selectedPresetKey === 'custom' ? customDpi : currentSpec.dpi;
+  const isExactPixelMode =
+    selectedPresetKey === 'custom' ||
+    selectedPresetKey === 'skill-exam' ||
+    fileSizeLimitKb > 0 ||
+    fileSizeMinKb > 0;
+
+  // Custom dimension handlers (supports px <-> mm bidirectional conversion & aspect ratio lock)
+  const syncCustomDimensions = useCallback(
+    (wPx: number, hPx: number, unit: 'px' | 'mm' = customUnit, dpi: number = customDpi) => {
+      const clampedW = Math.max(40, Math.min(4000, Math.round(wPx)));
+      const clampedH = Math.max(40, Math.min(4000, Math.round(hPx)));
+      const wMm = pxToMm(clampedW, dpi);
+      const hMm = pxToMm(clampedH, dpi);
+      setCustomWidthPx(clampedW);
+      setCustomHeightPx(clampedH);
+      setCustomWidthMm(wMm);
+      setCustomHeightMm(hMm);
+      setCustomWidthInput(unit === 'px' ? String(clampedW) : String(wMm));
+      setCustomHeightInput(unit === 'px' ? String(clampedH) : String(hMm));
+    },
+    [customUnit, customDpi]
+  );
+
+  const handleCustomUnitSwitch = (nextUnit: 'px' | 'mm') => {
+    setCustomUnit(nextUnit);
+    if (nextUnit === 'px') {
+      setCustomWidthInput(String(customWidthPx));
+      setCustomHeightInput(String(customHeightPx));
+    } else {
+      const wMm = pxToMm(customWidthPx, customDpi);
+      const hMm = pxToMm(customHeightPx, customDpi);
+      setCustomWidthMm(wMm);
+      setCustomHeightMm(hMm);
+      setCustomWidthInput(String(wMm));
+      setCustomHeightInput(String(hMm));
+    }
+  };
+
+  const handleCustomDpiChange = (nextDpi: number) => {
+    setCustomDpi(nextDpi);
+    if (customUnit === 'mm') {
+      const nextWPx = Math.max(40, Math.min(4000, mmToPx(customWidthMm, nextDpi)));
+      const nextHPx = Math.max(40, Math.min(4000, mmToPx(customHeightMm, nextDpi)));
+      setCustomWidthPx(nextWPx);
+      setCustomHeightPx(nextHPx);
+    } else {
+      setCustomWidthMm(pxToMm(customWidthPx, nextDpi));
+      setCustomHeightMm(pxToMm(customHeightPx, nextDpi));
+    }
+  };
+
+  const handleCustomWidthChange = (valStr: string) => {
+    setCustomWidthInput(valStr);
+    const parsed = parseFloat(valStr);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+
+    const ratio = customWidthPx > 0 ? customHeightPx / customWidthPx : 260 / 190;
+    if (customUnit === 'px') {
+      const nextWPx = Math.max(40, Math.min(4000, Math.round(parsed)));
+      setCustomWidthPx(nextWPx);
+      setCustomWidthMm(pxToMm(nextWPx, customDpi));
+      if (lockCustomAspect) {
+        const nextHPx = Math.max(40, Math.min(4000, Math.round(nextWPx * ratio)));
+        setCustomHeightPx(nextHPx);
+        setCustomHeightMm(pxToMm(nextHPx, customDpi));
+        setCustomHeightInput(String(nextHPx));
+      }
+    } else {
+      const nextWMm = Math.max(4, Math.min(300, parsed));
+      const nextWPx = Math.max(40, Math.min(4000, mmToPx(nextWMm, customDpi)));
+      setCustomWidthMm(nextWMm);
+      setCustomWidthPx(nextWPx);
+      if (lockCustomAspect) {
+        const nextHMm = Number((nextWMm * ratio).toFixed(1));
+        const nextHPx = Math.max(40, Math.min(4000, mmToPx(nextHMm, customDpi)));
+        setCustomHeightMm(nextHMm);
+        setCustomHeightPx(nextHPx);
+        setCustomHeightInput(String(nextHMm));
+      }
+    }
+  };
+
+  const handleCustomHeightChange = (valStr: string) => {
+    setCustomHeightInput(valStr);
+    const parsed = parseFloat(valStr);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+
+    const ratio = customHeightPx > 0 ? customWidthPx / customHeightPx : 190 / 260;
+    if (customUnit === 'px') {
+      const nextHPx = Math.max(40, Math.min(4000, Math.round(parsed)));
+      setCustomHeightPx(nextHPx);
+      setCustomHeightMm(pxToMm(nextHPx, customDpi));
+      if (lockCustomAspect) {
+        const nextWPx = Math.max(40, Math.min(4000, Math.round(nextHPx * ratio)));
+        setCustomWidthPx(nextWPx);
+        setCustomWidthMm(pxToMm(nextWPx, customDpi));
+        setCustomWidthInput(String(nextWPx));
+      }
+    } else {
+      const nextHMm = Math.max(4, Math.min(300, parsed));
+      const nextHPx = Math.max(40, Math.min(4000, mmToPx(nextHMm, customDpi)));
+      setCustomHeightMm(nextHMm);
+      setCustomHeightPx(nextHPx);
+      if (lockCustomAspect) {
+        const nextWMm = Number((nextHMm * ratio).toFixed(1));
+        const nextWPx = Math.max(40, Math.min(4000, mmToPx(nextWMm, customDpi)));
+        setCustomWidthMm(nextWMm);
+        setCustomWidthPx(nextWPx);
+        setCustomWidthInput(String(nextWMm));
+      }
+    }
+  };
+
+  const handleCustomInputBlur = () => {
+    if (customUnit === 'px') {
+      setCustomWidthInput(String(customWidthPx));
+      setCustomHeightInput(String(customHeightPx));
+    } else {
+      setCustomWidthInput(String(pxToMm(customWidthPx, customDpi)));
+      setCustomHeightInput(String(pxToMm(customHeightPx, customDpi)));
+    }
+  };
+
+  const handleSwapCustomDimensions = () => {
+    syncCustomDimensions(customHeightPx, customWidthPx, customUnit, customDpi);
+  };
+
+  const handleSelectPreset = (spec: IdPhotoPresetSpec) => {
+    setSelectedPresetKey(spec.key);
+    if (spec.key === 'skill-exam') {
+      setExportFormat('jpg');
+      setFileSizeMinKb(spec.recommendedMinSizeKb ?? 15);
+      setFileSizeLimitKb(spec.recommendedSizeKb ?? 20);
+      setShowCustomKbInputs(true);
+      setClarityConfig((prev) => ({ ...prev, exportDpiMultiplier: 1 }));
+      const allowedBgs = spec.recommendedBgIds || ['white', 'blue-light', 'blue-sky'];
+      if (!allowedBgs.includes(selectedColorId)) {
+        setSelectedColorId('white');
+      }
+      onNotification?.(
+        '✅ 已套用职业技能/竞赛报名规范：190×260 px · JPG · 纯白/浅蓝底 · 严格 15-20KB（<20KB），请在右侧填写18位身份证号命名'
+      );
+    } else if (spec.key === 'custom') {
+      handleCustomInputBlur();
+    }
+  };
+
+  const handleApplyQuickCustomTemplate = (tpl: QuickCustomSizeTemplate) => {
+    setSelectedPresetKey('custom');
+    syncCustomDimensions(tpl.widthPx, tpl.heightPx, customUnit, customDpi);
+    if (tpl.format) setExportFormat(tpl.format);
+    if (tpl.maxKb !== undefined) {
+      setFileSizeLimitKb(tpl.maxKb);
+      setFileSizeMinKb(tpl.minKb ?? 0);
+      setShowCustomKbInputs(Boolean(tpl.minKb));
+    }
+    if (tpl.bgId && !['white', 'blue-light', 'blue-sky'].includes(selectedColorId)) {
+      setSelectedColorId(tpl.bgId);
+    }
+    setClarityConfig((prev) => ({ ...prev, exportDpiMultiplier: 1 }));
+    onNotification?.(`✅ 已填入「${tpl.label}」(${tpl.widthPx}×${tpl.heightPx} px · ${tpl.note})`);
+  };
+
+  const handleCustomizeCurrentSpec = () => {
+    setSelectedPresetKey('custom');
+    syncCustomDimensions(targetWidthPx, targetHeightPx, customUnit, customDpi);
+  };
 
   // Selected color profile with optional lighting mode override
   const baseColor: IdColorPreset =
@@ -763,12 +967,13 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   // Re-render preview canvas whenever settings or optimizedCanvas change
   useEffect(() => {
     if (previewCanvasRef.current) {
+      const previewScale = Math.max(targetWidthPx, targetHeightPx) > 1000 ? 1 : 2;
       renderIdPhotoToCanvas(
         previewCanvasRef.current,
         targetWidthPx,
         targetHeightPx,
         showGuidelines,
-        2,
+        previewScale,
         true
       );
     }
@@ -782,6 +987,73 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     optimizedCanvas,
     isComparingOriginal,
     useOriginalOnly,
+  ]);
+
+  // Debounced live file size estimation for exact 1x output (gives instant KB feedback before downloading)
+  useEffect(() => {
+    if (!portraitState.file && !portraitState.transparentUrl) {
+      setEstimatedOutput(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const offscreen = document.createElement('canvas');
+        await renderIdPhotoToCanvas(
+          offscreen,
+          targetWidthPx,
+          targetHeightPx,
+          false,
+          1,
+          useOriginalOnly ? false : clarityConfig.enabled
+        );
+        if (cancelled) return;
+
+        const isTransparent = currentColor.type === 'transparent';
+        const effectiveFormat = isTransparent ? 'png' : exportFormat;
+        const res = await exportPhotoUnderSizeLimit(
+          offscreen,
+          effectiveFormat,
+          fileSizeLimitKb,
+          {
+            targetMinKb: fileSizeMinKb,
+            strictKeepDimensions: true,
+            strictUnderMax: true,
+          }
+        );
+        URL.revokeObjectURL(res.url);
+        if (!cancelled) {
+          setEstimatedOutput({
+            sizeBytes: res.size,
+            width: res.width,
+            height: res.height,
+            quality: res.qualityUsed,
+            withinLimit: res.withinLimit,
+          });
+        }
+      } catch {
+        // Ignore transient estimation errors
+      }
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    renderIdPhotoToCanvas,
+    targetWidthPx,
+    targetHeightPx,
+    exportFormat,
+    fileSizeLimitKb,
+    fileSizeMinKb,
+    currentColor.type,
+    clarityConfig.enabled,
+    useOriginalOnly,
+    portraitState.file,
+    portraitState.transparentUrl,
+    optimizedCanvas,
   ]);
 
   // -------------------------------------------------------------
@@ -861,11 +1133,12 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
   // Export Handlers (Single Photo, Sizes, and Full ZIP)
   // -------------------------------------------------------------
   const handleDownloadSinglePhoto = async (overrideMultiplier?: 1 | 2 | 4) => {
-    const dpiMultiplier = overrideMultiplier || clarityConfig.exportDpiMultiplier || 2;
+    const dpiMultiplier =
+      overrideMultiplier ?? (isExactPixelMode ? 1 : clarityConfig.exportDpiMultiplier || 2);
     const finalW = targetWidthPx * dpiMultiplier;
     const finalH = targetHeightPx * dpiMultiplier;
 
-    // Generate clean canvas without guidelines at requested super-resolution
+    // Generate clean canvas without guidelines at requested resolution
     const offscreen = document.createElement('canvas');
     await renderIdPhotoToCanvas(
       offscreen,
@@ -882,17 +1155,33 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
     const res = await exportPhotoUnderSizeLimit(
       offscreen,
       effectiveFormat,
-      fileSizeLimitKb
+      fileSizeLimitKb,
+      {
+        targetMinKb: fileSizeMinKb,
+        strictKeepDimensions: true,
+        strictUnderMax: true,
+      }
     );
 
-    const dpiLabel = dpiMultiplier === 1 ? '300DPI_标准' : dpiMultiplier === 2 ? '600DPI_超清' : '1200DPI_极清';
+    const dpiLabel =
+      dpiMultiplier === 1
+        ? `${displayDpi}DPI_标准`
+        : dpiMultiplier === 2
+        ? `${displayDpi * 2}DPI_超清`
+        : `${displayDpi * 4}DPI_极清`;
+    const kbText = (res.size / 1024).toFixed(1);
     const sizeNote = fileSizeLimitKb > 0 ? `_${Math.round(res.size / 1024)}KB` : '';
+    const customBase = sanitizeIdPhotoFileName(customFileName, autoUpperIdX);
+
+    const downloadFileName = customBase
+      ? `${customBase}.${effectiveFormat}`
+      : useOriginalOnly
+      ? `证件照_原图裁剪_${currentSpec.name}_${finalW}x${finalH}_${dpiLabel}${sizeNote}.${effectiveFormat}`
+      : `证件照_${currentSpec.name}_${finalW}x${finalH}_${currentColor.name}_${dpiLabel}${sizeNote}.${effectiveFormat}`;
 
     const a = document.createElement('a');
     a.href = res.url;
-    a.download = useOriginalOnly
-      ? `证件照_原图裁剪_${currentSpec.name}_${targetWidthPx}x${targetHeightPx}_${dpiLabel}${sizeNote}.${effectiveFormat}`
-      : `证件照_${currentSpec.name}_${currentColor.name}_${dpiLabel}${sizeNote}.${effectiveFormat}`;
+    a.download = downloadFileName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -900,8 +1189,10 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
 
     onNotification?.(
       useOriginalOnly
-        ? `🎉 已成功导出「${currentSpec.name}」原图剪裁照！(${finalW}×${finalH} px @ ${300 * dpiMultiplier} DPI，保持原图画质未做任何优化)`
-        : `🎉 智能证件照已成功导出！(${finalW}×${finalH} px @ ${300 * dpiMultiplier} DPI, ${Math.round(res.size / 1024)} KB)！`
+        ? `🎉 已导出「${downloadFileName}」(${res.width}×${res.height} px · ${kbText} KB，保持原图画质)`
+        : `🎉 已导出「${downloadFileName}」(${res.width}×${res.height} px · ${kbText} KB${
+            fileSizeLimitKb > 0 ? (res.withinLimit ? ' · 已达标 ✓' : ' · 请适当减小像素以满足体积上限') : ''
+          })`
     );
   };
 
@@ -1516,7 +1807,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     <div className="flex items-center gap-2">
                       <Camera className="w-4 h-4 text-blue-600 shrink-0" />
                       <span>
-                        纯原图剪裁模式生效中：仅按所选「<strong>{currentSpec.name}</strong>（{currentSpec.widthMm}×{currentSpec.heightMm}mm）」裁剪，保持 100% 原始画质与原图背景，不做任何修改。
+                        纯原图剪裁模式生效中：仅按所选「<strong>{currentSpec.name}</strong>（{displayWidthMm}×{displayHeightMm}mm）」裁剪，保持 100% 原始画质与原图背景，不做任何修改。
                       </span>
                     </div>
                     <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-md shrink-0">
@@ -1525,45 +1816,93 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                   </div>
                 )}
 
-                <div className="flex items-center justify-between text-xs text-stone-500">
-                  <span>常用国家官方标准规格（点击即可切换）：</span>
-                  <span className="font-mono font-medium">
-                    {currentSpec.widthMm} × {currentSpec.heightMm} mm ({targetWidthPx} × {targetHeightPx} px @ 300DPI)
+                {/* Quick Banner: Exam / Skill Competition Spec & Custom Size Entry */}
+                <div className="p-3 bg-indigo-50/70 border border-indigo-200/80 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-xs font-bold text-indigo-950 flex items-center gap-1.5 flex-wrap">
+                      <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
+                      <span>职业技能考核 / 竞赛材料快捷规范</span>
+                      <span className="px-1.5 py-0.2 rounded text-[10px] font-mono bg-indigo-100 text-indigo-800 border border-indigo-200/70">
+                        190×260 px · JPG · 15-20KB
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-indigo-800/85">
+                      一键套用：白或浅蓝底、严格 &lt;20KB（15K-20K）、18位身份证号命名（X自动大写）
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const skillSpec = ID_PHOTO_PRESETS.find((p) => p.key === 'skill-exam');
+                        if (skillSpec) handleSelectPreset(skillSpec);
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-2xs transition-colors cursor-pointer"
+                    >
+                      一键套用规范
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCustomizeCurrentSpec}
+                      className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1"
+                    >
+                      <Ruler className="w-3.5 h-3.5" />
+                      <span>自定义尺寸</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-stone-500 gap-2 flex-wrap">
+                  <span>常用官方标准规格与自定义尺寸（点击即可切换）：</span>
+                  <span className="font-mono font-medium text-stone-700">
+                    {displayWidthMm} × {displayHeightMm} mm ({targetWidthPx} × {targetHeightPx} px @ {displayDpi}DPI)
                   </span>
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                   {ID_PHOTO_PRESETS.map((spec) => {
                     const active = selectedPresetKey === spec.key;
+                    const isCustomCard = spec.key === 'custom';
+                    const cardPxText = isCustomCard
+                      ? `${customWidthPx}×${customHeightPx}px`
+                      : `${spec.widthPx}×${spec.heightPx}px`;
+                    const cardMmText = isCustomCard
+                      ? `${pxToMm(customWidthPx, customDpi)}×${pxToMm(customHeightPx, customDpi)}mm`
+                      : `${spec.widthMm}×${spec.heightMm}mm`;
+
                     return (
                       <button
                         key={spec.key}
                         type="button"
-                        onClick={() => setSelectedPresetKey(spec.key)}
+                        onClick={() => handleSelectPreset(spec)}
                         className={`p-3 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-1.5 ${
                           active
                             ? 'bg-stone-900 text-white border-stone-900 shadow-xs'
+                            : isCustomCard
+                            ? 'bg-indigo-50/40 hover:bg-indigo-50/80 border-indigo-200 text-stone-800'
                             : 'bg-stone-50/60 hover:bg-stone-100/80 border-stone-200 text-stone-800'
                         }`}
                       >
-                        <div className="flex items-center justify-between">
-                          <span className={`text-xs font-bold ${active ? 'text-white' : 'text-stone-900'}`}>
+                        <div className="flex items-center justify-between gap-1">
+                          <span className={`text-xs font-bold truncate ${active ? 'text-white' : 'text-stone-900'}`}>
                             {spec.name}
                           </span>
-                          {active && <Check className="w-3.5 h-3.5 text-white" />}
+                          {active ? (
+                            <Check className="w-3.5 h-3.5 text-white shrink-0" />
+                          ) : spec.key === 'skill-exam' ? (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-indigo-100 text-indigo-700 font-bold shrink-0">
+                              推荐
+                            </span>
+                          ) : isCustomCard ? (
+                            <Ruler className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                          ) : null}
                         </div>
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className={active ? 'text-stone-300 font-mono' : 'text-stone-500 font-mono'}>
-                            {spec.widthMm}×{spec.heightMm}mm
+                        <div className="flex items-center justify-between text-[11px] gap-1">
+                          <span className={active ? 'text-stone-300 font-mono' : 'text-stone-600 font-mono'}>
+                            {cardPxText}
                           </span>
-                          <span className={`text-[10px] ${active ? 'text-stone-300' : 'text-stone-400'}`}>
-                            {spec.key === '1-inch'
-                              ? '常用报名'
-                              : spec.key === '2-inch'
-                              ? '护照签证'
-                              : spec.key === 'small-2-inch'
-                              ? '通行证'
-                              : '官方规范'}
+                          <span className={`text-[10px] truncate ${active ? 'text-stone-300' : 'text-stone-400'}`}>
+                            {spec.badgeText || cardMmText}
                           </span>
                         </div>
                       </button>
@@ -1572,34 +1911,178 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                 </div>
 
                 {/* Spec description card */}
-                <div className="p-3 bg-stone-50 rounded-xl border border-stone-200/80 text-xs text-stone-600 flex items-start gap-2">
-                  <Info className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
-                  <div>
-                    <span className="font-bold text-stone-800">{currentSpec.name}：</span>
-                    <span>{currentSpec.description}</span>
+                <div className="p-3 bg-stone-50 rounded-xl border border-stone-200/80 text-xs text-stone-600 flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <Info className="w-4 h-4 text-stone-500 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold text-stone-800">{currentSpec.name}：</span>
+                      <span>{currentSpec.description}</span>
+                    </div>
                   </div>
+                  {selectedPresetKey !== 'custom' && (
+                    <button
+                      type="button"
+                      onClick={handleCustomizeCurrentSpec}
+                      className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      微调尺寸 →
+                    </button>
+                  )}
                 </div>
 
-                {/* Custom size inputs if 'custom' is selected */}
+                {/* Full Custom Size & Unit Workspace when 'custom' is selected */}
                 {selectedPresetKey === 'custom' && (
-                  <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 grid grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <label className="block text-stone-600 font-medium mb-1">宽度 (像素 px):</label>
-                      <input
-                        type="number"
-                        value={customWidthPx}
-                        onChange={(e) => setCustomWidthPx(Math.max(50, Number(e.target.value)))}
-                        className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-stone-800"
-                      />
+                  <div className="p-4 bg-stone-50/90 rounded-xl border border-indigo-200/90 space-y-3.5 text-xs animate-in fade-in duration-150">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-stone-200/80">
+                      <div className="flex items-center gap-1.5 font-bold text-stone-900">
+                        <Ruler className="w-4 h-4 text-indigo-600" />
+                        <span>自定义尺寸设置</span>
+                        <span className="font-mono text-[11px] font-semibold text-indigo-700 bg-indigo-100/80 px-2 py-0.5 rounded-md">
+                          {targetWidthPx} × {targetHeightPx} px
+                        </span>
+                      </div>
+
+                      {/* Unit Switcher (px vs mm) + DPI */}
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center p-0.5 bg-stone-200/80 rounded-lg text-[11px] font-semibold">
+                          <button
+                            type="button"
+                            onClick={() => handleCustomUnitSwitch('px')}
+                            className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                              customUnit === 'px'
+                                ? 'bg-white text-stone-900 shadow-2xs'
+                                : 'text-stone-600 hover:text-stone-900'
+                            }`}
+                          >
+                            按像素 (px)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCustomUnitSwitch('mm')}
+                            className={`px-2.5 py-1 rounded-md transition-all cursor-pointer ${
+                              customUnit === 'mm'
+                                ? 'bg-white text-stone-900 shadow-2xs'
+                                : 'text-stone-600 hover:text-stone-900'
+                            }`}
+                          >
+                            按毫米 (mm)
+                          </button>
+                        </div>
+
+                        <select
+                          value={customDpi}
+                          onChange={(e) => handleCustomDpiChange(Number(e.target.value))}
+                          className="px-2 py-1 bg-white border border-stone-300 rounded-lg text-[11px] font-mono font-semibold text-stone-700 cursor-pointer"
+                          title="打印分辨率 DPI（用于 px 与 mm 换算）"
+                        >
+                          <option value={72}>72 DPI</option>
+                          <option value={96}>96 DPI</option>
+                          <option value={150}>150 DPI</option>
+                          <option value={300}>300 DPI</option>
+                          <option value={600}>600 DPI</option>
+                        </select>
+                      </div>
                     </div>
-                    <div>
-                      <label className="block text-stone-600 font-medium mb-1">高度 (像素 px):</label>
-                      <input
-                        type="number"
-                        value={customHeightPx}
-                        onChange={(e) => setCustomHeightPx(Math.max(50, Number(e.target.value)))}
-                        className="w-full px-3 py-1.5 bg-white border border-stone-300 rounded-lg font-mono text-stone-800"
-                      />
+
+                    {/* Width / Lock / Swap / Height Row */}
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
+                      <div className="sm:col-span-5">
+                        <label className="block text-stone-600 font-semibold mb-1">
+                          宽度 ({customUnit === 'px' ? '像素 px' : '毫米 mm'})
+                        </label>
+                        <input
+                          type="number"
+                          min={customUnit === 'px' ? 40 : 4}
+                          max={customUnit === 'px' ? 4000 : 300}
+                          step={customUnit === 'px' ? 1 : 0.5}
+                          value={customWidthInput}
+                          onChange={(e) => handleCustomWidthChange(e.target.value)}
+                          onBlur={handleCustomInputBlur}
+                          placeholder={customUnit === 'px' ? '如 190' : '如 16.1'}
+                          className="w-full px-3 py-2 bg-white border border-stone-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none rounded-lg font-mono font-bold text-stone-900"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-2 flex items-center justify-center gap-1.5 pb-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setLockCustomAspect((v) => !v)}
+                          className={`p-2 rounded-lg border transition-colors cursor-pointer ${
+                            lockCustomAspect
+                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                              : 'bg-white text-stone-600 border-stone-300 hover:bg-stone-100'
+                          }`}
+                          title={lockCustomAspect ? '已锁定宽高比（点击解锁）' : '点击锁定当前宽高比'}
+                        >
+                          {lockCustomAspect ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSwapCustomDimensions}
+                          className="p-2 rounded-lg border bg-white text-stone-600 border-stone-300 hover:bg-stone-100 transition-colors cursor-pointer"
+                          title="一键互换宽和高"
+                        >
+                          <ArrowLeftRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="sm:col-span-5">
+                        <label className="block text-stone-600 font-semibold mb-1">
+                          高度 ({customUnit === 'px' ? '像素 px' : '毫米 mm'})
+                        </label>
+                        <input
+                          type="number"
+                          min={customUnit === 'px' ? 40 : 4}
+                          max={customUnit === 'px' ? 4000 : 300}
+                          step={customUnit === 'px' ? 1 : 0.5}
+                          value={customHeightInput}
+                          onChange={(e) => handleCustomHeightChange(e.target.value)}
+                          onBlur={handleCustomInputBlur}
+                          placeholder={customUnit === 'px' ? '如 260' : '如 22.0'}
+                          className="w-full px-3 py-2 bg-white border border-stone-300 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none rounded-lg font-mono font-bold text-stone-900"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Live Conversion Summary */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-500 bg-white px-3 py-2 rounded-lg border border-stone-200/80">
+                      <span>
+                        实际输出像素：<strong className="font-mono text-stone-900">{targetWidthPx} × {targetHeightPx} px</strong>
+                      </span>
+                      <span>
+                        对应冲印尺寸：<strong className="font-mono text-stone-700">{displayWidthMm} × {displayHeightMm} mm</strong> ({displayDpi} DPI)
+                      </span>
+                      <span>
+                        宽高比：<strong className="font-mono text-stone-700">{(targetWidthPx / targetHeightPx).toFixed(2)} : 1</strong>
+                      </span>
+                    </div>
+
+                    {/* Quick Custom Size Templates */}
+                    <div className="space-y-1.5">
+                      <span className="text-[11px] font-semibold text-stone-600">常用报名自定义像素快捷填入：</span>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                        {QUICK_CUSTOM_SIZE_TEMPLATES.map((tpl) => {
+                          const isMatch =
+                            targetWidthPx === tpl.widthPx && targetHeightPx === tpl.heightPx;
+                          return (
+                            <button
+                              key={tpl.id}
+                              type="button"
+                              onClick={() => handleApplyQuickCustomTemplate(tpl)}
+                              className={`px-2.5 py-1.5 rounded-lg border text-left transition-all cursor-pointer ${
+                                isMatch
+                                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                                  : 'bg-white hover:bg-indigo-50/70 border-stone-200 text-stone-700'
+                              }`}
+                            >
+                              <div className="text-[11px] font-bold truncate">{tpl.label}</div>
+                              <div className={`text-[10px] truncate ${isMatch ? 'text-indigo-100' : 'text-stone-400'}`}>
+                                {tpl.note}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2097,7 +2580,7 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
                     </h3>
                   </div>
                   <p className="text-[11px] text-stone-500 font-mono mt-0.5">
-                    {targetWidthPx} × {targetHeightPx} px @ 300 DPI
+                    {targetWidthPx} × {targetHeightPx} px ({displayWidthMm}×{displayHeightMm}mm @ {displayDpi} DPI)
                   </p>
                 </div>
 
@@ -2443,81 +2926,351 @@ export const IdPhotoMaker: React.FC<IdPhotoMakerProps> = ({
               </div>
             )}
 
-            {/* File Size Constraint (Exam & System Submission) */}
-            <div className="space-y-1.5 pt-1">
-              <div className="flex items-center justify-between text-xs">
+            {/* File Size Constraint (Exam & System Submission — Supports Custom Min/Max KB Range) */}
+            <div className="space-y-2 pt-1">
+              <div className="flex items-center justify-between text-xs gap-2 flex-wrap">
                 <span className="font-bold text-stone-700">报名系统文件大小达标限制:</span>
                 <span className="text-[11px] font-mono text-indigo-600 font-bold">
-                  {fileSizeLimitKb === 0 ? '无限制 (最佳画质)' : `严格压缩至 ≤ ${fileSizeLimitKb} KB`}
+                  {fileSizeLimitKb === 0 && fileSizeMinKb === 0
+                    ? '无限制 (最佳画质)'
+                    : fileSizeMinKb > 0 && fileSizeLimitKb > 0
+                    ? `精准控制 ${fileSizeMinKb}~${fileSizeLimitKb} KB (<${fileSizeLimitKb}K)`
+                    : fileSizeLimitKb > 0
+                    ? `严格小于 ${fileSizeLimitKb} KB`
+                    : `不小于 ${fileSizeMinKb} KB`}
                 </span>
               </div>
-              <div className="grid grid-cols-5 gap-1.5">
+
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
                 {[
-                  { kb: 0, label: '无限制' },
-                  { kb: 20, label: '≤20KB' },
-                  { kb: 50, label: '≤50KB' },
-                  { kb: 100, label: '≤100KB' },
-                  { kb: 200, label: '≤200KB' },
-                ].map((lim) => (
-                  <button
-                    key={lim.kb}
-                    type="button"
-                    onClick={() => {
-                      setFileSizeLimitKb(lim.kb);
-                      if (lim.kb > 0 && exportFormat !== 'jpg') {
-                        setExportFormat('jpg');
-                      }
-                    }}
-                    className={`py-1.5 text-xs font-bold rounded-lg border transition-all cursor-pointer ${
-                      fileSizeLimitKb === lim.kb
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
-                        : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
-                    }`}
-                  >
-                    {lim.label}
-                  </button>
-                ))}
+                  { min: 0, max: 0, label: '无限制' },
+                  { min: 15, max: 20, label: '15-20KB' },
+                  { min: 0, max: 20, label: '<20KB' },
+                  { min: 0, max: 50, label: '≤50KB' },
+                  { min: 0, max: 100, label: '≤100KB' },
+                ].map((lim) => {
+                  const isActive =
+                    !showCustomKbInputs &&
+                    fileSizeLimitKb === lim.max &&
+                    fileSizeMinKb === lim.min;
+                  return (
+                    <button
+                      key={`${lim.min}-${lim.max}`}
+                      type="button"
+                      onClick={() => {
+                        setFileSizeMinKb(lim.min);
+                        setFileSizeLimitKb(lim.max);
+                        setShowCustomKbInputs(false);
+                        if (lim.max > 0 && exportFormat !== 'jpg') {
+                          setExportFormat('jpg');
+                        }
+                      }}
+                      className={`py-1.5 px-1 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                        isActive
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs'
+                          : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                      }`}
+                    >
+                      {lim.label}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCustomKbInputs((v) => !v);
+                    if (exportFormat !== 'jpg') setExportFormat('jpg');
+                  }}
+                  className={`py-1.5 px-1 text-[11px] font-bold rounded-lg border transition-all cursor-pointer ${
+                    showCustomKbInputs
+                      ? 'bg-stone-900 text-white border-stone-900 shadow-2xs'
+                      : 'bg-stone-50 text-stone-700 border-stone-200 hover:bg-stone-100'
+                  }`}
+                >
+                  自定义KB
+                </button>
               </div>
-              <p className="text-[11px] text-stone-400 leading-normal">
-                {fileSizeLimitKb > 0
-                  ? `💡 系统将采用智能二分法压缩，严格保证文件不超过 ${fileSizeLimitKb}KB，满足公考/考研/报名系统验证！`
-                  : '💡 默认无体积限制，输出最高品质与最清晰发丝细节'}
-              </p>
+
+              {/* Custom Min / Max KB Range Inputs */}
+              {(showCustomKbInputs || (fileSizeMinKb > 0 && fileSizeLimitKb > 0)) && (
+                <div className="p-2.5 bg-indigo-50/50 border border-indigo-200/80 rounded-xl grid grid-cols-2 gap-2.5 text-xs">
+                  <div>
+                    <label className="block text-[11px] text-stone-600 font-medium mb-1">
+                      建议最小体积 (KB，0=不限)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={2000}
+                      value={fileSizeMinKb}
+                      onChange={(e) => {
+                        const val = Math.max(0, Math.min(2000, Number(e.target.value) || 0));
+                        setFileSizeMinKb(val);
+                        if (val > 0 && exportFormat !== 'jpg') setExportFormat('jpg');
+                      }}
+                      className="w-full px-2.5 py-1.5 bg-white border border-stone-300 rounded-lg font-mono font-bold text-stone-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-stone-600 font-medium mb-1">
+                      严格上限体积 (KB，0=不限)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5000}
+                      value={fileSizeLimitKb}
+                      onChange={(e) => {
+                        const val = Math.max(0, Math.min(5000, Number(e.target.value) || 0));
+                        setFileSizeLimitKb(val);
+                        if (val > 0 && exportFormat !== 'jpg') setExportFormat('jpg');
+                      }}
+                      className="w-full px-2.5 py-1.5 bg-white border border-stone-300 rounded-lg font-mono font-bold text-stone-800"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Real-time estimated output file size */}
+              {estimatedOutput && (
+                <div
+                  className={`px-3 py-2 rounded-xl border text-[11px] flex items-center justify-between gap-2 ${
+                    estimatedOutput.withinLimit
+                      ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
+                      : 'bg-amber-50/80 border-amber-200 text-amber-900'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 font-semibold">
+                    {estimatedOutput.withinLimit ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    )}
+                    <span>
+                      预计导出 ({estimatedOutput.width}×{estimatedOutput.height} px ·{' '}
+                      {(currentColor.type === 'transparent' ? 'PNG' : exportFormat.toUpperCase())})：
+                    </span>
+                  </div>
+                  <span className="font-mono font-bold shrink-0">
+                    {(estimatedOutput.sizeBytes / 1024).toFixed(1)} KB
+                    {fileSizeLimitKb > 0 && (estimatedOutput.withinLimit ? ' ✓ 达标' : ' ⚠ 超出上限')}
+                  </span>
+                </div>
+              )}
             </div>
+
+            {/* Custom Filename Input (Supports 18-digit Chinese ID Card Naming with Auto Uppercase X) */}
+            {(() => {
+              const idCheck = validateChineseIdNumber(customFileName);
+              const extPreview = currentColor.type === 'transparent' ? 'png' : exportFormat;
+              return (
+                <div className="space-y-1.5 pt-2 border-t border-stone-100">
+                  <div className="flex items-center justify-between text-xs gap-2">
+                    <label className="font-bold text-stone-700 flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-stone-500" />
+                      <span>导出文件命名（支持 18 位身份证号）</span>
+                    </label>
+                    <label className="flex items-center gap-1 text-[11px] text-stone-500 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoUpperIdX}
+                        onChange={(e) => {
+                          setAutoUpperIdX(e.target.checked);
+                          if (e.target.checked && customFileName) {
+                            setCustomFileName(sanitizeIdPhotoFileName(customFileName, true));
+                          }
+                        }}
+                        className="rounded text-indigo-600 w-3.5 h-3.5 cursor-pointer"
+                      />
+                      <span>字母 X 自动大写</span>
+                    </label>
+                  </div>
+
+                  <div className="flex items-center rounded-xl border border-stone-300 bg-white overflow-hidden focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20">
+                    <input
+                      type="text"
+                      value={customFileName}
+                      onChange={(e) => {
+                        const nextVal = autoUpperIdX
+                          ? sanitizeIdPhotoFileName(e.target.value, true)
+                          : e.target.value.replace(/[\\/:*?"<>|]/g, '');
+                        setCustomFileName(nextVal);
+                      }}
+                      placeholder="输入本人18位身份证号（如 11010119990101123X）或留空"
+                      className="flex-1 px-3 py-2 text-xs font-mono text-stone-900 outline-none bg-transparent min-w-0"
+                    />
+                    <span className="px-2.5 py-2 bg-stone-100 text-stone-500 font-mono text-xs font-bold border-l border-stone-200 shrink-0">
+                      .{extPreview}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] gap-2">
+                    <span
+                      className={
+                        idCheck.status === 'valid-id'
+                          ? 'text-emerald-700 font-semibold'
+                          : idCheck.status === 'invalid-checksum'
+                          ? 'text-amber-700 font-semibold'
+                          : 'text-stone-400'
+                      }
+                    >
+                      {idCheck.status === 'valid-id' && '✓ '}
+                      {idCheck.status === 'invalid-checksum' && '⚠ '}
+                      {idCheck.message}
+                    </span>
+                    {customFileName && (
+                      <button
+                        type="button"
+                        onClick={() => setCustomFileName('')}
+                        className="text-stone-400 hover:text-stone-700 shrink-0 cursor-pointer"
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Submission Spec Compliance Checklist (Shown when 190x260 / skill-exam / <=20KB is active) */}
+            {(selectedPresetKey === 'skill-exam' ||
+              (targetWidthPx === 190 && targetHeightPx === 260) ||
+              (fileSizeLimitKb > 0 && fileSizeLimitKb <= 20)) &&
+              (() => {
+                const isJpgOk = currentColor.type !== 'transparent' && exportFormat === 'jpg';
+                const isBgWhiteOrLightBlue =
+                  !useOriginalOnly &&
+                  (selectedColorId === 'white' ||
+                    selectedColorId === 'blue-light' ||
+                    selectedColorId === 'blue-sky');
+                const isSizeOk = estimatedOutput
+                  ? estimatedOutput.sizeBytes < 20000 &&
+                    (fileSizeMinKb <= 0 || estimatedOutput.sizeBytes >= fileSizeMinKb * 1000)
+                  : fileSizeLimitKb > 0 && fileSizeLimitKb <= 20;
+                const idCheck = validateChineseIdNumber(customFileName);
+                const isIdNamed = idCheck.status === 'valid-id';
+
+                return (
+                  <div className="p-3 rounded-xl bg-stone-50 border border-stone-200/90 space-y-2 text-[11px]">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-stone-800 flex items-center gap-1.5">
+                        <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>材料提交规范自检</span>
+                      </span>
+                      <span className="text-[10px] text-stone-400">不可微信转发原图</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <div className={`px-2 py-1 rounded-lg border flex items-center gap-1.5 ${isJpgOk ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                        <span>{isJpgOk ? '✓' : '⚠'}</span>
+                        <span>格式：{isJpgOk ? 'JPG 已就绪' : '请选 JPG'}</span>
+                      </div>
+                      <div className={`px-2 py-1 rounded-lg border flex items-center gap-1.5 ${isSizeOk ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                        <span>{isSizeOk ? '✓' : '⚠'}</span>
+                        <span>
+                          体积：{estimatedOutput ? `${(estimatedOutput.sizeBytes / 1024).toFixed(1)}KB` : `${fileSizeMinKb || 0}-${fileSizeLimitKb}KB`}
+                        </span>
+                      </div>
+                      <div className={`px-2 py-1 rounded-lg border flex items-center justify-between gap-1 col-span-2 ${isBgWhiteOrLightBlue ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
+                        <span>
+                          {isBgWhiteOrLightBlue ? '✓' : '⚠'} 背景：{useOriginalOnly ? '当前为原图背景' : currentColor.name}
+                          {!isBgWhiteOrLightBlue && '（需纯白或浅蓝底）'}
+                        </span>
+                        {!isBgWhiteOrLightBlue && !useOriginalOnly && (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedColorId('white')}
+                              className="px-1.5 py-0.5 rounded bg-white border border-stone-300 text-[10px] font-bold text-stone-800 hover:bg-stone-100 cursor-pointer"
+                            >
+                              纯白底
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedColorId('blue-light')}
+                              className="px-1.5 py-0.5 rounded bg-sky-100 border border-sky-300 text-[10px] font-bold text-sky-900 hover:bg-sky-200 cursor-pointer"
+                            >
+                              浅蓝底
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <div className={`px-2 py-1 rounded-lg border flex items-center gap-1.5 col-span-2 ${isIdNamed ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800' : 'bg-white border-stone-200 text-stone-600'}`}>
+                        <span>{isIdNamed ? '✓' : 'ℹ'}</span>
+                        <span className="truncate">
+                          文件名：{customFileName ? `${sanitizeIdPhotoFileName(customFileName, autoUpperIdX)}.${currentColor.type === 'transparent' ? 'png' : exportFormat}` : '建议上方填入18位身份证号（X大写）'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
             {/* Action Buttons */}
             <div className="space-y-2.5 pt-2 border-t border-stone-100">
-              {/* Primary Download: Smart Ultra-HD Download Button */}
-              <button
-                type="button"
-                onClick={() => handleDownloadSinglePhoto(2)}
-                className={`w-full py-3.5 px-4 rounded-xl text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-[0.99] ${
-                  useOriginalOnly
-                    ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-stone-900 hover:from-blue-700 hover:to-stone-950'
-                    : 'bg-gradient-to-r from-amber-600 via-orange-600 to-indigo-700 hover:from-amber-700 hover:to-indigo-800'
-                }`}
-              >
-                <Zap className="w-4 h-4 fill-amber-200 text-amber-200" />
-                <span>
-                  {useOriginalOnly
-                    ? `⚡ 导出「${currentSpec.name}」原图超清剪裁照 (600DPI • ${targetWidthPx * 2}×${targetHeightPx * 2} px)`
-                    : `⚡ 智能超清下载 (推荐 600DPI • ${targetWidthPx * 2}×${targetHeightPx * 2} px)`}
-                </span>
-              </button>
+              {isExactPixelMode ? (
+                <>
+                  {/* Primary Download: Strict Exact Pixel Size & KB Compliance */}
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadSinglePhoto(1)}
+                    className="w-full py-3.5 px-4 rounded-xl text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-[0.99] bg-gradient-to-r from-indigo-600 via-blue-600 to-stone-900 hover:from-indigo-700 hover:to-stone-950"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>
+                      精确尺寸导出 ({targetWidthPx}×{targetHeightPx} px ·{' '}
+                      {(currentColor.type === 'transparent' ? 'PNG' : exportFormat.toUpperCase())}
+                      {estimatedOutput ? ` · ${(estimatedOutput.sizeBytes / 1024).toFixed(1)}KB` : ''})
+                    </span>
+                  </button>
 
-              {/* Secondary Download: Exact Selected DPI/Size */}
-              <button
-                type="button"
-                onClick={() => handleDownloadSinglePhoto(1)}
-                className="w-full py-2.5 px-4 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-2 border border-stone-200 transition-all cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5 text-stone-600" />
-                <span>
-                  {useOriginalOnly
-                    ? `下载标准规范原图照 (${currentSpec.name} • 300DPI 规范 • ${targetWidthPx}×${targetHeightPx} px)`
-                    : `下载当前设定规格 (${currentSpec.name} • ${currentColor.name} • ${clarityConfig.exportDpiMultiplier * 300}DPI)`}
-                </span>
-              </button>
+                  {/* Secondary Download: 2x Ultra-HD Backup */}
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadSinglePhoto(2)}
+                    className="w-full py-2.5 px-4 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-2 border border-stone-200 transition-all cursor-pointer"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-amber-600" />
+                    <span>
+                      导出 2倍超清备用版 ({targetWidthPx * 2}×{targetHeightPx * 2} px @ {displayDpi * 2}DPI)
+                    </span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  {/* Primary Download: Smart Ultra-HD Download Button */}
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadSinglePhoto(2)}
+                    className={`w-full py-3.5 px-4 rounded-xl text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-[0.99] ${
+                      useOriginalOnly
+                        ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-stone-900 hover:from-blue-700 hover:to-stone-950'
+                        : 'bg-gradient-to-r from-amber-600 via-orange-600 to-indigo-700 hover:from-amber-700 hover:to-indigo-800'
+                    }`}
+                  >
+                    <Zap className="w-4 h-4 fill-amber-200 text-amber-200" />
+                    <span>
+                      {useOriginalOnly
+                        ? `⚡ 导出「${currentSpec.name}」原图超清剪裁照 (600DPI • ${targetWidthPx * 2}×${targetHeightPx * 2} px)`
+                        : `⚡ 智能超清下载 (推荐 600DPI • ${targetWidthPx * 2}×${targetHeightPx * 2} px)`}
+                    </span>
+                  </button>
+
+                  {/* Secondary Download: Exact Standard 300DPI */}
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadSinglePhoto(1)}
+                    className="w-full py-2.5 px-4 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-xs flex items-center justify-center gap-2 border border-stone-200 transition-all cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5 text-stone-600" />
+                    <span>
+                      {useOriginalOnly
+                        ? `下载标准规范原图照 (${currentSpec.name} • 300DPI 规范 • ${targetWidthPx}×${targetHeightPx} px)`
+                        : `下载标准规范尺寸 (${currentSpec.name} • ${targetWidthPx}×${targetHeightPx} px • 300DPI)`}
+                    </span>
+                  </button>
+                </>
+              )}
 
               <div className="grid grid-cols-2 gap-2">
                 <button
